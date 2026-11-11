@@ -359,8 +359,8 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         return try ipaScanner.scan(ipaURL: url)
     }
     
-    /// Discovers readable installed `.app` bundles and user-imported `.ipa`/`.app` packages in Documents.
-    private func discoverAccessibleTargets() -> (targets: [URL], permissionDeniedCount: Int) {
+    /// Discovers readable self-signed/sideloaded `.app` bundles and `.ipa`/`.app` packages in Documents & bookmarked signing folders.
+    private func discoverAccessibleTargets(additionalLocations: [URL] = []) -> (targets: [URL], permissionDeniedCount: Int) {
         var targets: [URL] = []
         var seenCanonicalPaths: Set<String> = []
         var permissionDeniedCount = 0
@@ -372,9 +372,32 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         let selfBundleCanonical = ""
         #endif
         
-        func appendUnique(_ url: URL) {
+        func isSelfSignedOrSideloadedBundle(_ appURL: URL) -> Bool {
+            // Check embedded.mobileprovision first (present on all developer/personal self-signed & enterprise apps)
+            let provURL = appURL.appendingPathComponent("embedded.mobileprovision")
+            if fm.fileExists(atPath: provURL.path) {
+                return true
+            }
+            // Or check Info.plist executable cryptid == 0 (unencrypted sideloaded app)
+            let infoURL = appURL.appendingPathComponent("Info.plist")
+            if let pData = try? Data(contentsOf: infoURL),
+               let dict = (try? PropertyListSerialization.propertyList(from: pData, options: [], format: nil)) as? [String: Any],
+               let execName = dict["CFBundleExecutable"] as? String {
+                let execURL = appURL.appendingPathComponent(execName)
+                if let binData = try? Data(contentsOf: execURL, options: .mappedIfSafe),
+                   let macho = try? MachOParser.shared.parse(data: binData) {
+                    return macho.cryptid == 0
+                }
+            }
+            return false
+        }
+        
+        func appendUnique(_ url: URL, requireSelfSignedCheck: Bool = false) {
             let canonical = url.resolvingSymlinksInPath().path
             guard !canonical.isEmpty, canonical != selfBundleCanonical else { return }
+            if requireSelfSignedCheck && url.pathExtension.lowercased() == "app" {
+                guard isSelfSignedOrSideloadedBundle(url) else { return }
+            }
             if seenCanonicalPaths.insert(canonical).inserted {
                 targets.append(url)
             }
@@ -383,9 +406,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         let searchRoots: [String] = [
             "/var/containers/Bundle/Application",
             "/private/var/containers/Bundle/Application",
-            "/var/mobile/Containers/Bundle/Application",
-            "/Applications",
-            "/System/Applications"
+            "/var/mobile/Containers/Bundle/Application"
         ]
         
         for root in searchRoots {
@@ -394,11 +415,11 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                 let contents = try fm.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey])
                 for item in contents {
                     if item.pathExtension.lowercased() == "app" {
-                        appendUnique(item)
+                        appendUnique(item, requireSelfSignedCheck: true)
                     } else if item.hasDirectoryPath {
                         if let subContents = try? fm.contentsOfDirectory(at: item, includingPropertiesForKeys: nil) {
                             for sub in subContents where sub.pathExtension.lowercased() == "app" {
-                                appendUnique(sub)
+                                appendUnique(sub, requireSelfSignedCheck: true)
                             }
                         }
                     }
@@ -413,26 +434,44 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             }
         }
         
-        #if os(iOS)
-        // Also inspect WQGuard's own Documents & Documents/Inbox folders (populated via Files app / AirDrop / Open-In)
-        if let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first,
-           let enumerator = fm.enumerator(at: docsURL, includingPropertiesForKeys: [.isDirectoryKey]) {
+        func scanUserDirectory(_ dirURL: URL) {
+            var isDir: ObjCBool = false
+            let ext = dirURL.pathExtension.lowercased()
+            if ext == "ipa" || ext == "app" {
+                appendUnique(dirURL, requireSelfSignedCheck: false)
+                return
+            }
+            guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue,
+                  let enumerator = fm.enumerator(at: dirURL, includingPropertiesForKeys: [.isDirectoryKey]) else {
+                return
+            }
             while let fileURL = enumerator.nextObject() as? URL {
-                let ext = fileURL.pathExtension.lowercased()
-                if ext == "ipa" {
-                    appendUnique(fileURL)
-                } else if ext == "app" {
-                    appendUnique(fileURL)
+                let fExt = fileURL.pathExtension.lowercased()
+                if fExt == "ipa" {
+                    appendUnique(fileURL, requireSelfSignedCheck: false)
+                } else if fExt == "app" {
+                    appendUnique(fileURL, requireSelfSignedCheck: false)
                     enumerator.skipDescendants()
                 }
             }
         }
+        
+        #if os(iOS)
+        // Inspect WQGuard's own Documents & Documents/Inbox folders
+        if let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+            scanUserDirectory(docsURL)
+        }
         #endif
+        
+        // Inspect any user-authorized signing tool directories (e.g. SideStore / AltStore / Feather / Downloads)
+        for loc in additionalLocations {
+            scanUserDirectory(loc)
+        }
         
         return (targets, permissionDeniedCount)
     }
     
-    /// Scans all installed applications across accessible system directories.
+    /// Scans all installed self-signed applications across accessible directories.
     public func scanInstalledApps() throws -> [ScanFinding] {
         let discovery = discoverAccessibleTargets()
         #if os(iOS)
@@ -475,12 +514,13 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
     
     // MARK: - Asynchronous Non-Blocking APIs with Progress Callbacks
     
-    /// Asynchronously scans installed applications with live progress updates.
+    /// Asynchronously scans self-signed / sideloaded applications with live progress updates.
     public func scanInstalledAppsAsync(
+        additionalLocations: [URL] = [],
         progressHandler: (@Sendable (ScanProgress) -> Void)? = nil
     ) async throws -> [ScanFinding] {
         return try await Task.detached(priority: .userInitiated) { [self] in
-            let discovery = self.discoverAccessibleTargets()
+            let discovery = self.discoverAccessibleTargets(additionalLocations: additionalLocations)
             #if os(iOS)
             if discovery.targets.isEmpty && discovery.permissionDeniedCount > 0 {
                 throw SecurityPipelineError.sandboxRestrictedNoAccessibleTargets

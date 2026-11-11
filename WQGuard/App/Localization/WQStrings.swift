@@ -32,14 +32,9 @@ public enum WQStrings {
 
     // MARK: - Dashboard Overview
     public static var appTitle: String { localized("app_title", en: "WQGuard", zh: "WQGuard 容器守卫") }
-    public static var defaultUploadIPAScan: String { localized("default_upload_ipa_scan", en: "Upload / Import IPA for Audit", zh: "上传 / 导入 IPA 安装包检测") }
-    public static var defaultUploadIPAScanSub: String { localized("default_upload_ipa_scan_sub", en: "Supports single/batch .ipa files or folders (Default Safe Mode)", zh: "支持单选/多选 .ipa 或整个文件夹 · 默认安全模式") }
-    public static var startSystemScan: String { localized("start_system_scan", en: "Scan Installed Apps (Full System)", zh: "开始全盘已安装软件扫描") }
-    public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Batch Audit IPAs / Folder", zh: "上传 / 批量导入 IPA 检测") }
-    public static var fullScanToggleTitle: String { localized("full_scan_toggle_title", en: "Full Installed-App Scan", zh: "全盘已安装软件扫描") }
-    public static var fullScanToggleSubOff: String { localized("full_scan_toggle_sub_off", en: "Disabled by default · Requires reading risk & security notice", zh: "默认关闭 · 开启前需阅读风险告知与安全须知") }
-    public static var fullScanToggleSubOn: String { localized("full_scan_toggle_sub_on", en: "Enabled · Cross-directory installed app enumeration active", zh: "已授权开启 · 允许执行跨目录已安装软件扫描") }
-    public static var fullScanBadgeRisk: String { localized("full_scan_badge_risk", en: "Advanced", zh: "需确认风险") }
+    public static var startSystemScan: String { localized("start_system_scan", en: "Scan Self-Signed Apps", zh: "一键扫描自签应用") }
+    public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "Scans sideloaded/self-signed apps & authorized signing directories", zh: "专门针对个人自签与企业侧载应用（自动过滤系统与 App Store 应用）") }
+    public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Select Signing Folder / Import IPAs", zh: "绑定自签工具目录 / 导入 IPA") }
     public static var scanningInProgress: String { localized("scanning_in_progress", en: "Deep analysis in progress...", zh: "正在深度分析...") }
     public static var cancelScan: String { localized("cancel_scan", en: "Cancel Scan", zh: "取消全盘扫描") }
     public static var metricsSummary: String { localized("metrics_summary", en: "Audit Summary", zh: "审计统计概览") }
@@ -80,12 +75,9 @@ public enum WQStrings {
 
     public static func posturePendingSubtitle(exposedCount: Int, isFullScanEnabled: Bool = false) -> String {
         if exposedCount > 0 {
-            if isFullScanEnabled {
-                return localized("posture_pending_cve_full_sub", en: "Unpatched firmware CVEs detected. Run installed-app scan or upload sideloaded IPAs.", zh: "当前 iOS 存在未修补系统漏洞。可执行全盘已安装软件扫描或上传本地 IPA 审查。")
-            }
-            return localized("posture_pending_cve_sub", en: "Unpatched firmware CVEs detected. Upload local sideloaded IPAs below for pre-install inspection.", zh: "当前 iOS 存在未修补系统漏洞。默认请上传本地侧载 IPA 安装包进行安装前安全检测。")
+            return localized("posture_pending_cve_sub", en: "Unpatched firmware CVEs detected. Tap below to scan self-signed apps or import local IPAs.", zh: "当前 iOS 存在未修补系统漏洞。请点击下方扫描自签应用或绑定签名工具目录（Feather / SideStore / AltStore 等）。")
         }
-        return localized("posture_pending_clean_sub", en: "Upload local IPA archives below to start 4-layer static security inspection.", zh: "请点击下方按钮上传本地 IPA 安装包，启动 4 层静态反编译安全检测。")
+        return localized("posture_pending_clean_sub", en: "Tap below to scan self-signed apps or import local IPA packages.", zh: "请点击下方按钮扫描自签应用或导入本地 IPA 安装包。")
     }
 
     public static func postureTitle(for posture: RiskTier, isScanning: Bool) -> String {

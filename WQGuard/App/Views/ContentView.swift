@@ -59,9 +59,6 @@ public struct ContentView: View {
             .tag(4)
         }
         .tint(Color(red: 0.0, green: 0.78, blue: 0.65)) // Security Teal
-        .sheet(isPresented: $vm.showFullScanConsentSheet) {
-            FullScanConsentSheet()
-        }
         .alert(
             WQStrings.alertScanTitle,
             isPresented: $vm.showGlobalAlert,

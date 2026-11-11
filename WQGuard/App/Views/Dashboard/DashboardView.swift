@@ -25,11 +25,10 @@ public struct DashboardView: View {
                     isScanning: vm.isScanning,
                     progress: vm.scanProgress,
                     hasScannedApps: vm.hasScannedApps,
-                    exposedCVECount: vm.firmwareReport.exposedCount,
-                    isFullScanEnabled: vm.isFullSystemScanEnabled
+                    exposedCVECount: vm.firmwareReport.exposedCount
                 )
 
-                // 2. Primary Default Action (Upload IPA) + Opt-In Full System Scan Switch
+                // 2. Self-Signed Application Scan & Signing Folder Binding Actions
                 VStack(spacing: 12) {
                     if vm.isScanning {
                         ScanProgressBar(progress: vm.scanProgress)
@@ -44,21 +43,20 @@ public struct DashboardView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 14))
                         }
                     } else {
-                        // Default Primary Mode: Upload / Import IPA Package(s)
                         Button(action: {
                             #if os(iOS)
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                             #endif
-                            showBatchIPAPicker = true
+                            vm.startSystemScan()
                         }) {
                             VStack(spacing: 4) {
                                 HStack(spacing: 8) {
-                                    Image(systemName: "arrow.up.doc.on.clipboard")
+                                    Image(systemName: "play.shield.fill")
                                         .font(.title3.bold())
-                                    Text(WQStrings.defaultUploadIPAScan)
+                                    Text(WQStrings.startSystemScan)
                                         .font(.headline.bold())
                                 }
-                                Text(WQStrings.defaultUploadIPAScanSub)
+                                Text(WQStrings.startSystemScanSub)
                                     .font(.caption2)
                                     .opacity(0.85)
                             }
@@ -76,68 +74,34 @@ public struct DashboardView: View {
                             .shadow(color: Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.35), radius: 8, y: 4)
                         }
 
-                        // Opt-In Switch Card for Full Installed-App Scan
-                        VStack(spacing: 12) {
-                            Toggle(isOn: Binding(
-                                get: { vm.isFullSystemScanEnabled },
-                                set: { vm.requestToggleFullSystemScan($0) }
-                            )) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: vm.isFullSystemScanEnabled ? "exclamationmark.shield.fill" : "lock.shield")
-                                            .foregroundColor(vm.isFullSystemScanEnabled ? .orange : .gray)
-                                        Text(WQStrings.fullScanToggleTitle)
-                                            .font(.subheadline.bold())
-                                            .foregroundColor(.white)
-                                        Text(WQStrings.fullScanBadgeRisk)
-                                            .font(.system(size: 10, weight: .bold))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.orange.opacity(0.2))
-                                            .foregroundColor(.orange)
-                                            .clipShape(Capsule())
-                                    }
-                                    Text(vm.isFullSystemScanEnabled ? WQStrings.fullScanToggleSubOn : WQStrings.fullScanToggleSubOff)
+                        Button(action: {
+                            #if os(iOS)
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            #endif
+                            vm.showSideloadPickerFromDashboard = true
+                        }) {
+                            HStack {
+                                Image(systemName: "folder.fill.badge.plus")
+                                    .font(.headline)
+                                Text(WQStrings.batchImportIPAButton)
+                                    .font(.subheadline.bold())
+                                if !vm.bookmarkedFolderNames.isEmpty {
+                                    Text("(\(vm.bookmarkedFolderNames.joined(separator: ", ")))")
                                         .font(.caption2)
                                         .foregroundColor(.gray)
+                                        .lineLimit(1)
                                 }
                             }
-                            .tint(.orange)
-
-                            if vm.isFullSystemScanEnabled {
-                                Button(action: {
-                                    #if os(iOS)
-                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                    #endif
-                                    vm.startSystemScan()
-                                }) {
-                                    HStack {
-                                        Image(systemName: "play.shield.fill")
-                                            .font(.headline)
-                                        Text(WQStrings.startSystemScan)
-                                            .font(.subheadline.bold())
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 13)
-                                    .background(Color.orange.opacity(0.18))
-                                    .foregroundColor(.orange)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .stroke(Color.orange.opacity(0.55), lineWidth: 1)
-                                    )
-                                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                                }
-                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color(red: 0.13, green: 0.15, blue: 0.20))
+                            .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.4), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
                         }
-                        .padding(14)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(Color(red: 0.10, green: 0.11, blue: 0.15))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 16)
-                                        .stroke(vm.isFullSystemScanEnabled ? Color.orange.opacity(0.45) : Color.white.opacity(0.1), lineWidth: 1)
-                                )
-                        )
                     }
                 }
                 .padding(.horizontal)
@@ -220,8 +184,8 @@ public struct DashboardView: View {
             ReportExportView()
         }
         .fileImporter(
-            isPresented: $showBatchIPAPicker,
-            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive, .archive, .folder],
+            isPresented: $vm.showSideloadPickerFromDashboard,
+            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive, .archive, .folder, .package],
             allowsMultipleSelection: true
         ) { result in
             switch result {

@@ -53,10 +53,10 @@ public final class ScanViewModel: ObservableObject {
     @Published public var surgeModuleExportURL: URL?
     @Published public var showSurgeSheet: Bool = false
 
-    // Full System Installed-App Scan Opt-In State (Default: OFF -> Upload IPA Mode)
-    private static let fullScanConsentKey = "wqguard.full_system_scan_enabled.v1"
-    @Published public var isFullSystemScanEnabled: Bool = false
-    @Published public var showFullScanConsentSheet: Bool = false
+    // Persistent Bookmarks for Self-Signed App Directories (Feather / SideStore / AltStore / Downloads)
+    private static let bookmarkedDirsKey = "wqguard.bookmarked_sideload_dirs.v1"
+    @Published public var showSideloadPickerFromDashboard: Bool = false
+    @Published public var bookmarkedFolderNames: [String] = []
 
     // Alert & Error Handling
     @Published public var activeAlertMessage: String?
@@ -69,35 +69,38 @@ public final class ScanViewModel: ObservableObject {
     public init() {
         self.firmwareReport = FirmwarePostureEngine.shared.evaluate()
         self.whitelistedTools = WhitelistEngine.shared.allTools
-        self.isFullSystemScanEnabled = UserDefaults.standard.bool(forKey: Self.fullScanConsentKey)
         self.surgeModuleContent = SurgeBrotliShieldHelper.shared.generateModuleContent()
         self.prepareSurgeExportURL()
+        self.refreshBookmarkedFolderNames()
     }
 
-    // MARK: - Full System Scan Consent Gate
-    public func requestToggleFullSystemScan(_ wantEnable: Bool) {
-        if wantEnable {
-            guard !isFullSystemScanEnabled else { return }
-            // Force SwiftUI Toggle (UISwitch) to remain visually OFF until user confirms in the consent sheet
-            self.objectWillChange.send()
-            isFullSystemScanEnabled = false
-            #if os(iOS)
-            UINotificationFeedbackGenerator().notificationOccurred(.warning)
-            #endif
-            showFullScanConsentSheet = true
-        } else {
-            isFullSystemScanEnabled = false
-            UserDefaults.standard.set(false, forKey: Self.fullScanConsentKey)
+    private func saveDirectoryBookmark(for url: URL) {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return }
+        guard let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else { return }
+        var existing = UserDefaults.standard.array(forKey: Self.bookmarkedDirsKey) as? [Data] ?? []
+        if !existing.contains(data) {
+            existing.append(data)
+            UserDefaults.standard.set(existing, forKey: Self.bookmarkedDirsKey)
+            refreshBookmarkedFolderNames()
         }
     }
 
-    public func confirmEnableFullSystemScan() {
-        isFullSystemScanEnabled = true
-        UserDefaults.standard.set(true, forKey: Self.fullScanConsentKey)
-        showFullScanConsentSheet = false
-        #if os(iOS)
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-        #endif
+    private func resolveBookmarkedDirectories() -> [URL] {
+        let datas = UserDefaults.standard.array(forKey: Self.bookmarkedDirsKey) as? [Data] ?? []
+        var urls: [URL] = []
+        for data in datas {
+            var isStale = false
+            if let url = try? URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale) {
+                urls.append(url)
+            }
+        }
+        return urls
+    }
+
+    private func refreshBookmarkedFolderNames() {
+        let urls = resolveBookmarkedDirectories()
+        self.bookmarkedFolderNames = Array(Set(urls.map { $0.lastPathComponent })).sorted()
     }
 
     // MARK: - Computed Properties
@@ -139,22 +142,25 @@ public final class ScanViewModel: ObservableObject {
     public var safeCount: Int { currentSession?.riskBreakdown[.safe, default: 0] ?? 0 }
     public var totalScannedCount: Int { currentSession?.totalApps ?? 0 }
 
-    // MARK: - System Scan Actions
+    // MARK: - Self-Signed Application Scan Actions
     public func startSystemScan() {
-        guard isFullSystemScanEnabled else {
-            showFullScanConsentSheet = true
-            return
-        }
         guard !isScanning else { return }
         isScanning = true
         scanProgress = ScanProgress(currentTarget: WQStrings.scanEngineInitializing, completedCount: 0, totalCount: 0)
+        let savedDirs = resolveBookmarkedDirectories()
 
         activeScanTask = Task { [weak self] in
             guard let self = self else { return }
             let startTime = Date()
+            let scopedBookmarks = savedDirs.map { ($0, $0.startAccessingSecurityScopedResource()) }
+            defer {
+                for (u, accessed) in scopedBookmarks where accessed {
+                    u.stopAccessingSecurityScopedResource()
+                }
+            }
 
             do {
-                let findings = try await SecurityPipeline.shared.scanInstalledAppsAsync { [weak self] progress in
+                let findings = try await SecurityPipeline.shared.scanInstalledAppsAsync(additionalLocations: savedDirs) { [weak self] progress in
                     guard let strongSelf = self else { return }
                     Task { @MainActor in
                         strongSelf.scanProgress = progress
@@ -165,8 +171,7 @@ public final class ScanViewModel: ObservableObject {
                 guard !findings.isEmpty else {
                     self.isScanning = false
                     self.scanProgress = nil
-                    self.activeAlertMessage = WQStrings.batchIPANoValidTargets
-                    self.showGlobalAlert = true
+                    self.showSideloadPickerFromDashboard = true
                     return
                 }
                 let session = ScanSession(
@@ -183,14 +188,11 @@ public final class ScanViewModel: ObservableObject {
                 #if os(iOS)
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 #endif
-            } catch let pipelineError as SecurityPipelineError {
+            } catch is SecurityPipelineError {
+                // On standard sandboxed sideload with no bound signing folder yet, directly open picker
                 self.isScanning = false
                 self.scanProgress = nil
-                self.activeAlertMessage = pipelineError.localizedDescription
-                self.showGlobalAlert = true
-                #if os(iOS)
-                UINotificationFeedbackGenerator().notificationOccurred(.warning)
-                #endif
+                self.showSideloadPickerFromDashboard = true
             } catch {
                 if Task.isCancelled {
                     self.isScanning = false
@@ -258,6 +260,9 @@ public final class ScanViewModel: ObservableObject {
                         if ext == "ipa" || ext == "app" {
                             addTarget(itemURL)
                         } else if fm.fileExists(atPath: itemURL.path, isDirectory: &isDir), isDir.boolValue {
+                            Task { @MainActor [weak self] in
+                                self?.saveDirectoryBookmark(for: itemURL)
+                            }
                             if let enumerator = fm.enumerator(at: itemURL, includingPropertiesForKeys: [.isDirectoryKey]) {
                                 while let subURL = enumerator.nextObject() as? URL {
                                     let subExt = subURL.pathExtension.lowercased()
