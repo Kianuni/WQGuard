@@ -32,8 +32,14 @@ public enum WQStrings {
 
     // MARK: - Dashboard Overview
     public static var appTitle: String { localized("app_title", en: "WQGuard", zh: "WQGuard 容器守卫") }
-    public static var startSystemScan: String { localized("start_system_scan", en: "Start System Audit", zh: "开始全盘安全检测") }
-    public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Batch Audit IPAs / Folder", zh: "批量导入 IPA / 文件夹检测") }
+    public static var defaultUploadIPAScan: String { localized("default_upload_ipa_scan", en: "Upload / Import IPA for Audit", zh: "上传 / 导入 IPA 安装包检测") }
+    public static var defaultUploadIPAScanSub: String { localized("default_upload_ipa_scan_sub", en: "Supports single/batch .ipa files or folders (Default Safe Mode)", zh: "支持单选/多选 .ipa 或整个文件夹 · 默认安全模式") }
+    public static var startSystemScan: String { localized("start_system_scan", en: "Scan Installed Apps (Full System)", zh: "开始全盘已安装软件扫描") }
+    public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Batch Audit IPAs / Folder", zh: "上传 / 批量导入 IPA 检测") }
+    public static var fullScanToggleTitle: String { localized("full_scan_toggle_title", en: "Full Installed-App Scan", zh: "全盘已安装软件扫描") }
+    public static var fullScanToggleSubOff: String { localized("full_scan_toggle_sub_off", en: "Disabled by default · Requires reading risk & security notice", zh: "默认关闭 · 开启前需阅读风险告知与安全须知") }
+    public static var fullScanToggleSubOn: String { localized("full_scan_toggle_sub_on", en: "Enabled · Cross-directory installed app enumeration active", zh: "已授权开启 · 允许执行跨目录已安装软件扫描") }
+    public static var fullScanBadgeRisk: String { localized("full_scan_badge_risk", en: "Advanced", zh: "需确认风险") }
     public static var scanningInProgress: String { localized("scanning_in_progress", en: "Deep analysis in progress...", zh: "正在深度分析...") }
     public static var cancelScan: String { localized("cancel_scan", en: "Cancel Scan", zh: "取消全盘扫描") }
     public static var metricsSummary: String { localized("metrics_summary", en: "Audit Summary", zh: "审计统计概览") }
@@ -72,11 +78,14 @@ public enum WQStrings {
         return localized("posture_pending_clean_title", en: "Ready · Pending App Audit", zh: "就绪 · 待执行安全检测")
     }
 
-    public static func posturePendingSubtitle(exposedCount: Int) -> String {
+    public static func posturePendingSubtitle(exposedCount: Int, isFullScanEnabled: Bool = false) -> String {
         if exposedCount > 0 {
-            return localized("posture_pending_cve_sub", en: "Unpatched firmware CVEs detected. Run system scan or batch-import sideloaded IPAs for deep inspection.", zh: "当前 iOS 版本存在未修补系统漏洞。请点击全盘检测或批量导入本地 IPA 进行安装前审查。")
+            if isFullScanEnabled {
+                return localized("posture_pending_cve_full_sub", en: "Unpatched firmware CVEs detected. Run installed-app scan or upload sideloaded IPAs.", zh: "当前 iOS 存在未修补系统漏洞。可执行全盘已安装软件扫描或上传本地 IPA 审查。")
+            }
+            return localized("posture_pending_cve_sub", en: "Unpatched firmware CVEs detected. Upload local sideloaded IPAs below for pre-install inspection.", zh: "当前 iOS 存在未修补系统漏洞。默认请上传本地侧载 IPA 安装包进行安装前安全检测。")
         }
-        return localized("posture_pending_clean_sub", en: "Tap Start System Audit or Batch Import IPAs below to run 4-layer static inspection.", zh: "请点击下方全盘检测或批量导入本地 IPA 安装包启动 4 层静态安全审查。")
+        return localized("posture_pending_clean_sub", en: "Upload local IPA archives below to start 4-layer static security inspection.", zh: "请点击下方按钮上传本地 IPA 安装包，启动 4 层静态反编译安全检测。")
     }
 
     public static func postureTitle(for posture: RiskTier, isScanning: Bool) -> String {
@@ -275,6 +284,23 @@ public enum WQStrings {
     }
 
     // MARK: - Settings View & Custom Rules
+    public static var settingsScanModeHeader: String { localized("settings_scan_mode_header", en: "Scan Scope & Risk Controls", zh: "扫描范围与高危权限开关") }
+    public static var settingsScanModeFooter: String { localized("settings_scan_mode_footer", en: "By default, WQGuard operates in pure local IPA upload inspection mode. Enabling Full Installed-App Scan requires explicit risk acknowledgment.", zh: "WQGuard 默认仅开启最安全的「上传本地 IPA 安装包检测」模式。开启全盘已安装软件扫描需完整阅读安全须知并确认环境风险。") }
+    public static var consentNavTitle: String { localized("consent_nav_title", en: "Security & Risk Notice", zh: "安全须知与风险告知") }
+    public static var consentBannerTitle: String { localized("consent_banner_title", en: "Enable Full Installed-App Scan?", zh: "开启「全盘已安装软件扫描」高危提醒") }
+    public static var consentBannerSubtitle: String { localized("consent_banner_subtitle", en: "Please carefully read all risk disclosures and operational boundaries below before enabling.", zh: "该模式涉及跨目录应用容器枚举，存在严格的系统环境边界与操作风险，请务必逐条阅读并确认：") }
+    public static var consentClause1Title: String { localized("consent_clause1_title", en: "1. iOS Sandbox Boundary & Environment Limits", zh: "1. 系统沙盒边界与运行环境限制") }
+    public static var consentClause1Body: String { localized("consent_clause1_body", en: "On standard personal/enterprise sideloaded iOS devices, Apple Seatbelt blocks cross-app directory enumeration (/var/containers/Bundle/Application). Full enumeration of other installed apps only succeeds in unsandboxed environments (e.g., TrollStore no-sandbox / jailbreak) or for bundles placed in WQGuard's shared Documents folder.", zh: "在普通个人自签/企业证书侧载环境下，iOS Seatbelt 沙盒会强制拦截跨应用读取 /var/containers/Bundle/Application。WQGuard 绝不内嵌主动沙盒逃逸攻击代码（Exploit），因此仅在具备全局读权限的环境（如 TrollStore 无沙盒环境）或针对放入 WQGuard 文件目录的应用包可完成枚举。") }
+    public static var consentClause2Title: String { localized("consent_clause2_title", en: "2. Cross-Container Stability & Symlink Warnings", zh: "2. 跨容器操作风险与软链接残留警示") }
+    public static var consentClause2Body: String { localized("consent_clause2_body", en: "WQGuard opens files strictly with O_RDONLY | O_NOFOLLOW. Never use unstable third-party container mutators concurrently during scanning, as interrupted symlink swaps in Library/Caches can destabilize containermanagerd or leave residual escaping symlinks.", zh: "WQGuard 全程严格采用 O_RDONLY | O_NOFOLLOW 只读不跟随模式。扫描期间请勿同时运行第三方容器写入/挂载工具，避免外部工具在共享容器 Library/Caches 中产生残留软链接或引发 containermanagerd 守护进程异常。") }
+    public static var consentClause3Title: String { localized("consent_clause3_title", en: "3. FairPlay DRM Static Analysis Scope", zh: "3. FairPlay DRM 加密段的审计边界") }
+    public static var consentClause3Body: String { localized("consent_clause3_body", en: "App Store apps have FairPlay-encrypted __TEXT segments (cryptid == 1); static scanning inspects Load Commands, symbol tables, and entitlements only. Pre-install .ipa upload inspection remains the primary defense against unencrypted sideloaded trojans.", zh: "App Store 官方应用的二进制正文段受苹果内核 FairPlay 加密（cryptid == 1），静态扫描仅可核验其未加密加载命令、符号表与签名权限；防范第三方篡改包、盗币木马的最有效手段仍为安装前上传 .ipa 检测。") }
+    public static var consentClause4Title: String { localized("consent_clause4_title", en: "4. Local Privacy & Self-Audit Responsibility", zh: "4. 本机隐私数据保护与自用合规承诺") }
+    public static var consentClause4Body: String { localized("consent_clause4_body", en: "Full scan reports contain installed Bundle IDs, versions, and signer Team IDs. Keep exported JSON/Markdown reports confidential and only audit devices you own or are authorized to inspect.", zh: "全盘扫描生成的报告包含本机应用清单、Bundle ID 及签名团队 ID 等敏感设备指纹信息。请确认仅在本人合法持有的设备上自用，并妥善保管导出的审计报告。") }
+    public static var consentCheckboxLabel: String { localized("consent_checkbox_label", en: "I have read and understood the Security Notice and Risk Disclosures above, and confirm enabling Full Installed-App Scan.", zh: "我已完整阅读并理解上述《安全须知与风险告知》，知悉环境限制与相关风险，确认开启全盘已安装软件扫描。") }
+    public static var consentConfirmButton: String { localized("consent_confirm_button", en: "Acknowledge Risks & Enable Full Scan", zh: "确认知悉风险并开启全盘扫描") }
+    public static var consentKeepDefaultButton: String { localized("consent_keep_default_button", en: "Cancel (Keep Default IPA Upload Mode)", zh: "取消（保持默认上传 IPA 检测）") }
+
     public static var settingsBuiltinWhitelist: String { localized("settings_builtin_whitelist", en: "Built-in Research Tools Whitelist", zh: "内置已知研究工具白名单") }
     public static var settingsBuiltinWhitelistFooter: String { localized("settings_builtin_whitelist_footer", en: "When enabled, apps matching open-source research tools are classified as Known Tools rather than High Risk.", zh: "启用白名单后，匹配开源工具特征的应用将评级为「已知工具提示」而非「高危告警」。") }
     public static var settingsCustomRules: String { localized("settings_custom_rules", en: "Custom Whitelist Rules", zh: "自定义白名单规则") }

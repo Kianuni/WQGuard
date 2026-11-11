@@ -53,6 +53,11 @@ public final class ScanViewModel: ObservableObject {
     @Published public var surgeModuleExportURL: URL?
     @Published public var showSurgeSheet: Bool = false
 
+    // Full System Installed-App Scan Opt-In State (Default: OFF -> Upload IPA Mode)
+    private static let fullScanConsentKey = "wqguard.full_system_scan_enabled.v1"
+    @Published public var isFullSystemScanEnabled: Bool = false
+    @Published public var showFullScanConsentSheet: Bool = false
+
     // Alert & Error Handling
     @Published public var activeAlertMessage: String?
     @Published public var showGlobalAlert: Bool = false
@@ -64,8 +69,32 @@ public final class ScanViewModel: ObservableObject {
     public init() {
         self.firmwareReport = FirmwarePostureEngine.shared.evaluate()
         self.whitelistedTools = WhitelistEngine.shared.allTools
+        self.isFullSystemScanEnabled = UserDefaults.standard.bool(forKey: Self.fullScanConsentKey)
         self.surgeModuleContent = SurgeBrotliShieldHelper.shared.generateModuleContent()
         self.prepareSurgeExportURL()
+    }
+
+    // MARK: - Full System Scan Consent Gate
+    public func requestToggleFullSystemScan(_ wantEnable: Bool) {
+        if wantEnable {
+            guard !isFullSystemScanEnabled else { return }
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            #endif
+            showFullScanConsentSheet = true
+        } else {
+            isFullSystemScanEnabled = false
+            UserDefaults.standard.set(false, forKey: Self.fullScanConsentKey)
+        }
+    }
+
+    public func confirmEnableFullSystemScan() {
+        isFullSystemScanEnabled = true
+        UserDefaults.standard.set(true, forKey: Self.fullScanConsentKey)
+        showFullScanConsentSheet = false
+        #if os(iOS)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        #endif
     }
 
     // MARK: - Computed Properties
@@ -109,6 +138,10 @@ public final class ScanViewModel: ObservableObject {
 
     // MARK: - System Scan Actions
     public func startSystemScan() {
+        guard isFullSystemScanEnabled else {
+            showFullScanConsentSheet = true
+            return
+        }
         guard !isScanning else { return }
         isScanning = true
         scanProgress = ScanProgress(currentTarget: WQStrings.scanEngineInitializing, completedCount: 0, totalCount: 0)

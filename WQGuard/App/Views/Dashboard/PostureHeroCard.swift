@@ -14,19 +14,22 @@ public struct PostureHeroCard: View {
     public let progress: ScanProgress?
     public let hasScannedApps: Bool
     public let exposedCVECount: Int
+    public let isFullScanEnabled: Bool
 
     public init(
         posture: RiskTier,
         isScanning: Bool,
         progress: ScanProgress?,
         hasScannedApps: Bool = true,
-        exposedCVECount: Int = 0
+        exposedCVECount: Int = 0,
+        isFullScanEnabled: Bool = false
     ) {
         self.posture = posture
         self.isScanning = isScanning
         self.progress = progress
         self.hasScannedApps = hasScannedApps
         self.exposedCVECount = exposedCVECount
+        self.isFullScanEnabled = isFullScanEnabled
     }
 
     public var body: some View {
@@ -119,7 +122,7 @@ public struct PostureHeroCard: View {
 
     private var subtitleText: String {
         if !isScanning && !hasScannedApps {
-            return WQStrings.posturePendingSubtitle(exposedCount: exposedCVECount)
+            return WQStrings.posturePendingSubtitle(exposedCount: exposedCVECount, isFullScanEnabled: isFullScanEnabled)
         }
         return WQStrings.postureSubtitle(for: posture, isScanning: isScanning)
     }

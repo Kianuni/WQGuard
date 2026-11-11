@@ -25,10 +25,11 @@ public struct DashboardView: View {
                     isScanning: vm.isScanning,
                     progress: vm.scanProgress,
                     hasScannedApps: vm.hasScannedApps,
-                    exposedCVECount: vm.firmwareReport.exposedCount
+                    exposedCVECount: vm.firmwareReport.exposedCount,
+                    isFullScanEnabled: vm.isFullSystemScanEnabled
                 )
 
-                // 2. One-Tap System Scan Action Card
+                // 2. Primary Default Action (Upload IPA) + Opt-In Full System Scan Switch
                 VStack(spacing: 12) {
                     if vm.isScanning {
                         ScanProgressBar(progress: vm.scanProgress)
@@ -43,20 +44,26 @@ public struct DashboardView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 14))
                         }
                     } else {
+                        // Default Primary Mode: Upload / Import IPA Package(s)
                         Button(action: {
                             #if os(iOS)
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                             #endif
-                            vm.startSystemScan()
+                            showBatchIPAPicker = true
                         }) {
-                            HStack {
-                                Image(systemName: "play.shield.fill")
-                                    .font(.title2)
-                                Text(WQStrings.startSystemScan)
-                                    .font(.headline)
+                            VStack(spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "arrow.up.doc.on.clipboard")
+                                        .font(.title3.bold())
+                                    Text(WQStrings.defaultUploadIPAScan)
+                                        .font(.headline.bold())
+                                }
+                                Text(WQStrings.defaultUploadIPAScanSub)
+                                    .font(.caption2)
+                                    .opacity(0.85)
                             }
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
+                            .padding(.vertical, 15)
                             .background(
                                 LinearGradient(
                                     colors: [Color(red: 0.0, green: 0.78, blue: 0.65), Color(red: 0.0, green: 0.58, blue: 0.48)],
@@ -69,28 +76,68 @@ public struct DashboardView: View {
                             .shadow(color: Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.35), radius: 8, y: 4)
                         }
 
-                        Button(action: {
-                            #if os(iOS)
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            #endif
-                            showBatchIPAPicker = true
-                        }) {
-                            HStack {
-                                Image(systemName: "folder.fill.badge.plus")
-                                    .font(.headline)
-                                Text(WQStrings.batchImportIPAButton)
-                                    .font(.subheadline.bold())
+                        // Opt-In Switch Card for Full Installed-App Scan
+                        VStack(spacing: 12) {
+                            Toggle(isOn: Binding(
+                                get: { vm.isFullSystemScanEnabled },
+                                set: { vm.requestToggleFullSystemScan($0) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: vm.isFullSystemScanEnabled ? "exclamationmark.shield.fill" : "lock.shield")
+                                            .foregroundColor(vm.isFullSystemScanEnabled ? .orange : .gray)
+                                        Text(WQStrings.fullScanToggleTitle)
+                                            .font(.subheadline.bold())
+                                            .foregroundColor(.white)
+                                        Text(WQStrings.fullScanBadgeRisk)
+                                            .font(.system(size: 10, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.orange.opacity(0.2))
+                                            .foregroundColor(.orange)
+                                            .clipShape(Capsule())
+                                    }
+                                    Text(vm.isFullSystemScanEnabled ? WQStrings.fullScanToggleSubOn : WQStrings.fullScanToggleSubOff)
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                }
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(Color(red: 0.13, green: 0.15, blue: 0.20))
-                            .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14)
-                                    .stroke(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.4), lineWidth: 1)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .tint(.orange)
+
+                            if vm.isFullSystemScanEnabled {
+                                Button(action: {
+                                    #if os(iOS)
+                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                    #endif
+                                    vm.startSystemScan()
+                                }) {
+                                    HStack {
+                                        Image(systemName: "play.shield.fill")
+                                            .font(.headline)
+                                        Text(WQStrings.startSystemScan)
+                                            .font(.subheadline.bold())
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 13)
+                                    .background(Color.orange.opacity(0.18))
+                                    .foregroundColor(.orange)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(Color.orange.opacity(0.55), lineWidth: 1)
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                }
+                            }
                         }
+                        .padding(14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(Color(red: 0.10, green: 0.11, blue: 0.15))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .stroke(vm.isFullSystemScanEnabled ? Color.orange.opacity(0.45) : Color.white.opacity(0.1), lineWidth: 1)
+                                )
+                        )
                     }
                 }
                 .padding(.horizontal)
