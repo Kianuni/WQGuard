@@ -88,8 +88,7 @@ public final class MachOScanner: @unchecked Sendable {
         
         var textStrings: [String] = []
         if !isFairPlayEncrypted {
-            let sliceStr = String(decoding: file.sliceData, as: UTF8.self)
-            let rawStr: String? = (rawData != nil && rawData!.count != file.sliceData.count) ? String(decoding: rawData!, as: UTF8.self) : nil
+            let checkRawToo = (rawData != nil && rawData!.count != file.sliceData.count)
             
             let candidateStrings: [String] = [
                 "com.apple.containermanagerd.system",
@@ -105,7 +104,10 @@ public final class MachOScanner: @unchecked Sendable {
             ]
             
             for target in candidateStrings {
-                if sliceStr.contains(target) || (rawStr?.contains(target) ?? false) || symbols.contains(target) {
+                let needle = Data(target.utf8)
+                if file.sliceData.range(of: needle) != nil ||
+                   (checkRawToo && rawData?.range(of: needle) != nil) ||
+                   symbols.contains(target) {
                     textStrings.append(target)
                 }
             }

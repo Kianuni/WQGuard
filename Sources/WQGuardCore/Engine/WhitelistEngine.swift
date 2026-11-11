@@ -153,7 +153,7 @@ public final class WhitelistEngine: @unchecked Sendable {
         WhitelistedTool(
             name: "Erosion-CN",
             allowedBundleIds: ["com.jbdotparty.Erosion-*", "com.jbdotparty.Erosion.*", "com.jbdotparty.ErosionCN*"],
-            allowedAppGroups: ["group.com.jbdotparty.Erosion*"],
+            allowedAppGroups: ["group.com.jbdotparty.Erosion*", "group.*.com.jbdotparty.Erosion*"],
             expectedSignatures: [
                 "libsystem_containermanager.dylib",
                 "container_query_create",
@@ -202,7 +202,7 @@ public final class WhitelistEngine: @unchecked Sendable {
         WhitelistedTool(
             name: "WQFiles-CN",
             allowedBundleIds: ["cz.kolbi.wqfiles-*", "cz.kolbi.wqfiles.*", "cz.kolbi.wqfilesCN*", "cz.kolbi.wqfiles-cn*"],
-            allowedAppGroups: ["group.cz.kolbi.wqfiles*"],
+            allowedAppGroups: ["group.cz.kolbi.wqfiles*", "group.*.cz.kolbi.wqfiles*"],
             expectedSignatures: [
                 "libsystem_containermanager.dylib",
                 "container_query_create",
@@ -226,6 +226,8 @@ public final class WhitelistEngine: @unchecked Sendable {
             ],
             allowedAppGroups: [
                 "group.com.wqguard.app",
+                "group.com.wqguard.app*",
+                "group.*.com.wqguard.app*",
                 "group.com.wqguard.scanner"
             ],
             expectedSignatures: [

@@ -33,6 +33,7 @@ public enum WQStrings {
     // MARK: - Dashboard Overview
     public static var appTitle: String { localized("app_title", en: "WQGuard", zh: "WQGuard 容器守卫") }
     public static var startSystemScan: String { localized("start_system_scan", en: "Start System Audit", zh: "开始全盘安全检测") }
+    public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Batch Audit IPAs / Folder", zh: "批量导入 IPA / 文件夹检测") }
     public static var scanningInProgress: String { localized("scanning_in_progress", en: "Deep analysis in progress...", zh: "正在深度分析...") }
     public static var cancelScan: String { localized("cancel_scan", en: "Cancel Scan", zh: "取消全盘扫描") }
     public static var metricsSummary: String { localized("metrics_summary", en: "Audit Summary", zh: "审计统计概览") }
@@ -62,7 +63,21 @@ public enum WQStrings {
     public static var postureStatusHighRiskSub: String { localized("posture_status_high_risk_sub", en: "Detected unauthorized containermanagerd sandbox escape or escaping symlinks!", zh: "检测到未经授权的 containermanagerd 跨沙盒利用或异常逃逸符号链接！") }
     public static var postureStatusCautionSub: String { localized("posture_status_caution_sub", en: "App declares App Group shared containers with dynamic symbol resolution.", zh: "应用声明了 App Group 容器共享权限并伴随动态符号解析特征。") }
     public static var postureStatusKnownToolSub: String { localized("posture_status_known_tool_sub", en: "Matched authorized open-source research tools (Erosion, WQFiles, etc.).", zh: "匹配到白名单授权的开源定制工具（Erosion、WQFiles 等）。") }
-    public static var postureStatusSafeSub: String { localized("posture_status_safe_sub", en: "All scanned targets strictly comply with iOS sandbox boundaries.", zh: "所有扫描目标严格遵守 iOS 沙盒边界，未检出跨容器越权利用。") }
+    public static var postureStatusSafeSub: String { localized("posture_status_safe_sub", en: "All scanned targets strictly comply with iOS sandbox boundaries.", zh: "所有已扫描目标严格遵守 iOS 沙盒边界，未检出跨容器越权利用。") }
+
+    public static func posturePendingTitle(exposedCount: Int) -> String {
+        if exposedCount > 0 {
+            return localized("posture_pending_cve_title_\(exposedCount)", en: "Pending App Audit · \(exposedCount) Firmware CVEs", zh: "待执行应用审计 · \(exposedCount) 项固件漏洞")
+        }
+        return localized("posture_pending_clean_title", en: "Ready · Pending App Audit", zh: "就绪 · 待执行安全检测")
+    }
+
+    public static func posturePendingSubtitle(exposedCount: Int) -> String {
+        if exposedCount > 0 {
+            return localized("posture_pending_cve_sub", en: "Unpatched firmware CVEs detected. Run system scan or batch-import sideloaded IPAs for deep inspection.", zh: "当前 iOS 版本存在未修补系统漏洞。请点击全盘检测或批量导入本地 IPA 进行安装前审查。")
+        }
+        return localized("posture_pending_clean_sub", en: "Tap Start System Audit or Batch Import IPAs below to run 4-layer static inspection.", zh: "请点击下方全盘检测或批量导入本地 IPA 安装包启动 4 层静态安全审查。")
+    }
 
     public static func postureTitle(for posture: RiskTier, isScanning: Bool) -> String {
         if isScanning { return postureStatusScanningTitle }
@@ -144,7 +159,11 @@ public enum WQStrings {
     // MARK: - IPA Package Card & Injected Dylibs
     public static var ipaImportTitle: String { localized("ipa_import_title", en: "Import Local IPA Package", zh: "导入本地 IPA 安装包") }
     public static var ipaImportSub: String { localized("ipa_import_sub", en: "Pre-installation sandbox analysis for containermanagerd escape, private photos & dylib injection", zh: "安装前在沙盒内深度检测 containermanagerd 越权、私有相册调用与注入动态库") }
-    public static var selectIPAButton: String { localized("select_ipa_button", en: "Select Local .ipa File", zh: "选择本地 .ipa 文件") }
+    public static var selectIPAButton: String { localized("select_ipa_button", en: "Select .ipa Files or Folder", zh: "选择 .ipa 文件或文件夹（可多选）") }
+    public static var batchIPANoValidTargets: String { localized("batch_ipa_no_targets", en: "No .ipa or .app packages found in the selected items.", zh: "所选文件或目录中未找到可审计的 .ipa 或 .app 安装包。") }
+    public static func batchIPACompletedBanner(_ count: Int) -> String {
+        localized("batch_ipa_completed_\(count)", en: "Batch audit completed: \(count) packages inspected (see Findings tab for full list)", zh: "已完成批量审查：共检测 \(count) 个安装包（完整列表已同步至「仪表盘」与「审计发现」）")
+    }
     public static var ipaAnalyzing: String { localized("ipa_analyzing", en: "Performing 4-layer sandbox analysis & Mach-O static decompilation...", zh: "正在进行 4 层沙盒解析与 Mach-O 静态反编译...") }
     public static var ipaAnalysisFailed: String { localized("ipa_analysis_failed", en: "IPA Analysis Failed", zh: "IPA 分析失败") }
     public static var preinstallAlertHighRisk: String { localized("preinstall_alert_high_risk", en: "Pre-install Warning: Detected sandbox escape exploit! Do NOT install!", zh: "安装前预警：检测到越界沙盒逃逸特征，切勿安装！") }

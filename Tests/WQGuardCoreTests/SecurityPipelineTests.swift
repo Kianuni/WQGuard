@@ -171,4 +171,39 @@ final class SecurityPipelineTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - 7. Expanded Threat Catalog Wiring in IPA & Bundle Pipeline
+
+    func test_Pipeline_impersonatedWalletIPA_flagsHighRisk() throws {
+        let drainerBinary = SyntheticMachOGenerator.shared.generateThin(
+            config: SyntheticMachOGenerator.MachOConfig(
+                arch: .arm64,
+                cryptid: 0,
+                linkedDylibs: ["/usr/lib/libSystem.B.dylib"],
+                symbols: ["_main", "_OBJC_CLASS_$_UIPasteboard"]
+            )
+        )
+        let config = MockIPAGenerator.IPAPackageConfig(
+            appName: "MetaMask",
+            bundleIdentifier: "io.metamask.sideload.drainer",
+            executableBinary: drainerBinary,
+            provisioningProfile: .developerSideloaded(teamId: "SCAM999", devices: ["UUID-1"])
+        )
+        let ipaURL = trackTempFile(try MockIPAGenerator.shared.createIPA(config: config))
+
+        let finding = try SecurityPipeline.shared.scanIPA(at: ipaURL)
+        XCTAssertEqual(finding.riskTier, .highRisk)
+        XCTAssertTrue(finding.indicators.contains { $0.signature == "IMPERSONATION:MetaMask" })
+    }
+
+    func test_Pipeline_resignedErosionAppGroup_remainsKnownTool() throws {
+        let wl = WhitelistEngine.shared.isWhitelisted(
+            bundleId: "com.jbdotparty.Erosion.XYZ987",
+            appGroups: ["group.XYZ987.com.jbdotparty.Erosion"],
+            matchedSignatures: ["container_query_create", "container_copy_sandbox_token"],
+            teamId: "XYZ987"
+        )
+        XCTAssertTrue(wl.isWhitelisted)
+        XCTAssertEqual(wl.toolName, "Erosion-CN")
+    }
 }

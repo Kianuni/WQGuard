@@ -18,6 +18,8 @@ public struct CSStoreSnapshot: Sendable, Equatable {
     public let appGroups: [String]                  // "/var/mobile/Containers/Shared/AppGroup/<UUID>"
     public let displayNames: [String: String]       // bundleID -> displayName
     public let bundleNames: [String: String]        // bundleID -> bundleName
+    public let bundlePaths: [String: String]        // bundleID -> "/var/containers/Bundle/Application/<UUID>/<App>.app"
+    public let discoveredAppBundles: [String]       // All discovered "/var/containers/Bundle/Application/<UUID>[/<App>.app]" paths
     public let loadedAt: Date
 
     public init(
@@ -28,6 +30,8 @@ public struct CSStoreSnapshot: Sendable, Equatable {
         appGroups: [String],
         displayNames: [String: String],
         bundleNames: [String: String],
+        bundlePaths: [String: String] = [:],
+        discoveredAppBundles: [String] = [],
         loadedAt: Date = Date()
     ) {
         self.storePath = storePath
@@ -37,6 +41,8 @@ public struct CSStoreSnapshot: Sendable, Equatable {
         self.appGroups = appGroups
         self.displayNames = displayNames
         self.bundleNames = bundleNames
+        self.bundlePaths = bundlePaths
+        self.discoveredAppBundles = discoveredAppBundles
         self.loadedAt = loadedAt
     }
 }
@@ -49,6 +55,7 @@ public struct CSLayoutSpec: Sendable, Equatable {
     public let containerOffset: UInt32
     public let nameOffset: UInt32
     public let displayNameOffset: UInt32
+    public let bundlePathOffset: UInt32
     public let pluginSize: UInt32
     public let pluginBundleIDOffset: UInt32
     public let pluginContainerOffset: UInt32
@@ -60,6 +67,7 @@ public struct CSLayoutSpec: Sendable, Equatable {
         containerOffset: UInt32,
         nameOffset: UInt32,
         displayNameOffset: UInt32,
+        bundlePathOffset: UInt32 = 0x00,
         pluginSize: UInt32,
         pluginBundleIDOffset: UInt32,
         pluginContainerOffset: UInt32
@@ -70,6 +78,7 @@ public struct CSLayoutSpec: Sendable, Equatable {
         self.containerOffset = containerOffset
         self.nameOffset = nameOffset
         self.displayNameOffset = displayNameOffset
+        self.bundlePathOffset = bundlePathOffset
         self.pluginSize = pluginSize
         self.pluginBundleIDOffset = pluginBundleIDOffset
         self.pluginContainerOffset = pluginContainerOffset
@@ -113,14 +122,16 @@ public final class CSStore2Parser: Sendable {
     public static let maxDecodedStrings: Int = 200_000
     public static let maxDecodedStringBytes: Int = 8 * 1024 * 1024
 
-    /// Supported CSStore2 layout specifications covering iOS 26, 27.0, and 27.2+.
+    /// Supported CSStore2 layout specifications covering iOS 26, 26.5, 27.0, and 27.2+.
     public static let supportedLayouts: [CSLayoutSpec] = [
-        CSLayoutSpec(label: "27.0",  bundleSize: 0x250, bundleIDOffset: 0x0c, containerOffset: 0x68, nameOffset: 0x6c, displayNameOffset: 0x74, pluginSize: 0x118, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x54),
-        CSLayoutSpec(label: "26",    bundleSize: 0x23c, bundleIDOffset: 0x0c, containerOffset: 0x64, nameOffset: 0x68, displayNameOffset: 0x70, pluginSize: 0x104, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x50),
-        CSLayoutSpec(label: "27.2",  bundleSize: 0x25c, bundleIDOffset: 0x0c, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, pluginSize: 0x120, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x58),
-        CSLayoutSpec(label: "27.2b", bundleSize: 0x25c, bundleIDOffset: 0x10, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, pluginSize: 0x120, pluginBundleIDOffset: 0x04, pluginContainerOffset: 0x58),
-        CSLayoutSpec(label: "27.2c", bundleSize: 0x25c, bundleIDOffset: 0x0c, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, pluginSize: 0x120, pluginBundleIDOffset: 0x04, pluginContainerOffset: 0x58),
-        CSLayoutSpec(label: "27.2d", bundleSize: 0x25c, bundleIDOffset: 0x10, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, pluginSize: 0x120, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x58),
+        CSLayoutSpec(label: "27.0",  bundleSize: 0x250, bundleIDOffset: 0x0c, containerOffset: 0x68, nameOffset: 0x6c, displayNameOffset: 0x74, bundlePathOffset: 0x00, pluginSize: 0x118, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x54),
+        CSLayoutSpec(label: "26",    bundleSize: 0x23c, bundleIDOffset: 0x0c, containerOffset: 0x64, nameOffset: 0x68, displayNameOffset: 0x70, bundlePathOffset: 0x00, pluginSize: 0x104, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x50),
+        CSLayoutSpec(label: "26.5",  bundleSize: 0x23c, bundleIDOffset: 0x0c, containerOffset: 0x60, nameOffset: 0x64, displayNameOffset: 0x6c, bundlePathOffset: 0x00, pluginSize: 0x104, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x4c),
+        CSLayoutSpec(label: "26.5b", bundleSize: 0x23c, bundleIDOffset: 0x08, containerOffset: 0x60, nameOffset: 0x64, displayNameOffset: 0x6c, bundlePathOffset: 0x00, pluginSize: 0x104, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x4c),
+        CSLayoutSpec(label: "27.2",  bundleSize: 0x25c, bundleIDOffset: 0x0c, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, bundlePathOffset: 0x00, pluginSize: 0x120, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x58),
+        CSLayoutSpec(label: "27.2b", bundleSize: 0x25c, bundleIDOffset: 0x10, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, bundlePathOffset: 0x00, pluginSize: 0x120, pluginBundleIDOffset: 0x04, pluginContainerOffset: 0x58),
+        CSLayoutSpec(label: "27.2c", bundleSize: 0x25c, bundleIDOffset: 0x0c, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, bundlePathOffset: 0x00, pluginSize: 0x120, pluginBundleIDOffset: 0x04, pluginContainerOffset: 0x58),
+        CSLayoutSpec(label: "27.2d", bundleSize: 0x25c, bundleIDOffset: 0x10, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, bundlePathOffset: 0x00, pluginSize: 0x120, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x58),
     ]
 
     /// Built-in localized Chinese display names for system and popular third-party applications.
@@ -259,15 +270,16 @@ public final class CSStore2Parser: Sendable {
 
                     // Check bundle record
                     if size == layout.bundleSize {
-                        if layoutRecs[lIdx].count / 4 < Self.maxBundleRecords {
+                        if layoutRecs[lIdx].count / 5 < Self.maxBundleRecords {
                             let bid = readUInt32(from: u + Int(layout.bundleIDOffset))
                             let name = readUInt32(from: u + Int(layout.nameOffset))
                             let disp = readUInt32(from: u + Int(layout.displayNameOffset))
                             let cont = readUInt32(from: u + Int(layout.containerOffset))
+                            let bpath = readUInt32(from: u + Int(layout.bundlePathOffset))
 
                             if bid != 0 && (bid & 3) == 0 && (bid >> 2) < Self.maxStringID {
-                                layoutRecs[lIdx].append(contentsOf: [bid, name, disp, cont])
-                                for r in [bid, name, disp, cont] {
+                                layoutRecs[lIdx].append(contentsOf: [bid, name, disp, cont, bpath])
+                                for r in [bid, name, disp, cont, bpath] {
                                     if r != 0 && (r & 3) == 0 && (r >> 2) < Self.maxStringID {
                                         let sid = Int(r >> 2)
                                         need[sid / 8] |= UInt8(1 << (sid % 8))
@@ -284,6 +296,7 @@ public final class CSStore2Parser: Sendable {
         // Decode string table
         var strings: [UInt32: String] = [:]
         var pathStrings: [UInt32: String?] = [:]
+        var appPathStrings: [UInt32: String?] = [:]
         var decodedStringBytes = 0
 
         data.withUnsafeBytes { rawBuffer in
@@ -303,12 +316,21 @@ public final class CSStore2Parser: Sendable {
 
                         if keepGeneral || maybePath {
                             if let s = readString(bytes: bytes, totalLength: totalCount, offset: o) {
-                                if maybePath && s.contains("/mobile/Containers/Data/") {
-                                    let prev = pathStrings[sid]
-                                    if prev == nil {
-                                        pathStrings[sid] = s
-                                    } else if prev! != s {
-                                        pathStrings[sid] = Optional<String>.none // Ambiguous path collision
+                                if maybePath {
+                                    if s.contains("/mobile/Containers/Data/") {
+                                        let prev = pathStrings[sid]
+                                        if prev == nil {
+                                            pathStrings[sid] = s
+                                        } else if prev! != s {
+                                            pathStrings[sid] = Optional<String>.none // Ambiguous path collision
+                                        }
+                                    } else if s.hasSuffix(".app") || s.hasSuffix(".app/") {
+                                        let prev = appPathStrings[sid]
+                                        if prev == nil {
+                                            appPathStrings[sid] = s
+                                        } else if prev! != s {
+                                            appPathStrings[sid] = Optional<String>.none
+                                        }
                                     }
                                 }
                                 if keepGeneral && (!hasExisting && strings.count < Self.maxDecodedStrings && (decodedStringBytes + s.utf8.count) < Self.maxDecodedStringBytes) {
@@ -332,11 +354,23 @@ public final class CSStore2Parser: Sendable {
             return strings[sid]
         }
 
+        func bundlePathFor(ref: UInt32) -> String? {
+            let sid = ref >> 2
+            if let p = appPathStrings[sid] {
+                return p
+            }
+            if let general = strings[sid], general.hasPrefix("/"), (general.hasSuffix(".app") || general.hasSuffix(".app/")) {
+                return general
+            }
+            return nil
+        }
+
         // Score and select best layout
         var bestApps: [String: String]?
         var bestPlugins: [String: String]?
         var bestDisplay: [String: String]?
         var bestBundle: [String: String]?
+        var bestBundlePaths: [String: String]?
         var bestLayoutLabel = ""
         var bestTotalMapped = 0
 
@@ -345,6 +379,7 @@ public final class CSStore2Parser: Sendable {
             var pluginMap: [String: String] = [:]
             var dispMap: [String: String] = [:]
             var bnMap: [String: String] = [:]
+            var bpMap: [String: String] = [:]
 
             let plugins = layoutPlugins[lIdx]
             var pi = 0
@@ -363,12 +398,13 @@ public final class CSStore2Parser: Sendable {
 
             let recs = layoutRecs[lIdx]
             var ri = 0
-            while ri + 3 < recs.count {
+            while ri + 4 < recs.count {
                 let bidRef = recs[ri]
                 let nameRef = recs[ri + 1]
                 let dispRef = recs[ri + 2]
                 let contRef = recs[ri + 3]
-                ri += 4
+                let bpathRef = recs[ri + 4]
+                ri += 5
 
                 guard let bid = strings[bidRef >> 2], looksLikeBundleID(bid) else { continue }
 
@@ -386,6 +422,13 @@ public final class CSStore2Parser: Sendable {
                 if (dispRef & 3) == 0, let rawDisp = strings[dispRef >> 2], let dn = sanitizeUnicodeName(rawDisp) {
                     if dispMap[bid] == nil { dispMap[bid] = dn }
                 }
+                if bpathRef != 0 && (bpathRef & 3) == 0 {
+                    if let rawBundlePath = bundlePathFor(ref: bpathRef),
+                       let normBundlePath = normalizeVarPath(rawBundlePath),
+                       bpMap[bid] == nil {
+                        bpMap[bid] = normBundlePath
+                    }
+                }
             }
 
             let totalMapped = appMap.count + pluginMap.count
@@ -394,6 +437,7 @@ public final class CSStore2Parser: Sendable {
                 bestPlugins = pluginMap
                 bestDisplay = dispMap
                 bestBundle = bnMap
+                bestBundlePaths = bpMap
                 bestTotalMapped = totalMapped
                 bestLayoutLabel = layout.label
             }
@@ -419,6 +463,44 @@ public final class CSStore2Parser: Sendable {
             searchRange = uuidStart..<data.count
         }
 
+        // Installed App Bundle path scanning (layout-independent safety net for /var/containers/Bundle/Application/<UUID>[/<Name>.app])
+        var discoveredBundleSet: Set<String> = Set((bestBundlePaths ?? [:]).values)
+        let bundleNeedle = Data("/containers/Bundle/Application/".utf8)
+        var bundleSearchRange = 0..<data.count
+        while let match = data.range(of: bundleNeedle, options: [], in: bundleSearchRange) {
+            let uuidStart = match.upperBound
+            let uuidEnd = uuidStart + 36
+            if uuidEnd <= data.count {
+                let uuidSubdata = data.subdata(in: uuidStart..<uuidEnd)
+                if let uuidStr = String(data: uuidSubdata, encoding: .ascii), UUID(uuidString: uuidStr) != nil {
+                    let containerRoot = "/var/containers/Bundle/Application/" + uuidStr.uppercased()
+                    var extractedFullAppPath: String? = nil
+                    if uuidEnd < data.count && data[uuidEnd] == 0x2f { // '/'
+                        let nameStart = uuidEnd + 1
+                        let maxNameEnd = min(nameStart + 256, data.count)
+                        var nameEnd = nameStart
+                        while nameEnd < maxNameEnd {
+                            let b = data[nameEnd]
+                            if b == 0 || b == 0x2f || b < 0x20 { break }
+                            nameEnd += 1
+                        }
+                        if nameEnd > nameStart,
+                           let comp = String(data: data.subdata(in: nameStart..<nameEnd), encoding: .utf8),
+                           comp.lowercased().hasSuffix(".app"),
+                           !comp.contains("..") {
+                            extractedFullAppPath = containerRoot + "/" + comp
+                        }
+                    }
+                    if let fullApp = extractedFullAppPath {
+                        discoveredBundleSet.insert(fullApp)
+                    } else {
+                        discoveredBundleSet.insert(containerRoot)
+                    }
+                }
+            }
+            bundleSearchRange = uuidStart..<data.count
+        }
+
         return CSStoreSnapshot(
             storePath: storePath,
             layoutLabel: bestLayoutLabel,
@@ -427,6 +509,8 @@ public final class CSStore2Parser: Sendable {
             appGroups: Array(appGroupSet).sorted(),
             displayNames: bestDisplay ?? [:],
             bundleNames: bestBundle ?? [:],
+            bundlePaths: bestBundlePaths ?? [:],
+            discoveredAppBundles: Array(discoveredBundleSet).sorted(),
             loadedAt: Date()
         )
     }

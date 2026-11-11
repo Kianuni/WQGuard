@@ -10,6 +10,24 @@
 import Foundation
 import Darwin
 
+/// Errors specific to system-level scanning inside standard iOS Seatbelt sandboxes.
+public enum SecurityPipelineError: Error, LocalizedError, Sendable, Equatable {
+    case sandboxRestrictedNoAccessibleTargets
+
+    public var errorDescription: String? {
+        switch self {
+        case .sandboxRestrictedNoAccessibleTargets:
+            return """
+            当前设备处于标准 iOS Seatbelt 沙盒隔离状态（非 TrollStore / 无全局容器读取权限），系统正常拦截了对其他已安装应用目录的枚举访问。
+
+            WQGuard 坚持 100% 纯防御零漏洞利用原则，绝不调用系统漏洞越权突破沙盒。请通过以下任一方式完成审计：
+            1. 点击下方「批量导入 IPA / 文件夹检测」直接选择本地侧载包；
+            2. 将待检 .ipa 放入「文件 App -> 我的 iPhone -> WQGuard」目录后再次点击全盘检测。
+            """
+        }
+    }
+}
+
 /// Real-time progress snapshot emitted during asynchronous scanning sessions.
 public struct ScanProgress: Sendable, Equatable {
     public let currentTarget: String
@@ -133,7 +151,16 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         let details = machoScanner.parseMachO(file: machoFile, rawData: execData)
         
         let channelResult = ChannelClassifier.classifyBundle(at: url, cryptid: details.cryptid)
-        let (_, appGroups) = CSBlobParser.shared.extractAppGroups(from: machoFile.codeSignatureData)
+        let (hasGroups, appGroups) = CSBlobParser.shared.extractAppGroups(from: machoFile.codeSignatureData)
+        let gating = EntitlementGating.evaluate(hasAppGroups: hasGroups, appGroups: appGroups)
+        let backgroundModes = infoDict["UIBackgroundModes"] as? [String] ?? []
+        var entitlementsDict: [String: Any] = [:]
+        if let csData = machoFile.codeSignatureData,
+           let parsed = try? CSBlobParser.shared.parseSuperBlob(csData),
+           let rawXml = parsed.rawXML,
+           let dict = try? CSBlobParser.shared.parseXMLPlist(Data(rawXml.utf8)) {
+            entitlementsDict = dict
+        }
         
         let context = MachOScanner.ScanContext(
             bundleId: bundleId,
@@ -143,10 +170,188 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             bundlePath: url.path,
             executablePath: execURL.path,
             installChannel: channelResult.channel,
-            appGroups: appGroups
+            appGroups: gating.appGroups
         )
         
-        return machoScanner.scan(details: details, context: context)
+        var allIndicators: [ThreatIndicator] = []
+        var allMatchedSymbols: Set<String> = []
+        var allLinkedDylibs: Set<String> = Set(details.linkedDylibs)
+        var allSymbols: Set<String> = Set(details.symbols)
+        var dynamicLoadingFound = false
+        var pathEnumerationFound = false
+        
+        let mainFinding = machoScanner.scan(details: details, context: context)
+        allIndicators.append(contentsOf: mainFinding.indicators)
+        allMatchedSymbols.formUnion(mainFinding.evidence.matchedSymbols)
+        if mainFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
+        if mainFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+        
+        // Scan Embedded Frameworks & Dynamic Libraries
+        let frameworksURL = url.appendingPathComponent("Frameworks")
+        if FileManager.default.fileExists(atPath: frameworksURL.path) {
+            let fwEnumerator = FileManager.default.enumerator(at: frameworksURL, includingPropertiesForKeys: [.isRegularFileKey])
+            while let itemURL = fwEnumerator?.nextObject() as? URL {
+                let isDylib = itemURL.pathExtension.lowercased() == "dylib"
+                let isFrameworkBinary = itemURL.deletingLastPathComponent().pathExtension.lowercased() == "framework" && itemURL.pathExtension.isEmpty
+                if isDylib || isFrameworkBinary,
+                   let dylibData = try? Data(contentsOf: itemURL, options: .mappedIfSafe),
+                   let fwMachO = try? MachOParser.shared.parse(data: dylibData) {
+                    let fwDetails = machoScanner.parseMachO(file: fwMachO, rawData: dylibData)
+                    let fwFinding = machoScanner.scan(details: fwDetails, context: context)
+                    let relPath = itemURL.path.replacingOccurrences(of: url.path + "/", with: "")
+                    for ind in fwFinding.indicators {
+                        allIndicators.append(ThreatIndicator(
+                            signature: ind.signature,
+                            description: "\(ind.description) [\(relPath)]",
+                            category: ind.category,
+                            location: "\(relPath): \(ind.location)",
+                            severity: ind.severity
+                        ))
+                    }
+                    allMatchedSymbols.formUnion(fwFinding.evidence.matchedSymbols)
+                    allLinkedDylibs.formUnion(fwDetails.linkedDylibs)
+                    allSymbols.formUnion(fwDetails.symbols)
+                    if fwFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
+                    if fwFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+                }
+            }
+        }
+        
+        // Scan Embedded App Extensions (PlugIns)
+        let pluginsURL = url.appendingPathComponent("PlugIns")
+        if FileManager.default.fileExists(atPath: pluginsURL.path) {
+            let plugEnumerator = FileManager.default.enumerator(at: pluginsURL, includingPropertiesForKeys: [.isDirectoryKey])
+            while let itemURL = plugEnumerator?.nextObject() as? URL {
+                if itemURL.pathExtension.lowercased() == "appex" {
+                    let plugInfoPlistURL = itemURL.appendingPathComponent("Info.plist")
+                    if let pData = try? Data(contentsOf: plugInfoPlistURL),
+                       let pDict = (try? PropertyListSerialization.propertyList(from: pData, options: [], format: nil)) as? [String: Any],
+                       let plugExec = pDict["CFBundleExecutable"] as? String {
+                        let plugBinURL = itemURL.appendingPathComponent(plugExec)
+                        if let binData = try? Data(contentsOf: plugBinURL, options: .mappedIfSafe),
+                           let plugMachO = try? MachOParser.shared.parse(data: binData) {
+                            let plugDetails = machoScanner.parseMachO(file: plugMachO, rawData: binData)
+                            let plugFinding = machoScanner.scan(details: plugDetails, context: context)
+                            let relPath = plugBinURL.path.replacingOccurrences(of: url.path + "/", with: "")
+                            for ind in plugFinding.indicators {
+                                allIndicators.append(ThreatIndicator(
+                                    signature: ind.signature,
+                                    description: "\(ind.description) [\(relPath)]",
+                                    category: ind.category,
+                                    location: "\(relPath): \(ind.location)",
+                                    severity: ind.severity
+                                ))
+                            }
+                            allMatchedSymbols.formUnion(plugFinding.evidence.matchedSymbols)
+                            allLinkedDylibs.formUnion(plugDetails.linkedDylibs)
+                            allSymbols.formUnion(plugDetails.symbols)
+                            if plugFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
+                            if plugFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Expanded Local Threat Signatures
+        allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateImpersonation(
+            bundleId: bundleId,
+            displayName: displayName,
+            installChannel: channelResult.channel,
+            cryptid: details.cryptid
+        ))
+        
+        if !details.isFairPlayEncrypted {
+            let dylibList = Array(allLinkedDylibs)
+            let symbolList = Array(allSymbols)
+            allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluatePhotosBypass(
+                linkedDylibs: dylibList,
+                symbols: symbolList,
+                entitlements: entitlementsDict,
+                cryptid: details.cryptid
+            ))
+            allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateBrotliSupplyChain(
+                linkedDylibs: dylibList,
+                symbols: symbolList
+            ))
+            allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateInjectedDylibs(
+                linkedDylibs: dylibList
+            ))
+            if let clipboardInd = ExpandedThreatCatalog.evaluateClipboardSnooping(
+                backgroundModes: backgroundModes,
+                symbols: symbolList,
+                cryptid: details.cryptid
+            ) {
+                allIndicators.append(clipboardInd)
+            }
+        }
+        
+        var provisionalRisk: RiskTier = .safe
+        if allIndicators.contains(where: { $0.severity == .highRisk }) {
+            provisionalRisk = .highRisk
+        } else if allIndicators.contains(where: { $0.severity == .caution }) {
+            provisionalRisk = .caution
+        }
+        
+        var isWhitelisted = false
+        var whitelistedToolName: String? = nil
+        var finalRisk = provisionalRisk
+        
+        if provisionalRisk == .highRisk || provisionalRisk == .caution {
+            let wlResult = whitelistEngine.isWhitelisted(
+                bundleId: bundleId,
+                appGroups: gating.appGroups,
+                matchedSignatures: Array(allMatchedSymbols),
+                teamId: channelResult.teamIdentifier
+            )
+            if wlResult.isWhitelisted {
+                isWhitelisted = true
+                whitelistedToolName = wlResult.toolName
+                finalRisk = .knownTool
+            }
+        }
+        
+        let remediation: String
+        switch finalRisk {
+        case .highRisk:
+            remediation = "检测到高危越权特征（未经授权的跨沙盒逃逸、伪造钱包/通讯软件或隐私绕过 API 引用），建议立即卸载并注销描述文件。"
+        case .knownTool:
+            remediation = "匹配已知开源安全研究工具白名单（\(whitelistedToolName ?? "Known Tool")）。"
+        case .caution:
+            remediation = "应用声明了共享容器或包含第三方动态库/供应链风险组件，建议复核安装来源。"
+        case .safe:
+            remediation = "未发现跨沙盒越权或恶意利用特征，状态安全。"
+        }
+        
+        let evidence = AuditEvidence(
+            matchedSymbols: Array(allMatchedSymbols).sorted(),
+            linkedDylibs: Array(allLinkedDylibs).sorted(),
+            hasAppGroups: !gating.appGroups.isEmpty,
+            appGroups: gating.appGroups,
+            installChannel: channelResult.channel,
+            cryptid: details.cryptid,
+            isFairPlayEncrypted: details.isFairPlayEncrypted,
+            escapingSymlinks: [],
+            dynamicLoadingPresent: dynamicLoadingFound,
+            pathEnumerationPresent: pathEnumerationFound,
+            remediationGuidance: remediation
+        )
+        
+        return ScanFinding(
+            bundleId: bundleId,
+            displayName: displayName,
+            version: version,
+            teamId: channelResult.teamIdentifier,
+            executablePath: execURL.path,
+            bundlePath: url.path,
+            installChannel: channelResult.channel,
+            riskTier: finalRisk,
+            isWhitelisted: isWhitelisted,
+            whitelistedToolName: whitelistedToolName,
+            indicators: allIndicators,
+            evidence: evidence,
+            scanTimestamp: Date()
+        )
     }
     
     /// Scans a local `.ipa` package archive.
@@ -154,39 +359,94 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         return try ipaScanner.scan(ipaURL: url)
     }
     
-    /// Scans all installed applications across system directories.
-    public func scanInstalledApps() throws -> [ScanFinding] {
-        var appURLs: [URL] = []
+    /// Discovers readable installed `.app` bundles and user-imported `.ipa`/`.app` packages in Documents.
+    private func discoverAccessibleTargets() -> (targets: [URL], permissionDeniedCount: Int) {
+        var targets: [URL] = []
+        var seenCanonicalPaths: Set<String> = []
+        var permissionDeniedCount = 0
         let fm = FileManager.default
         
-        // Scan standard search roots
+        #if os(iOS)
+        let selfBundleCanonical = Bundle.main.bundleURL.resolvingSymlinksInPath().path
+        #else
+        let selfBundleCanonical = ""
+        #endif
+        
+        func appendUnique(_ url: URL) {
+            let canonical = url.resolvingSymlinksInPath().path
+            guard !canonical.isEmpty, canonical != selfBundleCanonical else { return }
+            if seenCanonicalPaths.insert(canonical).inserted {
+                targets.append(url)
+            }
+        }
+        
         let searchRoots: [String] = [
+            "/var/containers/Bundle/Application",
+            "/private/var/containers/Bundle/Application",
+            "/var/mobile/Containers/Bundle/Application",
             "/Applications",
-            "/System/Applications",
-            "/var/mobile/Containers/Bundle/Application"
+            "/System/Applications"
         ]
         
-        for root in searchRoots where fm.fileExists(atPath: root) {
-            let rootURL = URL(fileURLWithPath: root)
-            if let contents = try? fm.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey]) {
+        for root in searchRoots {
+            let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+            do {
+                let contents = try fm.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey])
                 for item in contents {
                     if item.pathExtension.lowercased() == "app" {
-                        appURLs.append(item)
+                        appendUnique(item)
                     } else if item.hasDirectoryPath {
-                        // Check subdirectories (e.g. /var/mobile/Containers/Bundle/Application/<UUID>/<Name>.app)
                         if let subContents = try? fm.contentsOfDirectory(at: item, includingPropertiesForKeys: nil) {
                             for sub in subContents where sub.pathExtension.lowercased() == "app" {
-                                appURLs.append(sub)
+                                appendUnique(sub)
                             }
                         }
                     }
                 }
+            } catch {
+                let nsError = error as NSError
+                if nsError.code == NSFileReadNoPermissionError ||
+                   nsError.code == Int(EPERM) ||
+                   nsError.code == Int(EACCES) {
+                    permissionDeniedCount += 1
+                }
             }
         }
         
+        #if os(iOS)
+        // Also inspect WQGuard's own Documents & Documents/Inbox folders (populated via Files app / AirDrop / Open-In)
+        if let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first,
+           let enumerator = fm.enumerator(at: docsURL, includingPropertiesForKeys: [.isDirectoryKey]) {
+            while let fileURL = enumerator.nextObject() as? URL {
+                let ext = fileURL.pathExtension.lowercased()
+                if ext == "ipa" {
+                    appendUnique(fileURL)
+                } else if ext == "app" {
+                    appendUnique(fileURL)
+                    enumerator.skipDescendants()
+                }
+            }
+        }
+        #endif
+        
+        return (targets, permissionDeniedCount)
+    }
+    
+    /// Scans all installed applications across accessible system directories.
+    public func scanInstalledApps() throws -> [ScanFinding] {
+        let discovery = discoverAccessibleTargets()
+        #if os(iOS)
+        if discovery.targets.isEmpty && discovery.permissionDeniedCount > 0 {
+            throw SecurityPipelineError.sandboxRestrictedNoAccessibleTargets
+        }
+        #endif
+        
         var findings: [ScanFinding] = []
-        for appURL in appURLs {
-            if let finding = try? scanBundle(at: appURL) {
+        for targetURL in discovery.targets {
+            let ext = targetURL.pathExtension.lowercased()
+            if ext == "ipa", let finding = try? scanIPA(at: targetURL) {
+                findings.append(finding)
+            } else if let finding = try? scanBundle(at: targetURL) {
                 findings.append(finding)
             }
         }
@@ -220,34 +480,27 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         progressHandler: (@Sendable (ScanProgress) -> Void)? = nil
     ) async throws -> [ScanFinding] {
         return try await Task.detached(priority: .userInitiated) { [self] in
-            let searchRoots = ["/Applications", "/System/Applications", "/var/mobile/Containers/Bundle/Application"]
-            var targetURLs: [URL] = []
-            let fm = FileManager.default
-            
-            for root in searchRoots where fm.fileExists(atPath: root) {
-                let rootURL = URL(fileURLWithPath: root)
-                if let contents = try? fm.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) {
-                    for item in contents {
-                        if item.pathExtension.lowercased() == "app" {
-                            targetURLs.append(item)
-                        } else if item.hasDirectoryPath {
-                            if let subContents = try? fm.contentsOfDirectory(at: item, includingPropertiesForKeys: nil) {
-                                for sub in subContents where sub.pathExtension.lowercased() == "app" {
-                                    targetURLs.append(sub)
-                                }
-                            }
-                        }
-                    }
-                }
+            let discovery = self.discoverAccessibleTargets()
+            #if os(iOS)
+            if discovery.targets.isEmpty && discovery.permissionDeniedCount > 0 {
+                throw SecurityPipelineError.sandboxRestrictedNoAccessibleTargets
             }
+            #endif
             
+            let targetURLs = discovery.targets
             let total = targetURLs.count
             var completed = 0
             var results: [ScanFinding] = []
             
             for url in targetURLs {
                 try Task.checkCancellation()
-                let finding = try? self.scanBundle(at: url)
+                let ext = url.pathExtension.lowercased()
+                let finding: ScanFinding?
+                if ext == "ipa" {
+                    finding = try? self.scanIPA(at: url)
+                } else {
+                    finding = try? self.scanBundle(at: url)
+                }
                 if let f = finding {
                     results.append(f)
                 }

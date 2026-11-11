@@ -12,11 +12,21 @@ public struct PostureHeroCard: View {
     public let posture: RiskTier
     public let isScanning: Bool
     public let progress: ScanProgress?
+    public let hasScannedApps: Bool
+    public let exposedCVECount: Int
 
-    public init(posture: RiskTier, isScanning: Bool, progress: ScanProgress?) {
+    public init(
+        posture: RiskTier,
+        isScanning: Bool,
+        progress: ScanProgress?,
+        hasScannedApps: Bool = true,
+        exposedCVECount: Int = 0
+    ) {
         self.posture = posture
         self.isScanning = isScanning
         self.progress = progress
+        self.hasScannedApps = hasScannedApps
+        self.exposedCVECount = exposedCVECount
     }
 
     public var body: some View {
@@ -76,6 +86,9 @@ public struct PostureHeroCard: View {
 
     private var cardColor: Color {
         if isScanning { return Color(red: 0.0, green: 0.78, blue: 0.65) }
+        if !hasScannedApps {
+            return exposedCVECount > 0 ? Color.orange : Color(red: 0.0, green: 0.78, blue: 0.65)
+        }
         switch posture {
         case .highRisk: return Color.red
         case .caution: return Color.orange
@@ -86,6 +99,9 @@ public struct PostureHeroCard: View {
 
     private var iconName: String {
         if isScanning { return "rays" }
+        if !hasScannedApps {
+            return exposedCVECount > 0 ? "shield.lefthalf.filled.badge.checkmark" : "shield.checkered"
+        }
         switch posture {
         case .highRisk: return "exclamationmark.shield.fill"
         case .caution: return "shield.lefthalf.filled.badge.alert"
@@ -95,10 +111,16 @@ public struct PostureHeroCard: View {
     }
 
     private var titleText: String {
-        WQStrings.postureTitle(for: posture, isScanning: isScanning)
+        if !isScanning && !hasScannedApps {
+            return WQStrings.posturePendingTitle(exposedCount: exposedCVECount)
+        }
+        return WQStrings.postureTitle(for: posture, isScanning: isScanning)
     }
 
     private var subtitleText: String {
-        WQStrings.postureSubtitle(for: posture, isScanning: isScanning)
+        if !isScanning && !hasScannedApps {
+            return WQStrings.posturePendingSubtitle(exposedCount: exposedCVECount)
+        }
+        return WQStrings.postureSubtitle(for: posture, isScanning: isScanning)
     }
 }

@@ -418,6 +418,14 @@ public final class IPAPackageScanner: @unchecked Sendable {
             let channelResult = ChannelClassifier.classifyBundle(at: bundleURL, cryptid: mainDetails.cryptid)
             let (hasGroups, appGroups) = CSBlobParser.shared.extractAppGroups(from: mainMachO.codeSignatureData)
             let gating = EntitlementGating.evaluate(hasAppGroups: hasGroups, appGroups: appGroups)
+            let backgroundModes = infoDict["UIBackgroundModes"] as? [String] ?? []
+            var entitlementsDict: [String: Any] = [:]
+            if let csData = mainMachO.codeSignatureData,
+               let parsed = try? CSBlobParser.shared.parseSuperBlob(csData),
+               let rawXml = parsed.rawXML,
+               let dict = try? CSBlobParser.shared.parseXMLPlist(Data(rawXml.utf8)) {
+                entitlementsDict = dict
+            }
             
             // 3. Layer 2: Main Executable Scan
             let scanContext = MachOScanner.ScanContext(
@@ -434,6 +442,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
             var allIndicators: [ThreatIndicator] = []
             var allMatchedSymbols: Set<String> = []
             var allLinkedDylibs: Set<String> = Set(mainDetails.linkedDylibs)
+            var allSymbols: Set<String> = Set(mainDetails.symbols)
             var dynamicLoadingFound = false
             var pathEnumerationFound = false
             
@@ -471,6 +480,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
                             }
                             allMatchedSymbols.formUnion(fwFinding.evidence.matchedSymbols)
                             allLinkedDylibs.formUnion(fwDetails.linkedDylibs)
+                            allSymbols.formUnion(fwDetails.symbols)
                             if fwFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
                             if fwFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
                         }
@@ -506,11 +516,45 @@ public final class IPAPackageScanner: @unchecked Sendable {
                                 }
                                 allMatchedSymbols.formUnion(plugFinding.evidence.matchedSymbols)
                                 allLinkedDylibs.formUnion(plugDetails.linkedDylibs)
+                                allSymbols.formUnion(plugDetails.symbols)
                                 if plugFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
                                 if plugFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
                             }
                         }
                     }
+                }
+            }
+            
+            // 5b. Expanded Local Threat Signatures (Impersonation, Photos Bypass, Brotli, Tweaks, Clipboard)
+            allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateImpersonation(
+                bundleId: bundleId,
+                displayName: appName,
+                installChannel: channelResult.channel,
+                cryptid: mainDetails.cryptid
+            ))
+            
+            if !mainDetails.isFairPlayEncrypted {
+                let dylibList = Array(allLinkedDylibs)
+                let symbolList = Array(allSymbols)
+                allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluatePhotosBypass(
+                    linkedDylibs: dylibList,
+                    symbols: symbolList,
+                    entitlements: entitlementsDict,
+                    cryptid: mainDetails.cryptid
+                ))
+                allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateBrotliSupplyChain(
+                    linkedDylibs: dylibList,
+                    symbols: symbolList
+                ))
+                allIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateInjectedDylibs(
+                    linkedDylibs: dylibList
+                ))
+                if let clipboardInd = ExpandedThreatCatalog.evaluateClipboardSnooping(
+                    backgroundModes: backgroundModes,
+                    symbols: symbolList,
+                    cryptid: mainDetails.cryptid
+                ) {
+                    allIndicators.append(clipboardInd)
                 }
             }
             

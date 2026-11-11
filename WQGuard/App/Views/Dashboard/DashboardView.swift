@@ -6,11 +6,13 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 import WQGuardCore
 
 public struct DashboardView: View {
     @EnvironmentObject var vm: ScanViewModel
     @State private var showExportSheet = false
+    @State private var showBatchIPAPicker = false
 
     public init() {}
 
@@ -21,7 +23,9 @@ public struct DashboardView: View {
                 PostureHeroCard(
                     posture: vm.overallPosture,
                     isScanning: vm.isScanning,
-                    progress: vm.scanProgress
+                    progress: vm.scanProgress,
+                    hasScannedApps: vm.hasScannedApps,
+                    exposedCVECount: vm.firmwareReport.exposedCount
                 )
 
                 // 2. One-Tap System Scan Action Card
@@ -63,6 +67,29 @@ public struct DashboardView: View {
                             .foregroundColor(.black)
                             .clipShape(RoundedRectangle(cornerRadius: 16))
                             .shadow(color: Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.35), radius: 8, y: 4)
+                        }
+
+                        Button(action: {
+                            #if os(iOS)
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            #endif
+                            showBatchIPAPicker = true
+                        }) {
+                            HStack {
+                                Image(systemName: "folder.fill.badge.plus")
+                                    .font(.headline)
+                                Text(WQStrings.batchImportIPAButton)
+                                    .font(.subheadline.bold())
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color(red: 0.13, green: 0.15, blue: 0.20))
+                            .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.4), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
                         }
                     }
                 }
@@ -144,6 +171,19 @@ public struct DashboardView: View {
         .navigationTitle(WQStrings.appTitle)
         .sheet(isPresented: $showExportSheet) {
             ReportExportView()
+        }
+        .fileImporter(
+            isPresented: $showBatchIPAPicker,
+            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive, .archive, .folder],
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls):
+                vm.scanMultipleIPAPackages(at: urls)
+            case .failure(let err):
+                vm.activeAlertMessage = err.localizedDescription
+                vm.showGlobalAlert = true
+            }
         }
     }
 }

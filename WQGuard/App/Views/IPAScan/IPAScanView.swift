@@ -91,6 +91,20 @@ public struct IPAScanView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .padding(.horizontal)
                 } else if let finding = vm.inspectedIPAFinding {
+                    if vm.totalScannedCount > 1 {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(Color(red: 0.0, green: 0.78, blue: 0.65))
+                            Text(WQStrings.batchIPACompletedBanner(vm.totalScannedCount))
+                                .font(.caption)
+                                .foregroundColor(.white)
+                            Spacer()
+                        }
+                        .padding(14)
+                        .background(Color(red: 0.12, green: 0.16, blue: 0.18))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .padding(.horizontal)
+                    }
                     IPAPackageCard(finding: finding)
                         .padding(.horizontal)
                 }
@@ -100,13 +114,13 @@ public struct IPAScanView: View {
         .navigationTitle(WQStrings.tabIPAScan)
         .fileImporter(
             isPresented: $showFilePicker,
-            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive],
-            allowsMultipleSelection: false
+            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive, .archive, .folder],
+            allowsMultipleSelection: true
         ) { result in
             switch result {
             case .success(let urls):
-                if let url = urls.first {
-                    vm.scanIPAPackage(at: url)
+                if !urls.isEmpty {
+                    vm.scanMultipleIPAPackages(at: urls)
                 }
             case .failure(let err):
                 vm.ipaErrorMessage = err.localizedDescription
