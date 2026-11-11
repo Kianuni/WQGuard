@@ -1,0 +1,121 @@
+name: CI & Packaging Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16+ Toolchain
+        run: |
+          echo "=== Resolving Xcode 16+ Toolchain ==="
+          SELECTED_XCODE=""
+          for xcode_path in \
+            "/Applications/Xcode_16.2.app" \
+            "/Applications/Xcode_16.1.app" \
+            "/Applications/Xcode_16.0.app" \
+            "/Applications/Xcode_16.app"; do
+            if [ -d "$xcode_path" ]; then
+              SELECTED_XCODE="$xcode_path"
+              break
+            fi
+          done
+
+          if [ -n "$SELECTED_XCODE" ]; then
+            echo "Selecting: $SELECTED_XCODE"
+            sudo xcode-select -s "$SELECTED_XCODE"
+          else
+            echo "Standard Xcode 16 path not found, using system default: $(xcode-select -p)"
+          fi
+
+          echo "Active Developer Directory: $(xcode-select -p)"
+          xcodebuild -version
+          swift --version
+
+      - name: SPM Strict Concurrency Test Suite
+        run: |
+          echo "=== Step 1: Running Swift Package Manager Strict Concurrency Tests ==="
+          swift test -Xswiftc -strict-concurrency=complete
+
+      - name: Headless iOS App Xcode Build
+        run: |
+          echo "=== Step 2: Compiling Headless iOS App (clean build) ==="
+          xcodebuild -project WQGuard.xcodeproj \
+            -scheme WQGuard \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            clean build
+
+      - name: Compile & Package CLI Executable (Release)
+        run: |
+          echo "=== Step 3: Compiling wqguard-cli Executable (Release) ==="
+          swift build -c release --product wqguard-cli
+
+          BIN_PATH="$(swift build -c release --show-bin-path)/wqguard-cli"
+          echo "CLI Binary Path: $BIN_PATH"
+          "$BIN_PATH" --version
+          "$BIN_PATH" --help
+
+          mkdir -p dist/cli
+          cp "$BIN_PATH" dist/cli/wqguard-cli
+          chmod +x dist/cli/wqguard-cli
+          if [ -f LICENSE ]; then cp LICENSE dist/cli/; fi
+          tar -czvf "dist/wqguard-cli-${{ matrix.os }}-arm64.tar.gz" -C dist/cli wqguard-cli
+
+      - name: Package Standalone iOS IPA
+        run: |
+          echo "=== Step 4: Packaging Standalone IPA Package ==="
+          chmod +x ./scripts/ipabuild.sh
+          ./scripts/ipabuild.sh --clean --configuration Release --skip-tests --output WQGuard.ipa
+          ls -lh WQGuard.ipa
+
+      - name: Upload Built IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WQGuard-iOS-IPA-${{ matrix.os }}
+          path: WQGuard.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload CLI Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wqguard-cli-binary-${{ matrix.os }}
+          path: |
+            dist/cli/wqguard-cli
+            dist/wqguard-cli-${{ matrix.os }}-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Surge Brotli Shield Artifact
+        if: matrix.os == 'macos-14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: WQGuard-Brotli-Shield-Surge
+          path: Surge/WQGuard-Brotli-Shield.sgmodule
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,189 @@
+/* Tabs */
+"tab_dashboard" = "仪表盘";
+"tab_findings" = "审计发现";
+"tab_ipa_scan" = "IPA 审查";
+"tab_firmware_radar" = "固件雷达";
+"tab_settings" = "设置与规则";
+
+/* Dashboard */
+"app_title" = "WQGuard 容器守卫";
+"start_system_scan" = "开始全盘安全检测";
+"scanning_in_progress" = "正在深度分析...";
+"cancel_scan" = "取消全盘扫描";
+"metrics_summary" = "审计统计概览";
+"scanned_apps" = "已扫描应用";
+"high_risk_alerts" = "高危告警";
+"known_tools" = "已知工具";
+"caution_alerts" = "前置留意";
+"safe_apps" = "安全合规";
+"view_detailed_findings" = "查看详细审计清单";
+"view_detailed_findings_sub" = "检查所有命中特征、私有符号与逃逸链接";
+"firmware_radar_title" = "固件 CVE 暴露雷达";
+"firmware_radar_sub" = "项待防护系统漏洞 · Surge 护盾一键导出";
+"export_audit_report" = "导出审计报告";
+"export_audit_report_sub" = "生成 RFC 8259 JSON / Markdown / 纯文本审计报告";
+
+/* Findings View */
+"filter_all" = "全部";
+"filter_high_risk" = "高危";
+"filter_known_tool" = "已知工具";
+"filter_caution" = "前置留意";
+"filter_safe" = "安全";
+"search_prompt" = "搜索应用名、Bundle ID 或 Team ID...";
+"no_scan_performed" = "尚未执行全盘扫描";
+"no_scan_performed_sub" = "点击「仪表盘」中的「开始全盘检测」启动审计。";
+"no_filtered_findings" = "无符合筛选条件的应用";
+"no_filtered_findings_sub" = "当前筛选等级下未发现任何风险记录。";
+
+/* IPA Scan View */
+"ipa_import_title" = "导入本地 IPA 安装包";
+"ipa_import_sub" = "安装前在沙盒内深度检测 containermanagerd 越权、私有相册调用与注入动态库";
+"select_ipa_button" = "选择本地 .ipa 文件";
+"ipa_analyzing" = "正在进行 4 层沙盒解析与 Mach-O 静态反编译...";
+"ipa_analysis_failed" = "IPA 分析失败";
+"preinstall_alert_high_risk" = "安装前预警：检测到越界沙盒逃逸特征，切勿安装！";
+"preinstall_alert_safe" = "安装前评估：未发现已知越权利用特征，处于安全状态。";
+
+/* Settings View */
+"settings_builtin_whitelist" = "内置已知研究工具白名单";
+"settings_builtin_whitelist_footer" = "启用白名单后，匹配开源工具特征的应用将评级为「已知工具提示」而非「高危告警」。";
+"settings_custom_rules" = "自定义白名单规则";
+"settings_no_custom_rules" = "暂无自定义规则";
+"settings_add_rule" = "添加自定义 Bundle ID 规则";
+"settings_reset_button" = "重置所有白名单为默认";
+"settings_about_header" = "关于 WQGuard";
+"settings_about_footer" = "WQGuard 是面向 iOS 26.2+ / iOS 27.x 的开源只读沙盒审计工具，保障设备免遭未授权跨容器提权渗透。";
+"settings_engine_version" = "引擎版本";
+"settings_app_build" = "应用构建";
+"settings_operating_mode" = "工作模式";
+"settings_read_only_mode" = "100% 严格只读 (O_RDONLY)";
+
+/* Common Buttons & Alerts */
+"alert_scan_title" = "安全扫描提示";
+"button_ok" = "确定";
+"button_cancel" = "取消";
+
+/* Risk Tiers */
+"risk_high_risk" = "高危告警";
+"risk_known_tool" = "已知工具提示";
+"risk_caution" = "前置条件留意";
+"risk_safe" = "安全";
+"risk_desc_high_risk" = "检测到越界沙盒访问特征或异常逃逸符号链接，存在越权风险。";
+"risk_desc_known_tool" = "检测到已知越权测试工具（已授权白名单），符合已知特征。";
+"risk_desc_caution" = "检测到 App Group 共享容器权限并伴随动态符号解析特征，建议留意。";
+"risk_desc_safe" = "未发现可疑跨容器访问特征或无 App Group 权限，处于安全状态。";
+
+/* Channels */
+"channel_sideloaded" = "🛠️ 个人侧载";
+"channel_enterprise" = "🏢 企业签";
+"channel_testflight" = "✈️ TestFlight";
+"channel_appstore" = "🍏 App Store";
+
+/* Posture Hero Card */
+"posture_deep_analyzing" = "正在深度分析:";
+"posture_status_scanning_title" = "深度审计进行中...";
+"posture_status_high_risk_title" = "高危越权告警";
+"posture_status_caution_title" = "前置条件留意";
+"posture_status_known_tool_title" = "发现已知定制工具";
+"posture_status_safe_title" = "系统状态安全合规";
+"posture_status_scanning_sub" = "正在执行 Mach-O 私有符号检索与共享容器逃逸符号链接排查";
+"posture_status_high_risk_sub" = "检测到未经授权的 containermanagerd 跨沙盒利用或异常逃逸符号链接！";
+"posture_status_caution_sub" = "应用声明了 App Group 容器共享权限并伴随动态符号解析特征。";
+"posture_status_known_tool_sub" = "匹配到白名单授权的开源定制工具（Erosion、WQFiles 等）。";
+"posture_status_safe_sub" = "所有扫描目标严格遵守 iOS 沙盒边界，未检出跨容器越权利用。";
+
+/* Metric Grid & Progress */
+"scan_preparing" = "准备中...";
+
+/* Finding Rows & Badges */
+"whitelisted_badge" = "已加入白名单";
+
+/* Finding Detail View */
+"static_audit_evidence_header" = "🔬 静态审计取证详情";
+"evidence_version" = "版本号";
+"evidence_team_id" = "开发者团队 ID";
+"evidence_team_id_unsigned" = "无 (Ad-hoc / 未签名)";
+"evidence_drm_status" = "FairPlay DRM 状态";
+"evidence_drm_encrypted" = "🔒 FairPlay 加密 (cryptid: 1)";
+"evidence_drm_unencrypted" = "🔓 未加密 Mach-O (cryptid: 0)";
+"evidence_app_groups" = "App Groups";
+"evidence_app_groups_none" = "无 (物理无法触发逃逸)";
+"evidence_private_symbols" = "私有符号引用";
+"evidence_none" = "无";
+"evidence_dynamic_loading" = "动态链接解析";
+"evidence_detected_dlopen" = "⚠️ 检出 (dlopen/dlsym)";
+"evidence_path_enumeration" = "路径爆破枚举";
+"evidence_detected_fsgetpath" = "⚠️ 检出 (fsgetpath)";
+"evidence_install_path" = "安装路径";
+"add_to_whitelist_button" = "将此应用加入信任白名单";
+"whitelist_added_title" = "已加入白名单";
+"whitelist_added_message" = "应用「%@」已添加至本地规则，风险等级已调整为已知工具。";
+
+/* Remediation Card View */
+"remediation_guidance_title" = "处置建议 (Remediation Guidance)";
+"emergency_workflow_title" = "应急处置流程:";
+"emergency_step_1" = "1. 立即长按图标卸载此应用，切勿启动。";
+"emergency_step_2" = "2. 前往「设置 -> 通用 -> VPN 与设备管理」注销签名描述文件。";
+"emergency_step_3" = "3. 重启设备，彻底注销并回收未受信内核沙盒令牌。";
+
+/* IPA Package Card & Injected Dylibs */
+"ipa_distribution_channel" = "分发渠道";
+"ipa_team_id_self_signed" = "无 (Ad-hoc / 个人自签)";
+"ipa_drm_encrypted" = "FairPlay 加密 (cryptid: 1)";
+"ipa_drm_unencrypted" = "未加密 (cryptid: 0, 完整静态反编译已完成)";
+"ipa_declared_app_groups" = "声明的 App Groups";
+"ipa_app_groups_none" = "无 (物理无法逃逸)";
+"ipa_dylib_count_label" = "动态链接库数量";
+"injected_dylibs_empty" = "未检出额外的第三方嵌入动态库。";
+
+/* Firmware Radar & Mitigations */
+"radar_exposed_count" = "%d 项漏洞暴露";
+"radar_patched_count" = "%d 项已打补丁";
+"surge_shield_title" = "Surge · 防 Brotli 溢出降级护盾";
+"surge_shield_description" = "针对未修复 iOS 26/27 系统的 libbrotli 堆溢出高危漏洞，在网络传输层强制剥离 br 压缩声明。内置 16 项严苛负向排除规则，保障 Apple Intelligence、普通话 Siri 与网银支付绝对不被拦截。";
+"surge_shield_preview" = "预览护盾规则";
+"surge_shield_export" = "一键导出 / 分享模块";
+"radar_known_vulns_header" = "固件已知高危漏洞暴露评估 (%d 项)";
+"radar_mitigation_guidance_header" = "🛡️ 不升级固件下的缓解处置建议";
+"radar_branch_lts" = "iOS 26.x 长期支持分支 (推荐配置 Surge 护盾)";
+"radar_branch_current" = "iOS 27.x 现行分支";
+"radar_branch_other" = "iOS %d.x 分支";
+"cve_status_exposed" = "⚠️ 暴露";
+"cve_status_patched" = "✅ 已修补";
+"cve_affected_versions" = "影响版本: %@";
+"mitigation_configure_button" = "立即前往配置";
+
+/* Surge Module Sheet */
+"surge_sheet_code_title" = "WQGuard · 防 Brotli 溢出降级护盾模块代码";
+"surge_sheet_nav_title" = "Surge 护盾预览";
+
+/* Settings Confirmation Dialog & Add Rule Sheet */
+"settings_reset_confirm_title" = "确认重置白名单？";
+"settings_reset_confirm_action" = "确认重置为默认";
+"settings_reset_confirm_message" = "将清除所有自定义规则，并将内置 6 款开源工具恢复为默认启用状态。";
+"rule_sheet_tool_name_placeholder" = "工具/应用名称 (例如: MyTool)";
+"rule_sheet_bundle_id_placeholder" = "Bundle Identifier (例如: com.example.tool*)";
+"rule_sheet_app_group_placeholder" = "App Group (可选，例如: group.com.example)";
+"rule_sheet_section_header" = "规则属性";
+"rule_sheet_section_footer" = "Bundle ID 与 App Group 支持通配符匹配（如 com.test.*）。";
+"rule_sheet_nav_title" = "添加自定义规则";
+
+/* Report Export View */
+"export_format_picker" = "报告格式";
+"export_copy_to_clipboard" = "复制到剪贴板";
+"export_share_file" = "分享 / 保存文件";
+"export_nav_title" = "导出安全审计报告";
+"export_copied_notice" = "已复制到剪贴板";
+
+/* Common Buttons & Actions */
+"button_close" = "关闭";
+"button_save" = "保存";
+"button_done" = "完成";
+"button_acknowledge" = "好";
+
+/* ScanViewModel Auxiliary Strings */
+"scan_engine_initializing" = "初始化扫描引擎...";
+"scan_failed_message" = "全盘扫描失败: %@";
+"custom_rule_default_description" = "用户自定义白名单规则";
+"report_no_data_placeholder" = "暂无扫描审计数据。请先执行全盘扫描或导入 IPA 安装包。";
+"surge_generation_failed_message" = "生成 Surge 护盾模块失败: %@";

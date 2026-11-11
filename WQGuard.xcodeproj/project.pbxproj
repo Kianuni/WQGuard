@@ -1,0 +1,387 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+				A00000050000000000000001 /* WQGuardCore in Frameworks */ = {isa = PBXBuildFile; productRef = A00000040000000000000001 /* WQGuardCore */; };
+		A00000100000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A000000F0000000000000001 /* Assets.xcassets */; };
+		A00002000000000000000000 /* WQGuardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000000 /* WQGuardApp.swift */; };
+		A00002000000000000000001 /* ScanViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000001 /* ScanViewModel.swift */; };
+		A00002000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000002 /* ContentView.swift */; };
+		A00002000000000000000003 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000003 /* DashboardView.swift */; };
+		A00002000000000000000004 /* PostureHeroCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000004 /* PostureHeroCard.swift */; };
+		A00002000000000000000005 /* MetricGridCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000005 /* MetricGridCard.swift */; };
+		A00002000000000000000006 /* FindingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000006 /* FindingsView.swift */; };
+		A00002000000000000000007 /* FindingRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000007 /* FindingRowView.swift */; };
+		A00002000000000000000008 /* FindingDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000008 /* FindingDetailView.swift */; };
+		A00002000000000000000009 /* RemediationCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000009 /* RemediationCardView.swift */; };
+		A0000200000000000000000A /* IPAScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000100000000000000000A /* IPAScanView.swift */; };
+		A0000200000000000000000B /* IPAPackageCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000100000000000000000B /* IPAPackageCard.swift */; };
+		A0000200000000000000000C /* InjectedDylibsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000100000000000000000C /* InjectedDylibsView.swift */; };
+		A0000200000000000000000D /* FirmwareRadarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000100000000000000000D /* FirmwareRadarView.swift */; };
+		A0000200000000000000000E /* CVECardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000100000000000000000E /* CVECardView.swift */; };
+		A0000200000000000000000F /* MitigationRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000100000000000000000F /* MitigationRowView.swift */; };
+		A00002000000000000000010 /* SurgeModuleSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000010 /* SurgeModuleSheet.swift */; };
+		A00002000000000000000011 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000011 /* SettingsView.swift */; };
+		A00002000000000000000012 /* AddWhitelistRuleSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000012 /* AddWhitelistRuleSheet.swift */; };
+		A00002000000000000000013 /* ReportExportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000013 /* ReportExportView.swift */; };
+		A00002000000000000000014 /* RiskBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000014 /* RiskBadge.swift */; };
+		A00002000000000000000015 /* InstallChannelBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000015 /* InstallChannelBadge.swift */; };
+		A00002000000000000000016 /* TerminalCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000016 /* TerminalCodeView.swift */; };
+		A00002000000000000000017 /* WQStrings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000017 /* WQStrings.swift */; };
+		A00003030000000000000001 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A00003000000000000000001 /* Localizable.strings */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+				A000000C0000000000000001 /* WQGuard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WQGuard.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A000000F0000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Resources/Assets.xcassets; sourceTree = "<group>"; };
+		A00000200000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/Info.plist; sourceTree = "<group>"; };
+		A00000210000000000000001 /* WQGuard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Resources/WQGuard.entitlements; sourceTree = "<group>"; };
+		A00001000000000000000000 /* WQGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/WQGuardApp.swift"; sourceTree = "<group>"; };
+		A00001000000000000000001 /* ScanViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/ViewModels/ScanViewModel.swift"; sourceTree = "<group>"; };
+		A00001000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/ContentView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000003 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Dashboard/DashboardView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000004 /* PostureHeroCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Dashboard/PostureHeroCard.swift"; sourceTree = "<group>"; };
+		A00001000000000000000005 /* MetricGridCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Dashboard/MetricGridCard.swift"; sourceTree = "<group>"; };
+		A00001000000000000000006 /* FindingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Findings/FindingsView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000007 /* FindingRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Findings/FindingRowView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000008 /* FindingDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Findings/FindingDetailView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000009 /* RemediationCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Findings/RemediationCardView.swift"; sourceTree = "<group>"; };
+		A0000100000000000000000A /* IPAScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/IPAScan/IPAScanView.swift"; sourceTree = "<group>"; };
+		A0000100000000000000000B /* IPAPackageCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/IPAScan/IPAPackageCard.swift"; sourceTree = "<group>"; };
+		A0000100000000000000000C /* InjectedDylibsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/IPAScan/InjectedDylibsView.swift"; sourceTree = "<group>"; };
+		A0000100000000000000000D /* FirmwareRadarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/FirmwareRadar/FirmwareRadarView.swift"; sourceTree = "<group>"; };
+		A0000100000000000000000E /* CVECardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/FirmwareRadar/CVECardView.swift"; sourceTree = "<group>"; };
+		A0000100000000000000000F /* MitigationRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/FirmwareRadar/MitigationRowView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000010 /* SurgeModuleSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/FirmwareRadar/SurgeModuleSheet.swift"; sourceTree = "<group>"; };
+		A00001000000000000000011 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Settings/SettingsView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000012 /* AddWhitelistRuleSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Settings/AddWhitelistRuleSheet.swift"; sourceTree = "<group>"; };
+		A00001000000000000000013 /* ReportExportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Export/ReportExportView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000014 /* RiskBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Components/RiskBadge.swift"; sourceTree = "<group>"; };
+		A00001000000000000000015 /* InstallChannelBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Components/InstallChannelBadge.swift"; sourceTree = "<group>"; };
+		A00001000000000000000016 /* TerminalCodeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Components/TerminalCodeView.swift"; sourceTree = "<group>"; };
+		A00001000000000000000017 /* WQStrings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Localization/WQStrings.swift"; sourceTree = "<group>"; };
+		A00003010000000000000001 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "App/Localization/zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		A00003020000000000000001 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = "App/Localization/en.lproj/Localizable.strings"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A00000060000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000050000000000000001 /* WQGuardCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000090000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A000000A0000000000000001 /* WQGuard */,
+				A000000B0000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A000000A0000000000000001 /* WQGuard */ = {
+			isa = PBXGroup;
+			children = (
+								A000000F0000000000000001 /* Assets.xcassets */,
+				A00000200000000000000001 /* Info.plist */,
+				A00000210000000000000001 /* WQGuard.entitlements */,
+				A00001000000000000000000 /* WQGuardApp.swift */,
+				A00001000000000000000001 /* ScanViewModel.swift */,
+				A00001000000000000000002 /* ContentView.swift */,
+				A00001000000000000000003 /* DashboardView.swift */,
+				A00001000000000000000004 /* PostureHeroCard.swift */,
+				A00001000000000000000005 /* MetricGridCard.swift */,
+				A00001000000000000000006 /* FindingsView.swift */,
+				A00001000000000000000007 /* FindingRowView.swift */,
+				A00001000000000000000008 /* FindingDetailView.swift */,
+				A00001000000000000000009 /* RemediationCardView.swift */,
+				A0000100000000000000000A /* IPAScanView.swift */,
+				A0000100000000000000000B /* IPAPackageCard.swift */,
+				A0000100000000000000000C /* InjectedDylibsView.swift */,
+				A0000100000000000000000D /* FirmwareRadarView.swift */,
+				A0000100000000000000000E /* CVECardView.swift */,
+				A0000100000000000000000F /* MitigationRowView.swift */,
+				A00001000000000000000010 /* SurgeModuleSheet.swift */,
+				A00001000000000000000011 /* SettingsView.swift */,
+				A00001000000000000000012 /* AddWhitelistRuleSheet.swift */,
+				A00001000000000000000013 /* ReportExportView.swift */,
+				A00001000000000000000014 /* RiskBadge.swift */,
+				A00001000000000000000015 /* InstallChannelBadge.swift */,
+				A00001000000000000000016 /* TerminalCodeView.swift */,
+				A00001000000000000000017 /* WQStrings.swift */,
+				A00003000000000000000001 /* Localizable.strings */,
+			);
+			path = WQGuard;
+			sourceTree = "<group>";
+		};
+		A000000B0000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A000000C0000000000000001 /* WQGuard.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00000020000000000000001 /* WQGuard */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000120000000000000001 /* Build configuration list for PBXNativeTarget "WQGuard" */;
+			buildPhases = (
+				A00000070000000000000001 /* Sources */,
+				A00000060000000000000001 /* Frameworks */,
+				A00000080000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WQGuard;
+			packageProductDependencies = (
+				A00000040000000000000001 /* WQGuardCore */,
+			);
+			productName = WQGuard;
+			productReference = A000000C0000000000000001 /* WQGuard.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000010000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = A00000110000000000000001 /* Build configuration list for PBXProject "WQGuard" */;
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				"zh-Hans",
+				en,
+				Base,
+			);
+			mainGroup = A00000090000000000000001;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A00000030000000000000001 /* XCLocalSwiftPackageReference "." */,
+			);
+			preferredProjectObjectVersion = 56;
+			productRefGroup = A000000B0000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A00000020000000000000001 /* WQGuard */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A00000080000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000100000000000000001 /* Assets.xcassets in Resources */,
+				A00003030000000000000001 /* Localizable.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00000070000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+								A00002000000000000000000 /* WQGuardApp.swift in Sources */,
+				A00002000000000000000001 /* ScanViewModel.swift in Sources */,
+				A00002000000000000000002 /* ContentView.swift in Sources */,
+				A00002000000000000000003 /* DashboardView.swift in Sources */,
+				A00002000000000000000004 /* PostureHeroCard.swift in Sources */,
+				A00002000000000000000005 /* MetricGridCard.swift in Sources */,
+				A00002000000000000000006 /* FindingsView.swift in Sources */,
+				A00002000000000000000007 /* FindingRowView.swift in Sources */,
+				A00002000000000000000008 /* FindingDetailView.swift in Sources */,
+				A00002000000000000000009 /* RemediationCardView.swift in Sources */,
+				A0000200000000000000000A /* IPAScanView.swift in Sources */,
+				A0000200000000000000000B /* IPAPackageCard.swift in Sources */,
+				A0000200000000000000000C /* InjectedDylibsView.swift in Sources */,
+				A0000200000000000000000D /* FirmwareRadarView.swift in Sources */,
+				A0000200000000000000000E /* CVECardView.swift in Sources */,
+				A0000200000000000000000F /* MitigationRowView.swift in Sources */,
+				A00002000000000000000010 /* SurgeModuleSheet.swift in Sources */,
+				A00002000000000000000011 /* SettingsView.swift in Sources */,
+				A00002000000000000000012 /* AddWhitelistRuleSheet.swift in Sources */,
+				A00002000000000000000013 /* ReportExportView.swift in Sources */,
+				A00002000000000000000014 /* RiskBadge.swift in Sources */,
+				A00002000000000000000015 /* InstallChannelBadge.swift in Sources */,
+				A00002000000000000000016 /* TerminalCodeView.swift in Sources */,
+				A00002000000000000000017 /* WQStrings.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		A00003000000000000000001 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				A00003010000000000000001 /* zh-Hans */,
+				A00003020000000000000001 /* en */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		A00000130000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				ONLY_ACTIVE_ARCH = YES;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A00000140000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_OPTIMIZATION_LEVEL = s;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		A00000150000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WQGuard/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wqguard.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_CONST_VALUE_PROTOCOLS = "";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A00000160000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WQGuard/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wqguard.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_CONST_VALUE_PROTOCOLS = "";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000110000000000000001 /* Build configuration list for PBXProject "WQGuard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000130000000000000001 /* Debug */,
+				A00000140000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A00000120000000000000001 /* Build configuration list for PBXNativeTarget "WQGuard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000150000000000000001 /* Debug */,
+				A00000160000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A00000030000000000000001 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ".";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A00000040000000000000001 /* WQGuardCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = WQGuardCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A00000010000000000000001 /* Project object */;
+}

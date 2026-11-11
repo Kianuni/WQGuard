@@ -1,0 +1,189 @@
+/* Tabs */
+"tab_dashboard" = "Dashboard";
+"tab_findings" = "Findings";
+"tab_ipa_scan" = "IPA Scan";
+"tab_firmware_radar" = "Firmware Radar";
+"tab_settings" = "Settings";
+
+/* Dashboard */
+"app_title" = "WQGuard";
+"start_system_scan" = "Start System Audit";
+"scanning_in_progress" = "Deep analysis in progress...";
+"cancel_scan" = "Cancel Scan";
+"metrics_summary" = "Audit Summary";
+"scanned_apps" = "Scanned Apps";
+"high_risk_alerts" = "High Risk";
+"known_tools" = "Known Tools";
+"caution_alerts" = "Caution";
+"safe_apps" = "Safe";
+"view_detailed_findings" = "View Detailed Audit Findings";
+"view_detailed_findings_sub" = "Inspect matched signatures, private symbols, and symlinks";
+"firmware_radar_title" = "Firmware CVE Exposure Radar";
+"firmware_radar_sub" = "Unpatched CVEs · Surge Shield export";
+"export_audit_report" = "Export Audit Report";
+"export_audit_report_sub" = "Generate RFC 8259 JSON / Markdown / PlainText reports";
+
+/* Findings View */
+"filter_all" = "All";
+"filter_high_risk" = "High Risk";
+"filter_known_tool" = "Known Tools";
+"filter_caution" = "Caution";
+"filter_safe" = "Safe";
+"search_prompt" = "Search app name, Bundle ID, or Team ID...";
+"no_scan_performed" = "No System Scan Performed Yet";
+"no_scan_performed_sub" = "Tap 'Start System Audit' in Dashboard to initiate scan.";
+"no_filtered_findings" = "No Matching Applications Found";
+"no_filtered_findings_sub" = "No security findings match the selected filter tier.";
+
+/* IPA Scan View */
+"ipa_import_title" = "Import Local IPA Package";
+"ipa_import_sub" = "Pre-installation sandbox analysis for containermanagerd escape, private photos & dylib injection";
+"select_ipa_button" = "Select Local .ipa File";
+"ipa_analyzing" = "Performing 4-layer sandbox analysis & Mach-O static decompilation...";
+"ipa_analysis_failed" = "IPA Analysis Failed";
+"preinstall_alert_high_risk" = "Pre-install Warning: Detected sandbox escape exploit! Do NOT install!";
+"preinstall_alert_safe" = "Pre-install Assessment: Clean. No exploit signatures detected.";
+
+/* Settings View */
+"settings_builtin_whitelist" = "Built-in Research Tools Whitelist";
+"settings_builtin_whitelist_footer" = "When enabled, apps matching open-source research tools are classified as Known Tools rather than High Risk.";
+"settings_custom_rules" = "Custom Whitelist Rules";
+"settings_no_custom_rules" = "No custom rules configured";
+"settings_add_rule" = "Add Custom Bundle ID Rule";
+"settings_reset_button" = "Reset Whitelist to Defaults";
+"settings_about_header" = "About WQGuard";
+"settings_about_footer" = "WQGuard is an open-source 100% read-only sandbox audit utility for iOS 26.2+ / 27.x.";
+"settings_engine_version" = "Engine Version";
+"settings_app_build" = "App Build";
+"settings_operating_mode" = "Operating Mode";
+"settings_read_only_mode" = "100% Read-Only (O_RDONLY)";
+
+/* Common Buttons & Alerts */
+"alert_scan_title" = "Security Scan Notice";
+"button_ok" = "OK";
+"button_cancel" = "Cancel";
+
+/* Risk Tiers */
+"risk_high_risk" = "High Risk";
+"risk_known_tool" = "Known Tool";
+"risk_caution" = "Caution";
+"risk_safe" = "Safe";
+"risk_desc_high_risk" = "Detected unauthorized sandbox escape signatures or escaping symlinks.";
+"risk_desc_known_tool" = "Matched known security utility in authorized whitelist.";
+"risk_desc_caution" = "Possesses App Group entitlements with dynamic symbol resolution (dlopen/dlsym).";
+"risk_desc_safe" = "No suspicious cross-container access signatures or App Groups; safe.";
+
+/* Channels */
+"channel_sideloaded" = "🛠️ Sideloaded";
+"channel_enterprise" = "🏢 Enterprise";
+"channel_testflight" = "✈️ TestFlight";
+"channel_appstore" = "🍏 App Store";
+
+/* Posture Hero Card */
+"posture_deep_analyzing" = "Analyzing:";
+"posture_status_scanning_title" = "Deep Audit in Progress...";
+"posture_status_high_risk_title" = "High Risk Warning";
+"posture_status_caution_title" = "Caution Advised";
+"posture_status_known_tool_title" = "Known Research Tools Detected";
+"posture_status_safe_title" = "System Posture Safe & Compliant";
+"posture_status_scanning_sub" = "Scanning Mach-O private symbols & shared container symlink traversals...";
+"posture_status_high_risk_sub" = "Detected unauthorized containermanagerd sandbox escape or escaping symlinks!";
+"posture_status_caution_sub" = "App declares App Group shared containers with dynamic symbol resolution.";
+"posture_status_known_tool_sub" = "Matched authorized open-source research tools (Erosion, WQFiles, etc.).";
+"posture_status_safe_sub" = "All scanned targets strictly comply with iOS sandbox boundaries.";
+
+/* Metric Grid & Progress */
+"scan_preparing" = "Preparing...";
+
+/* Finding Rows & Badges */
+"whitelisted_badge" = "Whitelisted";
+
+/* Finding Detail View */
+"static_audit_evidence_header" = "🔬 Static Audit Evidence Details";
+"evidence_version" = "Version";
+"evidence_team_id" = "Developer Team ID";
+"evidence_team_id_unsigned" = "None (Ad-hoc / Unsigned)";
+"evidence_drm_status" = "FairPlay DRM Status";
+"evidence_drm_encrypted" = "🔒 FairPlay Encrypted (cryptid: 1)";
+"evidence_drm_unencrypted" = "🔓 Unencrypted Mach-O (cryptid: 0)";
+"evidence_app_groups" = "App Groups";
+"evidence_app_groups_none" = "None (Physically incapable of escape)";
+"evidence_private_symbols" = "Private Symbols";
+"evidence_none" = "None";
+"evidence_dynamic_loading" = "Dynamic Resolution";
+"evidence_detected_dlopen" = "⚠️ Detected (dlopen/dlsym)";
+"evidence_path_enumeration" = "Path Enumeration";
+"evidence_detected_fsgetpath" = "⚠️ Detected (fsgetpath)";
+"evidence_install_path" = "Install Path";
+"add_to_whitelist_button" = "Add App to Trusted Whitelist";
+"whitelist_added_title" = "Added to Whitelist";
+"whitelist_added_message" = "App \"%@\" has been added to local rules. Risk tier adjusted to Known Tool.";
+
+/* Remediation Card View */
+"remediation_guidance_title" = "Remediation Guidance";
+"emergency_workflow_title" = "Emergency Mitigation Workflow:";
+"emergency_step_1" = "1. Immediately touch and hold the app icon to delete it. Do NOT launch.";
+"emergency_step_2" = "2. Go to Settings > General > VPN & Device Management to remove provisioning profile.";
+"emergency_step_3" = "3. Restart device to completely invalidate and reclaim untrusted kernel sandbox tokens.";
+
+/* IPA Package Card & Injected Dylibs */
+"ipa_distribution_channel" = "Distribution Channel";
+"ipa_team_id_self_signed" = "None (Ad-hoc / Self-signed)";
+"ipa_drm_encrypted" = "FairPlay Encrypted (cryptid: 1)";
+"ipa_drm_unencrypted" = "Unencrypted (cryptid: 0, full static decompilation completed)";
+"ipa_declared_app_groups" = "Declared App Groups";
+"ipa_app_groups_none" = "None (Physically incapable of escape)";
+"ipa_dylib_count_label" = "Dynamic Libraries Count";
+"injected_dylibs_empty" = "No additional third-party embedded dynamic libraries detected.";
+
+/* Firmware Radar & Mitigations */
+"radar_exposed_count" = "%d Vulnerabilities Exposed";
+"radar_patched_count" = "%d Patched";
+"surge_shield_title" = "Surge · Brotli Downgrade Shield";
+"surge_shield_description" = "Enforces stripping br compression at the network layer for unpatched iOS 26/27 libbrotli heap overflow vulnerabilities. Built-in 16 strict exclusion rules ensure Apple Intelligence, Siri, and banking payments are never intercepted.";
+"surge_shield_preview" = "Preview Shield Rules";
+"surge_shield_export" = "Export / Share Module";
+"radar_known_vulns_header" = "Firmware Known High-Risk CVE Assessment (%d items)";
+"radar_mitigation_guidance_header" = "🛡️ Non-Upgrade Mitigation Advisories";
+"radar_branch_lts" = "iOS 26.x LTS Branch (Surge Shield Recommended)";
+"radar_branch_current" = "iOS 27.x Active Branch";
+"radar_branch_other" = "iOS %d.x Branch";
+"cve_status_exposed" = "⚠️ Exposed";
+"cve_status_patched" = "✅ Patched";
+"cve_affected_versions" = "Affected: %@";
+"mitigation_configure_button" = "Configure Now";
+
+/* Surge Module Sheet */
+"surge_sheet_code_title" = "WQGuard · Brotli Shield Module Code";
+"surge_sheet_nav_title" = "Surge Shield Preview";
+
+/* Settings Confirmation Dialog & Add Rule Sheet */
+"settings_reset_confirm_title" = "Reset Whitelist to Defaults?";
+"settings_reset_confirm_action" = "Reset to Defaults";
+"settings_reset_confirm_message" = "This will remove all custom whitelist rules and restore the 6 built-in research tools to enabled state.";
+"rule_sheet_tool_name_placeholder" = "Tool / App Name (e.g. MyTool)";
+"rule_sheet_bundle_id_placeholder" = "Bundle Identifier (e.g. com.example.tool*)";
+"rule_sheet_app_group_placeholder" = "App Group (Optional, e.g. group.com.example)";
+"rule_sheet_section_header" = "Rule Attributes";
+"rule_sheet_section_footer" = "Bundle ID and App Group support wildcard patterns (e.g. com.test.*).";
+"rule_sheet_nav_title" = "Add Custom Rule";
+
+/* Report Export View */
+"export_format_picker" = "Report Format";
+"export_copy_to_clipboard" = "Copy to Clipboard";
+"export_share_file" = "Share / Save File";
+"export_nav_title" = "Export Security Audit Report";
+"export_copied_notice" = "Copied to Clipboard";
+
+/* Common Buttons & Actions */
+"button_close" = "Close";
+"button_save" = "Save";
+"button_done" = "Done";
+"button_acknowledge" = "OK";
+
+/* ScanViewModel Auxiliary Strings */
+"scan_engine_initializing" = "Initializing scan engine...";
+"scan_failed_message" = "System scan failed: %@";
+"custom_rule_default_description" = "User custom whitelist rule";
+"report_no_data_placeholder" = "No audit data available yet. Please perform a system scan or import an IPA package first.";
+"surge_generation_failed_message" = "Failed to generate Surge shield module: %@";

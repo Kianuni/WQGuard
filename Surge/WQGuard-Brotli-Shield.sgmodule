@@ -1,0 +1,18 @@
+#!name=WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
+#!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 系统未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell, CVSS 9.2)，在网络传输层剥离 Accept-Encoding 中的 br 算法强制降级为 gzip/deflate。内置 16 项严苛负向排除规则，确保 Apple Intelligence、Siri、iCloud 与网银支付绝对不被拦截。
+#!version=1.0.0
+#!category=安全防护
+#!arguments=EXTRA_MITM_HOSTS:*.example.invalid
+#!arguments-desc=可追加需要强制 Brotli 降级保护的高风险自定义域名（支持通配符如 *.example.com；如需保护全部 Safari/WebView 流量可填入 *，内置排除列表已保护 Apple 核心服务与金融应用）。
+
+[Header Rewrite]
+# 强制剥离客户端请求中的 br 压缩声明，降级至安全的 gzip 与 deflate 编码
+^https?:// header-replace Accept-Encoding "gzip, deflate"
+
+[Script]
+# 防御不遵从客户端协商、强行回传 Content-Encoding: br 的恶意服务端响应
+brotli-response-guard = type=http-response,pattern=^https?://,requires-body=false,max-size=0,script-text="const ce = ($response.headers['Content-Encoding'] || $response.headers['content-encoding'] || '').toLowerCase(); if (ce.includes('br')) { $done({response: {status: 403, headers: {'Content-Type': 'text/plain; charset=utf-8'}, body: 'WQGuard Brotli Shield: Blocked unsolicited Brotli response stream to mitigate CVE-2026-111497.'}}); } else { $done({}); }"
+
+[MITM]
+# 严苛负向排除规则保障：Apple Intelligence、普通话 Siri、PCC 中继、OpenAI 及银行绝对不走 MITM！
+hostname = %APPEND% -*.apple.com, -*.icloud.com, -*.icloud-content.com, -*.mzstatic.com, -*.cdn-apple.com, -guzzoni.apple.com, -*.siri.apple.com, -gspe1-ssl.ls.apple.com, -apple-relay.*, -cp4.cloudflare.com, -*.openai.com, -*.chatgpt.com, -*.binance.com, -*.okx.com, -*.tenpay.com, -*.alipay.com, *.xyz, *.top, *.icu, *.cyou, *.sbs, *.cfd, *.buzz, *.fun, *.click, *.link, *.site, *.online, *.shop, *.vip, *.pw, *.work, *.rest, *.monster, *.quest, *.zip, *.mov, {{{EXTRA_MITM_HOSTS}}}
