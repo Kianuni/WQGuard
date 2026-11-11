@@ -78,6 +78,9 @@ public final class ScanViewModel: ObservableObject {
     public func requestToggleFullSystemScan(_ wantEnable: Bool) {
         if wantEnable {
             guard !isFullSystemScanEnabled else { return }
+            // Force SwiftUI Toggle (UISwitch) to remain visually OFF until user confirms in the consent sheet
+            self.objectWillChange.send()
+            isFullSystemScanEnabled = false
             #if os(iOS)
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
             #endif
