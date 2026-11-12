@@ -831,5 +831,5 @@ WQGuard adheres to strict vendor-neutral, production-grade identity standards ac
 | **Dedicated Scanner Group** | `group.com.wqguard.scanner` | Dedicated container for scoped read-only queries | `WhitelistEngine.swift` |
 
 ### 6.2 Third-Party Identity Isolation & Whitelist Clarification
-- **Third-Party Domain Boundary**: The domain `cz.kolbi.*` appears in `WhitelistEngine.swift` exclusively to identify the third-party open-source utility `WQFiles` (`cz.kolbi.wqfiles`, `group.cz.kolbi.wqfiles`). WQGuard itself is an independent MIT-licensed project and maintains zero vendor overlap with third-party utilities.
+- **Minimal Default Whitelist**: By default, `WhitelistEngine.swift` whitelists **only `WQGuard` itself** (`com.wqguard.app`), ensuring all third-party container research utilities and sideloaded binaries are transparently surfaced rather than silently exempted. Users may register custom Bundle ID rules as needed.
 - **Portability & Hygiene**: Zero personal machine paths (e.g., `/Users/<username>/`), private author emails, or local hostnames exist within WQGuard distribution artifacts, test suites, or CI pipelines.
