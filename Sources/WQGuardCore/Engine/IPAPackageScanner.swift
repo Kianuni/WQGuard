@@ -361,11 +361,10 @@ public final class IPAPackageScanner: @unchecked Sendable {
             if entry.isDirectory {
                 try FileManager.default.createDirectory(at: destURL, withIntermediateDirectories: true)
             } else {
-                // Filter: Extract binaries, dylibs, plists, mobileprovision, receipts, configs
+                // Filter: Extract only Mach-O binaries, dylibs, plists, mobileprovision, and receipts (skip bulky assets/images inside Frameworks)
                 let ext = destURL.pathExtension.lowercased()
                 let isRelevant = ext == "plist" || ext == "mobileprovision" || ext == "dylib" ||
-                                 ext == "" || entry.path.contains("/Frameworks/") ||
-                                 entry.path.contains("/PlugIns/") || entry.path.contains("/_MASReceipt/") ||
+                                 ext == "" || entry.path.contains("/_MASReceipt/") ||
                                  entry.path.contains("/StoreKit/")
                 
                 if isRelevant {

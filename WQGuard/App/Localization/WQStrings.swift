@@ -33,7 +33,9 @@ public enum WQStrings {
     // MARK: - Dashboard Overview
     public static var appTitle: String { localized("app_title", en: "WQGuard", zh: "WQGuard 容器守卫") }
     public static var startSystemScan: String { localized("start_system_scan", en: "Scan Self-Signed Apps", zh: "一键扫描自签应用") }
-    public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "Scans sideloaded/self-signed apps & authorized signing directories", zh: "专门针对个人自签与企业侧载应用（自动过滤系统与 App Store 应用）") }
+    public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "Scans sideloaded/self-signed apps & bound signing directories", zh: "扫描已绑定的签名工具目录与本机自签包") }
+    public static var bindSigningFolderButton: String { localized("bind_signing_folder_btn", en: "Bind Signer Folder", zh: "绑定签名工具目录") }
+    public static var selectIPAFileButton: String { localized("select_ipa_file_btn", en: "Select .ipa Files", zh: "直接选择 .ipa 文件") }
     public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Select Signing Folder / Import IPAs", zh: "绑定自签工具目录 / 导入 IPA") }
     public static var scanningInProgress: String { localized("scanning_in_progress", en: "Deep analysis in progress...", zh: "正在深度分析...") }
     public static var cancelScan: String { localized("cancel_scan", en: "Cancel Scan", zh: "取消全盘扫描") }

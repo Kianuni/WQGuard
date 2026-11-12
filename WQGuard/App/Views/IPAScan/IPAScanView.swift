@@ -12,6 +12,7 @@ import WQGuardCore
 public struct IPAScanView: View {
     @EnvironmentObject var vm: ScanViewModel
     @State private var showFilePicker = false
+    @State private var showFolderPicker = false
 
     public init() {}
 
@@ -40,14 +41,26 @@ public struct IPAScanView: View {
                             .padding(.horizontal, 24)
                     }
 
-                    Button(action: { showFilePicker = true }) {
-                        Label(WQStrings.selectIPAButton, systemImage: "folder.fill")
-                            .font(.headline)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 14)
-                            .background(Color(red: 0.0, green: 0.78, blue: 0.65))
-                            .foregroundColor(.black)
-                            .clipShape(Capsule())
+                    HStack(spacing: 12) {
+                        Button(action: { showFilePicker = true }) {
+                            Label(WQStrings.selectIPAFileButton, systemImage: "doc.zipper")
+                                .font(.subheadline.bold())
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 13)
+                                .background(Color(red: 0.0, green: 0.78, blue: 0.65))
+                                .foregroundColor(.black)
+                                .clipShape(Capsule())
+                        }
+
+                        Button(action: { showFolderPicker = true }) {
+                            Label(WQStrings.bindSigningFolderButton, systemImage: "folder.fill.badge.plus")
+                                .font(.subheadline.bold())
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 13)
+                                .background(Color.white.opacity(0.1))
+                                .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
+                                .clipShape(Capsule())
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -112,19 +125,39 @@ public struct IPAScanView: View {
             .padding(.top, 16)
         }
         .navigationTitle(WQStrings.tabIPAScan)
-        .fileImporter(
-            isPresented: $showFilePicker,
-            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive, .archive, .folder],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if !urls.isEmpty {
-                    vm.scanMultipleIPAPackages(at: urls)
+        .background(
+            EmptyView()
+                .fileImporter(
+                    isPresented: $showFilePicker,
+                    allowedContentTypes: [.data],
+                    allowsMultipleSelection: true
+                ) { result in
+                    switch result {
+                    case .success(let urls):
+                        if !urls.isEmpty {
+                            vm.scanMultipleIPAPackages(at: urls)
+                        }
+                    case .failure(let err):
+                        vm.ipaErrorMessage = err.localizedDescription
+                    }
                 }
-            case .failure(let err):
-                vm.ipaErrorMessage = err.localizedDescription
-            }
-        }
+        )
+        .background(
+            EmptyView()
+                .fileImporter(
+                    isPresented: $showFolderPicker,
+                    allowedContentTypes: [.folder],
+                    allowsMultipleSelection: false
+                ) { result in
+                    switch result {
+                    case .success(let urls):
+                        if !urls.isEmpty {
+                            vm.scanMultipleIPAPackages(at: urls)
+                        }
+                    case .failure(let err):
+                        vm.ipaErrorMessage = err.localizedDescription
+                    }
+                }
+        )
     }
 }

@@ -442,7 +442,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                 return
             }
             guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue,
-                  let enumerator = fm.enumerator(at: dirURL, includingPropertiesForKeys: [.isDirectoryKey]) else {
+                  let enumerator = fm.enumerator(at: dirURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
                 return
             }
             while let fileURL = enumerator.nextObject() as? URL {
@@ -534,9 +534,15 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             
             for url in targetURLs {
                 try Task.checkCancellation()
+                progressHandler?(ScanProgress(
+                    currentTarget: url.lastPathComponent,
+                    completedCount: completed,
+                    totalCount: total,
+                    currentFinding: nil
+                ))
                 let ext = url.pathExtension.lowercased()
                 let finding: ScanFinding?
-                if ext == "ipa" {
+                if ext == "ipa" || ext == "tipa" {
                     finding = try? self.scanIPA(at: url)
                 } else {
                     finding = try? self.scanBundle(at: url)

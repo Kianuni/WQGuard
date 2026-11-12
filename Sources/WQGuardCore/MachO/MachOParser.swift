@@ -186,13 +186,12 @@ public struct BinaryReader: Sendable {
     public func readFixedString(at offset: Int, maxLength: Int) -> String? {
         guard inRange(offset: offset, length: maxLength) else { return nil }
         return data.withUnsafeBytes { raw in
-            guard let ptr = raw.baseAddress?.advanced(by: offset).assumingMemoryBound(to: CChar.self) else { return nil }
+            guard let base = raw.baseAddress?.advanced(by: offset).assumingMemoryBound(to: UInt8.self) else { return nil }
             var len = 0
-            while len < maxLength && ptr[len] != 0 {
+            while len < maxLength && base[len] != 0 {
                 len += 1
             }
-            let sub = data.subdata(in: offset..<(offset + len))
-            return String(data: sub, encoding: .utf8) ?? String(data: sub, encoding: .ascii)
+            return String(decoding: UnsafeBufferPointer(start: base, count: len), as: UTF8.self)
         }
     }
 
@@ -200,13 +199,12 @@ public struct BinaryReader: Sendable {
         guard inRange(offset: offset, length: 1) else { return nil }
         let available = min(maxScanLength, data.count - offset)
         return data.withUnsafeBytes { raw in
-            guard let ptr = raw.baseAddress?.advanced(by: offset).assumingMemoryBound(to: CChar.self) else { return nil }
+            guard let base = raw.baseAddress?.advanced(by: offset).assumingMemoryBound(to: UInt8.self) else { return nil }
             var len = 0
-            while len < available && ptr[len] != 0 {
+            while len < available && base[len] != 0 {
                 len += 1
             }
-            let sub = data.subdata(in: offset..<(offset + len))
-            return String(data: sub, encoding: .utf8) ?? String(data: sub, encoding: .ascii)
+            return String(decoding: UnsafeBufferPointer(start: base, count: len), as: UTF8.self)
         }
     }
 

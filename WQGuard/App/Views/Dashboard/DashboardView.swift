@@ -12,7 +12,8 @@ import WQGuardCore
 public struct DashboardView: View {
     @EnvironmentObject var vm: ScanViewModel
     @State private var showExportSheet = false
-    @State private var showBatchIPAPicker = false
+    @State private var showFolderPicker = false
+    @State private var showIPAFilePicker = false
 
     public init() {}
 
@@ -74,33 +75,59 @@ public struct DashboardView: View {
                             .shadow(color: Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.35), radius: 8, y: 4)
                         }
 
-                        Button(action: {
-                            #if os(iOS)
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            #endif
-                            vm.showSideloadPickerFromDashboard = true
-                        }) {
-                            HStack {
-                                Image(systemName: "folder.fill.badge.plus")
-                                    .font(.headline)
-                                Text(WQStrings.batchImportIPAButton)
-                                    .font(.subheadline.bold())
-                                if !vm.bookmarkedFolderNames.isEmpty {
-                                    Text("(\(vm.bookmarkedFolderNames.joined(separator: ", ")))")
-                                        .font(.caption2)
-                                        .foregroundColor(.gray)
-                                        .lineLimit(1)
+                        HStack(spacing: 10) {
+                            Button(action: {
+                                #if os(iOS)
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                #endif
+                                showFolderPicker = true
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "folder.fill.badge.plus")
+                                        .font(.subheadline)
+                                    Text(WQStrings.bindSigningFolderButton)
+                                        .font(.footnote.bold())
                                 }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 13)
+                                .background(Color(red: 0.13, green: 0.15, blue: 0.20))
+                                .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .stroke(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.4), lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(Color(red: 0.13, green: 0.15, blue: 0.20))
-                            .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14)
-                                    .stroke(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.4), lineWidth: 1)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
+
+                            Button(action: {
+                                #if os(iOS)
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                #endif
+                                showIPAFilePicker = true
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "doc.zipper")
+                                        .font(.subheadline)
+                                    Text(WQStrings.selectIPAFileButton)
+                                        .font(.footnote.bold())
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 13)
+                                .background(Color(red: 0.13, green: 0.15, blue: 0.20))
+                                .foregroundColor(.white)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                            }
+                        }
+
+                        if !vm.bookmarkedFolderNames.isEmpty {
+                            Text("已绑定目录: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
+                                .font(.caption2)
+                                .foregroundColor(.gray)
+                                .lineLimit(1)
                         }
                     }
                 }
@@ -183,18 +210,43 @@ public struct DashboardView: View {
         .sheet(isPresented: $showExportSheet) {
             ReportExportView()
         }
-        .fileImporter(
-            isPresented: $vm.showSideloadPickerFromDashboard,
-            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive, .archive, .folder, .package],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                vm.scanMultipleIPAPackages(at: urls)
-            case .failure(let err):
-                vm.activeAlertMessage = err.localizedDescription
-                vm.showGlobalAlert = true
+        .onChange(of: vm.showSideloadPickerFromDashboard) { newValue in
+            if newValue {
+                vm.showSideloadPickerFromDashboard = false
+                showFolderPicker = true
             }
         }
+        .background(
+            EmptyView()
+                .fileImporter(
+                    isPresented: $showFolderPicker,
+                    allowedContentTypes: [.folder],
+                    allowsMultipleSelection: false
+                ) { result in
+                    switch result {
+                    case .success(let urls):
+                        vm.scanMultipleIPAPackages(at: urls)
+                    case .failure(let err):
+                        vm.activeAlertMessage = err.localizedDescription
+                        vm.showGlobalAlert = true
+                    }
+                }
+        )
+        .background(
+            EmptyView()
+                .fileImporter(
+                    isPresented: $showIPAFilePicker,
+                    allowedContentTypes: [.data],
+                    allowsMultipleSelection: true
+                ) { result in
+                    switch result {
+                    case .success(let urls):
+                        vm.scanMultipleIPAPackages(at: urls)
+                    case .failure(let err):
+                        vm.activeAlertMessage = err.localizedDescription
+                        vm.showGlobalAlert = true
+                    }
+                }
+        )
     }
 }

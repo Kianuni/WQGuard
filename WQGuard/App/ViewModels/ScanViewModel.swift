@@ -168,6 +168,7 @@ public final class ScanViewModel: ObservableObject {
                 guard !findings.isEmpty else {
                     self.isScanning = false
                     self.scanProgress = nil
+                    try? await Task.sleep(nanoseconds: 150_000_000)
                     self.showSideloadPickerFromDashboard = true
                     return
                 }
@@ -186,9 +187,10 @@ public final class ScanViewModel: ObservableObject {
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 #endif
             } catch is SecurityPipelineError {
-                // On standard sandboxed sideload with no bound signing folder yet, directly open picker
+                // On standard sandboxed sideload with no bound signing folder yet, cleanly open picker after UI settles
                 self.isScanning = false
                 self.scanProgress = nil
+                try? await Task.sleep(nanoseconds: 150_000_000)
                 self.showSideloadPickerFromDashboard = true
             } catch {
                 if Task.isCancelled {
@@ -262,7 +264,7 @@ public final class ScanViewModel: ObservableObject {
                                     self?.saveDirectoryBookmarkData(bData)
                                 }
                             }
-                            if let enumerator = fm.enumerator(at: itemURL, includingPropertiesForKeys: [.isDirectoryKey]) {
+                            if let enumerator = fm.enumerator(at: itemURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
                                 while let subURL = enumerator.nextObject() as? URL {
                                     let subExt = subURL.pathExtension.lowercased()
                                     if subExt == "ipa" || subExt == "tipa" {
@@ -289,6 +291,15 @@ public final class ScanViewModel: ObservableObject {
 
                     for target in expandedTargets {
                         try Task.checkCancellation()
+                        let preProgress = ScanProgress(
+                            currentTarget: target.lastPathComponent,
+                            completedCount: completed,
+                            totalCount: total,
+                            currentFinding: nil
+                        )
+                        Task { @MainActor [weak self] in
+                            self?.scanProgress = preProgress
+                        }
                         do {
                             let finding: ScanFinding
                             if target.pathExtension.lowercased() == "app" {
