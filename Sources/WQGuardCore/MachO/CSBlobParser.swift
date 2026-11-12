@@ -175,7 +175,76 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         }
     }
 
+    /// Extracts and merges full entitlements dictionary across all Slot 5 (XML Plist) and Slot 7 (ASN.1 DER) blobs.
+    /// Infallible: returns empty dictionary if no valid entitlements are present.
+    public func parseMergedEntitlements(from codeSignatureData: Data?) -> [String: Any] {
+        guard let data = codeSignatureData, data.count >= 12 else { return [:] }
+        return data.withUnsafeBytes { buffer -> [String: Any] in
+            guard let magic = Self.readUInt32BE(from: buffer, at: 0),
+                  magic == CSBlobConstants.superBlobMagic,
+                  let lengthU32 = Self.readUInt32BE(from: buffer, at: 4) else {
+                return [:]
+            }
+            let totalLength = Int(lengthU32)
+            guard totalLength >= 12, totalLength <= buffer.count,
+                  let entries = try? parseBlobIndices(from: buffer, totalLength: totalLength) else {
+                return [:]
+            }
+
+            var merged: [String: Any] = [:]
+            var mergedGroups: [String] = []
+
+            func mergeDict(_ dict: [String: Any]) {
+                for (k, v) in dict {
+                    if k == CSBlobConstants.appGroupsKey {
+                        let groups = extractAppGroups(fromPlistDict: [k: v])
+                        for g in groups where !mergedGroups.contains(g) {
+                            mergedGroups.append(g)
+                        }
+                    } else if merged[k] == nil {
+                        merged[k] = v
+                    }
+                }
+            }
+
+            // 1. Merge all Slot 5 (XML Plist) entries
+            for entry in entries where entry.type == CSBlobConstants.slotEntitlements || entry.magic == CSBlobConstants.entitlementXmlMagic {
+                let start = entry.payloadOffset
+                let end = start + entry.payloadLength
+                if start >= 0, end <= buffer.count, start <= end {
+                    let payload = Data(buffer[start..<end])
+                    if let dict = try? parseXMLPlist(payload) {
+                        mergeDict(dict)
+                    }
+                }
+            }
+
+            // 2. Merge all Slot 7 (ASN.1 DER CoreEntitlements) entries
+            for entry in entries where entry.type == CSBlobConstants.slotDerEntitlements || entry.magic == CSBlobConstants.entitlementDerMagic {
+                let start = entry.payloadOffset
+                let end = start + entry.payloadLength
+                if start >= 0, end <= buffer.count, start <= end {
+                    let payload = Data(buffer[start..<end])
+                    if let dict = try? parseDEREntitlements(payload) {
+                        mergeDict(dict)
+                    }
+                    if let derGroups = try? parseDERAppGroups(payload) {
+                        for g in derGroups where !mergedGroups.contains(g) {
+                            mergedGroups.append(g)
+                        }
+                    }
+                }
+            }
+
+            if !mergedGroups.isEmpty {
+                merged[CSBlobConstants.appGroupsKey] = mergedGroups
+            }
+            return merged
+        }
+    }
+
     /// Automatically sniffs whether input data is a standalone SuperBlob or full Mach-O binary.
+    /// Unions App Groups across all architecture slices when given a Universal/FAT binary.
     public func extractAppGroups(fromMachO data: Data) -> (hasAppGroups: Bool, appGroups: [String]) {
         guard data.count >= 12 else { return (false, []) }
 
@@ -185,7 +254,21 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             return extractAppGroups(from: data)
         }
 
-        // Otherwise navigate Mach-O load commands to find LC_CODE_SIGNATURE
+        // Union App Groups across all executable iOS ARM slices in FAT/Thin binaries
+        if let allSlices = try? MachOParser.parseAllSlices(data: data), !allSlices.isEmpty {
+            var combined: [String] = []
+            for slice in MachOParser.selectAuditSlices(from: allSlices) {
+                let (_, groups) = extractAppGroups(from: slice.codeSignatureData)
+                for g in groups where !combined.contains(g) {
+                    combined.append(g)
+                }
+            }
+            if !combined.isEmpty {
+                return (true, combined)
+            }
+        }
+
+        // Fallback byte-safe Mach-O load command navigator
         guard let csData = extractCodeSignatureSlice(from: data) else {
             return (false, [])
         }
@@ -512,6 +595,7 @@ public enum ASN1DERDecoder {
         case data(Data)
         case sequence([Node])
         case set([Node])
+        case constructed(tag: UInt8, children: [Node])
         case other(tag: UInt8, data: Data)
     }
 
@@ -541,6 +625,25 @@ public enum ASN1DERDecoder {
 
         let tag = buf[offset]
         var cursor = offset + 1
+
+        // Support ITU-T X.690 high-tag-number form ((tag & 0x1f) == 0x1f)
+        if (tag & 0x1f) == 0x1f {
+            var tagOctets = 0
+            var foundTerminator = false
+            while cursor < buf.count && tagOctets < 5 {
+                let b = buf[cursor]
+                cursor += 1
+                tagOctets += 1
+                if (b & 0x80) == 0 {
+                    foundTerminator = true
+                    break
+                }
+            }
+            guard foundTerminator else {
+                throw CSBlobError.malformedDER(reason: "Malformed or truncated high-tag-number DER tag at offset \(offset)")
+            }
+        }
+
         guard cursor < buf.count else {
             throw CSBlobError.malformedDER(reason: "Truncated DER stream at offset \(offset)")
         }
@@ -586,6 +689,19 @@ public enum ASN1DERDecoder {
         let valSlice = UnsafeRawBufferPointer(rebasing: buf[valStart..<(valStart + valueLength)])
         let valData = Data(valSlice)
 
+        func decodeChildren() throws -> [Node] {
+            var children: [Node] = []
+            var innerOffset = 0
+            while innerOffset < valSlice.count {
+                if let child = try decodeNode(from: valSlice, offset: &innerOffset, depth: depth + 1, maxDepth: maxDepth) {
+                    children.append(child)
+                } else {
+                    break
+                }
+            }
+            return children
+        }
+
         switch tag {
         case 0x01: // BOOLEAN
             guard valueLength == 1 else {
@@ -608,30 +724,17 @@ public enum ASN1DERDecoder {
             return .data(valData)
 
         case 0x30: // SEQUENCE
-            var children: [Node] = []
-            var innerOffset = 0
-            while innerOffset < valSlice.count {
-                if let child = try decodeNode(from: valSlice, offset: &innerOffset, depth: depth + 1, maxDepth: maxDepth) {
-                    children.append(child)
-                } else {
-                    break
-                }
-            }
-            return .sequence(children)
+            return .sequence(try decodeChildren())
 
         case 0x31: // SET
-            var children: [Node] = []
-            var innerOffset = 0
-            while innerOffset < valSlice.count {
-                if let child = try decodeNode(from: valSlice, offset: &innerOffset, depth: depth + 1, maxDepth: maxDepth) {
-                    children.append(child)
-                } else {
-                    break
-                }
-            }
-            return .set(children)
+            return .set(try decodeChildren())
 
         default:
+            // Any constructed ASN.1 container ((tag & 0x20) != 0), including Apple CoreEntitlements
+            // [APPLICATION 16] (0x70) and [CONTEXT 16] (0xb0) wrappers.
+            if (tag & 0x20) != 0 {
+                return .constructed(tag: tag, children: try decodeChildren())
+            }
             return .other(tag: tag, data: valData)
         }
     }
@@ -646,7 +749,7 @@ public enum ASN1DERDecoder {
                 if !trimmed.isEmpty && !groups.contains(trimmed) {
                     groups.append(trimmed)
                 }
-            case .sequence(let items), .set(let items):
+            case .sequence(let items), .set(let items), .constructed(_, let items):
                 for item in items {
                     collectFromStringNode(item)
                 }
@@ -662,7 +765,7 @@ public enum ASN1DERDecoder {
 
         func walk(_ n: Node) {
             switch n {
-            case .sequence(let children), .set(let children):
+            case .sequence(let children), .set(let children), .constructed(_, let children):
                 // Pair: [keyNode, valueNode]
                 if children.count == 2,
                    case .string(let k) = children[0],
@@ -693,29 +796,60 @@ public enum ASN1DERDecoder {
     public static func toDictionary(_ node: Node) -> [String: Any] {
         var dict: [String: Any] = [:]
 
+        func asPair(_ n: Node) -> (String, Node)? {
+            switch n {
+            case .sequence(let pair), .set(let pair), .constructed(_, let pair):
+                if pair.count == 2, case .string(let key) = pair[0] {
+                    return (key, pair[1])
+                }
+                return nil
+            default:
+                return nil
+            }
+        }
+
         func convertVal(_ n: Node) -> Any {
             switch n {
             case .boolean(let b): return b
             case .integer(let i): return i
             case .string(let s): return s
             case .data(let d): return d
-            case .sequence(let seq): return seq.map(convertVal)
-            case .set(let set): return set.map(convertVal)
+            case .sequence(let items), .set(let items), .constructed(_, let items):
+                if !items.isEmpty {
+                    let pairs = items.compactMap(asPair)
+                    if pairs.count == items.count {
+                        var sub: [String: Any] = [:]
+                        for (k, v) in pairs {
+                            sub[k] = convertVal(v)
+                        }
+                        return sub
+                    }
+                }
+                return items.map(convertVal)
             case .other(_, let d): return d
             }
         }
 
-        switch node {
-        case .sequence(let children), .set(let children):
-            for child in children {
-                if case .sequence(let pair) = child, pair.count == 2,
-                   case .string(let key) = pair[0] {
-                    dict[key] = convertVal(pair[1])
+        func walkDict(_ n: Node) {
+            switch n {
+            case .sequence(let children), .set(let children), .constructed(_, let children):
+                if let (k, v) = asPair(n) {
+                    dict[k] = convertVal(v)
+                    return
                 }
+                for child in children {
+                    if let (k, v) = asPair(child) {
+                        dict[k] = convertVal(v)
+                    } else {
+                        walkDict(child)
+                    }
+                }
+            default:
+                break
             }
-        default:
-            break
         }
+
+        walkDict(node)
         return dict
     }
 }

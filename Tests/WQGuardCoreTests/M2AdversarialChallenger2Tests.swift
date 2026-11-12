@@ -353,13 +353,13 @@ final class M2AdversarialChallenger2Tests: XCTestCase {
 
     /// 2.1 Fast-Path Gating Invariant: Benign App Without App Group Entitlement
     func test_C2_fastPathGatingInvariant_NoAppGroups_MustBeGatedOutImmediatelyAsSafe() throws {
-        // Construct binary containing ALL exploit signatures simultaneously:
+        // Construct binary containing ALL App-Group-dependent containermanagerd (`worse_query`) signatures:
         // - libsystem_containermanager.dylib
-        // - all 8 exploit symbols
-        // - com.apple.containermanagerd
-        // - fsgetpath
+        // - all 8 containermanagerd exploit symbols
         // - dlopen / dlsym
-        let allSignatures = [
+        // (Note: `fsgetpath` / `bad_query` CM-05 is an App-Group-independent APFS inode enumeration syscall
+        // and MUST NOT be gated out by missing App Groups; verified explicitly in Part D below.)
+        let containermanagerdSignatures = [
             "container_query_create",
             "container_query_set_group_identifiers",
             "container_query_operation_set_part",
@@ -368,14 +368,13 @@ final class M2AdversarialChallenger2Tests: XCTestCase {
             "sandbox_extension_consume",
             "container_query_get_single_result",
             "container_query_iterate_results_sync",
-            "fsgetpath",
             "dlopen",
             "dlsym"
         ]
         let binaryData = SyntheticMachOGenerator.shared.generateThin(config: .init(
             cryptid: 0,
             linkedDylibs: ["/usr/lib/system/libsystem_containermanager.dylib"],
-            symbols: allSignatures
+            symbols: containermanagerdSignatures
         ))
 
         // A: Application with no App Group entitlement (empty array)
@@ -388,7 +387,7 @@ final class M2AdversarialChallenger2Tests: XCTestCase {
         let details = try MachOScanner.shared.parseMachO(data: binaryData)
         let finding = MachOScanner.shared.scan(details: details, context: ctxNoGroups)
 
-        XCTAssertEqual(finding.riskTier, .safe, "CRITICAL INVARIANT: App without App Group entitlement MUST be gated out as Safe")
+        XCTAssertEqual(finding.riskTier, .safe, "CRITICAL INVARIANT: App without App Group entitlement and without standalone syscalls MUST be gated out as Safe")
         XCTAssertTrue(finding.indicators.isEmpty, "Gated out app MUST have zero threat indicators")
         XCTAssertFalse(finding.isWhitelisted)
         XCTAssertFalse(finding.evidence.hasAppGroups)
@@ -408,6 +407,16 @@ final class M2AdversarialChallenger2Tests: XCTestCase {
         XCTAssertTrue(gatingDirect.isGatedOut)
         XCTAssertEqual(gatingDirect.riskTier, .safe)
         XCTAssertFalse(gatingDirect.shouldProceedToDeepScan)
+
+        // D: Standalone `fsgetpath` (`bad_query` CM-05) requires NO App Groups and MUST bypass Layer 1 fast-path gating
+        let reconBinary = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            cryptid: 0,
+            symbols: ["_fsgetpath"]
+        ))
+        let reconDetails = try MachOScanner.shared.parseMachO(data: reconBinary)
+        let reconFinding = MachOScanner.shared.scan(details: reconDetails, context: ctxNoGroups)
+        XCTAssertEqual(reconFinding.riskTier, .highRisk)
+        XCTAssertTrue(reconFinding.indicators.contains { $0.signature == "fsgetpath" })
     }
 
     /// 2.2 CSBlob Entitlement Extraction Gating Test

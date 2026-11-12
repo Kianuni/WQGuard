@@ -467,19 +467,22 @@ final class AdversarialM6Challenger2Tests: XCTestCase {
         XCTAssertEqual(rep25.exposedCount, 7, "iOS 25 must expose exactly 7 older vulnerabilities")
         XCTAssertEqual(rep25.overallRiskTier, .highRisk)
 
-        // 13b. iOS 26.7.1: All 8 vulnerabilities exposed
+        // 13b. iOS 26.7.0: All 8 vulnerabilities exposed; iOS 26.7.1: coreGraphics2D patched -> 7 exposed
+        let v26_0 = SystemOSVersion(major: 26, minor: 7, patch: 0)
+        XCTAssertEqual(engine.evaluate(osVersion: v26_0).exposedCount, 8)
         let v26_1 = SystemOSVersion(major: 26, minor: 7, patch: 1)
-        XCTAssertEqual(engine.evaluate(osVersion: v26_1).exposedCount, 8)
+        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v26_1))
+        XCTAssertEqual(engine.evaluate(osVersion: v26_1).exposedCount, 7)
 
-        // 13c. iOS 26.7.2: photosBypass & coreGraphicsPDF patched -> 6 exposed
+        // 13c. iOS 26.7.2: coreGraphics2D + photosBypass & coreGraphicsPDF patched -> 5 exposed
         let v26_2 = SystemOSVersion(major: 26, minor: 7, patch: 2)
-        XCTAssertEqual(engine.evaluate(osVersion: v26_2).exposedCount, 6)
+        XCTAssertEqual(engine.evaluate(osVersion: v26_2).exposedCount, 5)
 
-        // 13d. iOS 26.7.3: brotli, appIntents, imessage, bluetoothAirPlay patched; coreGraphics2D still exposed (<27) + worseQuery -> 2 exposed
+        // 13d. iOS 26.7.3: brotli, appIntents, imessage, bluetoothAirPlay also patched; only worseQuery 0day exposed -> 1 exposed
         let v26_3 = SystemOSVersion(major: 26, minor: 7, patch: 3)
-        XCTAssertEqual(engine.evaluate(osVersion: v26_3).exposedCount, 2)
+        XCTAssertEqual(engine.evaluate(osVersion: v26_3).exposedCount, 1)
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v26_3))
-        XCTAssertTrue(engine.isVulnerable(.coreGraphics2D, in: v26_3))
+        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v26_3))
 
         // 13e. iOS 27.0.0: coreGraphics2D patched; 7 others exposed
         let v27_0 = SystemOSVersion(major: 27, minor: 0, patch: 0)

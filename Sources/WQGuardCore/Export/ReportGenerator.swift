@@ -120,8 +120,8 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
         let safePct = String(format: "%.1f%%", Double(safeCount) / Double(total) * 100.0)
 
         md += "| **High Risk (高危告警)** | 🔴 | `\(highCount)` | `\(highPct)` | 包含 containermanagerd 逃逸调用、私有沙盒令牌或异常逃逸符号链接 |\n"
-        md += "| **Known Tool (已知工具)** | 🟡 | `\(knownCount)` | `\(knownPct)` | 匹配受信任白名单规则或侧载签名管理工具（WQGuard、Feather、LocalDevVPN 等） |\n"
-        md += "| **Caution (前置留意)** | 🟠 | `\(cautionCount)` | `\(cautionPct)` | 声明 App Group 并具备动态符号解析（dlopen/dlsym）能力的侧载/企业应用 |\n"
+        md += "| **Known Tool (已知工具)** | 🟡 | `\(knownCount)` | `\(knownPct)` | 匹配 WQGuard 自身身份或用户显式添加的受信任白名单规则 |\n"
+        md += "| **Caution (前置留意)** | 🟠 | `\(cautionCount)` | `\(cautionPct)` | 声明 App Group、包含第三方注入动态库或侧载签名管理组件 |\n"
         md += "| **Safe (安全合规)** | 🟢 | `\(safeCount)` | `\(safePct)` | 无 App Group 共享权限或经完整静态扫描未发现可疑特征的合规应用 |\n"
         md += "| **Total / 总计扫描** | 🛡️ | `\(session.totalApps)` | `100.0%` | 全部分发渠道扫描应用汇总 |\n\n"
 
@@ -308,14 +308,14 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
         case .knownTool:
             return """
             > ### 🟡 ADVISORY: KNOWN UTILITIES DETECTED / 发现已知定制工具
-            > **Posture / 安全态势**: Authorized Known Tools Identified (检测到已知开源工具)  
-            > **Description / 说明**: Applications matching the user-configured or self-identity whitelist (e.g., WQGuard, Feather, LocalDevVPN) were detected.
+            > **Posture / 安全态势**: Authorized Known Tools Identified (检测到已授权白名单工具)  
+            > **Description / 说明**: Applications matching the WQGuard self-identity rule or user-configured custom whitelist rules were detected.
             """
         case .caution:
             return """
             > ### 🟠 NOTICE: POTENTIAL PREREQUISITES DETECTED / 前置条件留意
             > **Posture / 安全态势**: Escape Prerequisites Present (存在潜在逃逸前置条件)  
-            > **Description / 说明**: Applications possessing `com.apple.security.application-groups` combined with dynamic symbol loading (`dlopen`/`dlsym`) were found. While not matching exploit signatures, they possess technical prerequisites.
+            > **Description / 说明**: Applications possessing `com.apple.security.application-groups` combined with dynamic symbol loading (`dlopen`/`dlsym`), embedded dylibs, or third-party sideload signers were found.
             """
         case .safe:
             return """
@@ -429,13 +429,13 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
                 )
             case .knownTool:
                 return (
-                    en: "Known Customization Utility: Ensure this tool was obtained from official open-source releases. Note: \(customGuidance)",
-                    zh: "已知定制工具：请确认该应用来源于官方开源渠道。如果您未主动安装，建议删除。备注：\(customGuidance)"
+                    en: "Known Whitelisted Utility: Ensure this tool was obtained from trusted official releases. Note: \(customGuidance)",
+                    zh: "已授权白名单工具：请确认该应用来源于受信任渠道。如果您未主动安装，建议删除。备注：\(customGuidance)"
                 )
             case .caution:
                 return (
-                    en: "Precondition Notice: App Group entitlement and dynamic loading detected. Verify developer identity. Note: \(customGuidance)",
-                    zh: "前置条件提醒：检测到 App Group 权限与动态解析特征，请核实开发者来源。备注：\(customGuidance)"
+                    en: "Precondition Notice: App Group entitlement, third-party dylib, or sideload signer detected. Verify developer identity. Note: \(customGuidance)",
+                    zh: "前置条件提醒：检测到 App Group 权限、第三方动态库或侧载签名组件特征，请核实开发者来源。备注：\(customGuidance)"
                 )
             case .safe:
                 return (
@@ -452,10 +452,10 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
                 zh: "高危处置建议：1. 立即从设备上卸载此应用。2. 进入「设置 > 通用 > VPN 与设备管理」移除对应未受信任的企业或个人开发者证书。3. 重启设备以清除临时内核沙盒令牌，杜绝残留持久化隐患。"
             )
         case .knownTool:
-            let toolName = finding.whitelistedToolName ?? "Open-Source Utility"
+            let toolName = finding.whitelistedToolName ?? "Whitelisted Utility"
             return (
-                en: "Known Utility (\(toolName)): This application matches an active trusted whitelist rule or sideload manager profile. If you did not intentionally install or authorize this tool, remove it from your device.",
-                zh: "已知工具提示（\(toolName)）：该应用匹配当前启用的信任白名单规则或侧载签名管理组件。若非本人主动安装或授权，建议立即从设备中移除。"
+                en: "Known Utility (\(toolName)): This application matches an active user-configured or WQGuard self-identity whitelist rule. If you did not intentionally authorize this rule, remove it in Settings.",
+                zh: "已知工具提示（\(toolName)）：该应用匹配当前启用的信任白名单规则。若非本人主动授权，请在设置中移除对应规则并卸载应用。"
             )
         case .caution:
             return (

@@ -37,7 +37,7 @@ public enum ExpandedThreatCatalog {
         ImpersonatedBrand(
             name: "Trust Wallet",
             bundleIdPatterns: ["com.sixdays.trust", "trustwallet"],
-            displayNames: ["trust wallet", "trust"],
+            displayNames: ["trust wallet", "trustwallet"],
             description: "多链加密货币钱包，常见侧载重打包用于注入资产划转后门"
         ),
         ImpersonatedBrand(
@@ -95,7 +95,9 @@ public enum ExpandedThreatCatalog {
         "_OBJC_CLASS_$_PLPhotoLibrary",
         "-[PLPhotoLibrary",
         "+[PLPhotoLibrary",
-        "PhotoLibraryServices"
+        "PhotoLibraryServices",
+        "systemPhotoLibrary",
+        "sharedPhotoLibrary"
     ]
 
     public static let photosEntitlementPrefix = "com.apple.private.photos."
@@ -176,9 +178,11 @@ public enum ExpandedThreatCatalog {
         }
 
         // Symbol checks
+        let privateSelectorsOnly: Set<String> = ["systemPhotoLibrary"]
         for sym in symbols {
-            for targetSym in photosSymbols {
-                if sym.contains(targetSym) {
+            for targetSym in photosSymbols where targetSym != "sharedPhotoLibrary" {
+                let matched = privateSelectorsOnly.contains(targetSym) ? (sym == targetSym || sym.contains(" \(targetSym)]")) : sym.contains(targetSym)
+                if matched {
                     indicators.append(ThreatIndicator(
                         signature: targetSym,
                         description: "二进制包含私有相册调用符号 \(sym)，疑似利用私有接口窃取系统照片。",
@@ -260,12 +264,28 @@ public enum ExpandedThreatCatalog {
         }
 
         var indicators: [ThreatIndicator] = []
-        let rawBid = (bundleId ?? "").lowercased()
-        let rawName = (displayName ?? "").lowercased()
+        let rawBid = (bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let rawName = (displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let asciiTokens = Set(
+            rawName.split { !$0.isASCII || (!$0.isLetter && !$0.isNumber) }.map(String.init)
+        )
 
         for brand in targetBrands {
-            let matchBid = brand.bundleIdPatterns.contains { rawBid.contains($0) }
-            let matchName = brand.displayNames.contains { rawName.contains($0) }
+            let matchBid = !rawBid.isEmpty && brand.bundleIdPatterns.contains { pat in
+                rawBid == pat
+                    || rawBid.hasPrefix(pat + ".")
+                    || rawBid.contains("." + pat + ".")
+                    || rawBid.hasSuffix("." + pat)
+            }
+            let matchName = !rawName.isEmpty && brand.displayNames.contains { pat in
+                let isASCII = pat.unicodeScalars.allSatisfy { $0.isASCII }
+                if isASCII && !pat.contains(" ") {
+                    // Single-word ASCII brand/alias (e.g., "tg", "okx"): require exact word token boundary
+                    // so substrings inside unrelated words ("NetGuard", "PostgREST", "GitGraph", "ZeroTrust") never false-positive.
+                    return rawName == pat || asciiTokens.contains(pat)
+                }
+                return rawName == pat || rawName.contains(pat)
+            }
 
             if matchBid || matchName {
                 indicators.append(ThreatIndicator(
@@ -286,6 +306,7 @@ public enum ExpandedThreatCatalog {
         linkedDylibs: [String]
     ) -> [ThreatIndicator] {
         var indicators: [ThreatIndicator] = []
+        var flaggedFiles: Set<String> = []
 
         for dylib in linkedDylibs {
             var matchedKnownHooker = false
@@ -306,18 +327,43 @@ public enum ExpandedThreatCatalog {
                 continue
             }
 
-            // Check non-system @executable_path/Frameworks/ tweaks
-            if dylib.hasPrefix("@executable_path/Frameworks/") || dylib.hasPrefix("@rpath/") {
-                let filename = (dylib as NSString).lastPathComponent.lowercased()
+            let lowerDylib = dylib.lowercased()
+            let filename = (dylib as NSString).lastPathComponent.lowercased()
+            guard !filename.isEmpty else { continue }
+
+            // Dedicated sideload tweak injection folders (.app/Dylibs/* or .app/DynamicLibraries/*)
+            let isInSideloadTweakFolder =
+                lowerDylib.hasPrefix("@executable_path/dylibs/") ||
+                lowerDylib.hasPrefix("@executable_path/dynamiclibraries/") ||
+                lowerDylib.contains("/dylibs/") ||
+                lowerDylib.contains("/dynamiclibraries/")
+
+            if isInSideloadTweakFolder && filename.hasSuffix(".dylib") {
+                if flaggedFiles.insert(filename).inserted {
+                    indicators.append(ThreatIndicator(
+                        signature: filename,
+                        description: "检测到侧载注入目录动态库: \(filename)（常见于 Feather / Cyan / Azule 第三方插件注入），请核实注入组件来源。",
+                        category: "Injected Tweak / Modded IPA",
+                        location: "Embedded Dylib: \(dylib)",
+                        severity: .caution
+                    ))
+                }
+                continue
+            }
+
+            // Check non-system @executable_path/ or @rpath/ tweaks
+            if dylib.hasPrefix("@executable_path/") || dylib.hasPrefix("@rpath/") {
                 for pattern in suspiciousTweakPatterns {
                     if filename.contains(pattern) {
-                        indicators.append(ThreatIndicator(
-                            signature: filename,
-                            description: "检测到内嵌可疑注入插件或外挂动态库: \(filename)",
-                            category: "Injected Tweak / Modded IPA",
-                            location: "LC_LOAD_DYLIB: \(dylib)",
-                            severity: .caution
-                        ))
+                        if flaggedFiles.insert(filename).inserted {
+                            indicators.append(ThreatIndicator(
+                                signature: filename,
+                                description: "检测到内嵌可疑注入插件或外挂动态库: \(filename)",
+                                category: "Injected Tweak / Modded IPA",
+                                location: "LC_LOAD_DYLIB: \(dylib)",
+                                severity: .caution
+                            ))
+                        }
                         break
                     }
                 }

@@ -59,10 +59,12 @@ script-providers:
       const ce = String(headers['Content-Encoding'] || headers['content-encoding'] || '');
       if (/(^|[,\s])br($|[,\s;])/i.test(ce)) {
         $done({
-          response: {
-            status: 403,
-            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-WQGuard-Shield': 'Blocked-Unsolicited-Brotli' },
-            body: 'WQGuard Brotli Shield: Blocked unsolicited Brotli response stream to mitigate CVE-2026-111497.'
+          status: 403,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Length': '0',
+            'Connection': 'close',
+            'X-WQGuard-Shield': 'Blocked-Unsolicited-Brotli'
           }
         });
       } else {

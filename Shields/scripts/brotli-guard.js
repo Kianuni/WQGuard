@@ -15,10 +15,8 @@
     return;
   }
 
-  var msg = "WQGuard Brotli Shield: Blocked unsolicited Brotli response stream to mitigate CVE-2026-111497.";
-
-  // Quantumult X (`script-response-header` environment)
-  if (typeof $task !== "undefined") {
+  // Quantumult X (`script-response-header` environment exposes `$task` and `$prefs`)
+  if (typeof $task !== "undefined" || typeof $prefs !== "undefined") {
     $done({
       status: "HTTP/1.1 403 Forbidden",
       headers: {
@@ -31,15 +29,15 @@
     return;
   }
 
-  // Surge / Shadowrocket / Loon / Stash environment
+  // Surge / Shadowrocket / Loon / Stash `http-response` (requires-body = false) environment:
+  // Top-level `status` + `headers` without `body` or nested `response` wrapper is mandatory.
   $done({
-    response: {
-      status: 403,
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "X-WQGuard-Shield": "Blocked-Unsolicited-Brotli"
-      },
-      body: msg
+    status: 403,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": "0",
+      "Connection": "close",
+      "X-WQGuard-Shield": "Blocked-Unsolicited-Brotli"
     }
   });
 })();

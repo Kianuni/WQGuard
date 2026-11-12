@@ -65,7 +65,7 @@ public enum WQStrings {
     public static var postureStatusScanningSub: String { localized("posture_status_scanning_sub", en: "Scanning Mach-O private symbols & shared container symlink traversals...", zh: "正在执行权限注册表核验与二进制特征排查") }
     public static var postureStatusHighRiskSub: String { localized("posture_status_high_risk_sub", en: "Detected unauthorized sandbox escape entitlements, private symbols, or impersonation!", zh: "检出高危越权特征或仿冒应用，点击卡片立即查看高危应用清单！") }
     public static var postureStatusCautionSub: String { localized("posture_status_caution_sub", en: "Sideloaded apps declare shared App Groups, persistent background modes, or mod traits. Tap to review.", zh: "部分侧载/企业签应用含共享容器、常驻后台或改版特征，点击查看详情。") }
-    public static var postureStatusKnownToolSub: String { localized("posture_status_known_tool_sub", en: "Matched sideload signers or trusted whitelist rules (Feather, LocalDevVPN, etc.).", zh: "已识别开源签名器或自定义白名单工具（Feather、LocalDevVPN 等），点击查看清单。") }
+    public static var postureStatusKnownToolSub: String { localized("posture_status_known_tool_sub", en: "Matched WQGuard self-identity or user-configured custom whitelist rules.", zh: "已匹配 WQGuard 自身身份或用户自定义信任白名单规则，点击查看清单。") }
     public static var postureStatusSafeSub: String { localized("posture_status_safe_sub", en: "All scanned targets strictly comply with iOS sandbox boundaries.", zh: "所有已扫描目标均符合 iOS 沙盒隔离边界，未检出越权风险。") }
 
     public static func posturePendingTitle(exposedCount: Int) -> String {
@@ -169,7 +169,7 @@ public enum WQStrings {
     public static func batchIPACompletedBanner(_ count: Int) -> String {
         localized("batch_ipa_completed_\(count)", en: "Batch audit completed: \(count) packages inspected (see Findings tab for full list)", zh: "已完成批量审查：共检测 \(count) 个安装包（完整列表已同步至「仪表盘」与「审计发现」）")
     }
-    public static var ipaAnalyzing: String { localized("ipa_analyzing", en: "Performing 4-layer sandbox analysis & Mach-O static decompilation...", zh: "正在进行 4 层沙盒解析与 Mach-O 静态反编译...") }
+    public static var ipaAnalyzing: String { localized("ipa_analyzing", en: "Performing 4-layer sandbox analysis & Mach-O static binary audit...", zh: "正在进行 4 层沙盒解析与 Mach-O 静态二进制审计...") }
     public static var ipaAnalysisFailed: String { localized("ipa_analysis_failed", en: "IPA Analysis Failed", zh: "IPA 分析失败") }
     public static var preinstallAlertHighRisk: String { localized("preinstall_alert_high_risk", en: "Pre-install Warning: Detected sandbox escape exploit! Do NOT install!", zh: "安装前预警：检测到越界沙盒逃逸特征，切勿安装！") }
     public static var preinstallAlertSafe: String { localized("preinstall_alert_safe", en: "Pre-install Assessment: Clean. No exploit signatures detected.", zh: "安装前评估：未发现已知越权利用特征，处于安全状态。") }
@@ -177,7 +177,7 @@ public enum WQStrings {
     public static var ipaDistributionChannel: String { localized("ipa_distribution_channel", en: "Distribution Channel", zh: "分发渠道") }
     public static var ipaTeamIdSelfSigned: String { localized("ipa_team_id_self_signed", en: "None (Ad-hoc / Self-signed)", zh: "无 (Ad-hoc / 个人自签)") }
     public static var ipaDrmEncrypted: String { localized("ipa_drm_encrypted", en: "FairPlay Encrypted (cryptid: 1)", zh: "FairPlay 加密 (cryptid: 1)") }
-    public static var ipaDrmUnencrypted: String { localized("ipa_drm_unencrypted", en: "Unencrypted (cryptid: 0, full static decompilation completed)", zh: "未加密 (cryptid: 0, 完整静态反编译已完成)") }
+    public static var ipaDrmUnencrypted: String { localized("ipa_drm_unencrypted", en: "Unencrypted (cryptid: 0, full static binary audit completed)", zh: "未加密 (cryptid: 0, 完整静态二进制审计已完成)") }
     public static var ipaDeclaredAppGroups: String { localized("ipa_declared_app_groups", en: "Declared App Groups", zh: "声明的 App Groups") }
     public static var ipaAppGroupsNone: String { localized("ipa_app_groups_none", en: "None (Physically incapable of escape)", zh: "无 (物理无法逃逸)") }
     public static var ipaDylibCountLabel: String { localized("ipa_dylib_count_label", en: "Dynamic Libraries Count", zh: "动态链接库数量") }

@@ -96,17 +96,22 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         }
         
         let binaryData = try Data(contentsOf: url, options: .mappedIfSafe)
-        let machoFile = try MachOParser.shared.parse(data: binaryData)
-        let details = machoScanner.parseMachO(file: machoFile, rawData: binaryData)
-        let (_, appGroups) = CSBlobParser.shared.extractAppGroups(from: machoFile.codeSignatureData)
+        let slices = try MachOParser.shared.parseAllSlices(data: binaryData)
+        let details = machoScanner.parseMachO(files: slices, rawData: binaryData)
         
+        var appGroups: [String] = []
         var bundleId = url.lastPathComponent
-        if let csData = machoFile.codeSignatureData,
-           let parsed = try? CSBlobParser.shared.parseSuperBlob(csData),
-           let rawXml = parsed.rawXML,
-           let dict = try? CSBlobParser.shared.parseXMLPlist(Data(rawXml.utf8)),
-           let appId = dict["application-identifier"] as? String {
-            bundleId = appId
+        for slice in slices {
+            let (_, sliceGroups) = CSBlobParser.shared.extractAppGroups(from: slice.codeSignatureData)
+            for g in sliceGroups where !appGroups.contains(g) {
+                appGroups.append(g)
+            }
+            if bundleId == url.lastPathComponent {
+                let ents = CSBlobParser.shared.parseMergedEntitlements(from: slice.codeSignatureData)
+                if let appId = ents["application-identifier"] as? String {
+                    bundleId = appId
+                }
+            }
         }
         
         let bundleContext = MachOScanner.ScanContext(
@@ -147,20 +152,25 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         }
         
         let execData = try Data(contentsOf: execURL, options: .mappedIfSafe)
-        let machoFile = try MachOParser.shared.parse(data: execData)
-        let details = machoScanner.parseMachO(file: machoFile, rawData: execData)
+        let mainSlices = try MachOParser.shared.parseAllSlices(data: execData)
+        let details = machoScanner.parseMachO(files: mainSlices, rawData: execData)
         
         let channelResult = ChannelClassifier.classifyBundle(at: url, cryptid: details.cryptid)
-        let (hasGroups, appGroups) = CSBlobParser.shared.extractAppGroups(from: machoFile.codeSignatureData)
-        let gating = EntitlementGating.evaluate(hasAppGroups: hasGroups, appGroups: appGroups)
-        let backgroundModes = infoDict["UIBackgroundModes"] as? [String] ?? []
+        var mainAppGroups: [String] = []
         var entitlementsDict: [String: Any] = [:]
-        if let csData = machoFile.codeSignatureData,
-           let parsed = try? CSBlobParser.shared.parseSuperBlob(csData),
-           let rawXml = parsed.rawXML,
-           let dict = try? CSBlobParser.shared.parseXMLPlist(Data(rawXml.utf8)) {
-            entitlementsDict = dict
+        for slice in mainSlices {
+            let (_, sliceGroups) = CSBlobParser.shared.extractAppGroups(from: slice.codeSignatureData)
+            for g in sliceGroups where !mainAppGroups.contains(g) {
+                mainAppGroups.append(g)
+            }
+            let sliceEnts = CSBlobParser.shared.parseMergedEntitlements(from: slice.codeSignatureData)
+            for (k, v) in sliceEnts where entitlementsDict[k] == nil {
+                entitlementsDict[k] = v
+            }
         }
+        let gating = EntitlementGating.evaluate(hasAppGroups: !mainAppGroups.isEmpty, appGroups: mainAppGroups)
+        var combinedAppGroups = gating.appGroups
+        var backgroundModes = infoDict["UIBackgroundModes"] as? [String] ?? []
         
         let context = MachOScanner.ScanContext(
             bundleId: bundleId,
@@ -186,38 +196,62 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         if mainFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
         if mainFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
         
-        // Scan Embedded Frameworks & Dynamic Libraries
-        let frameworksURL = url.appendingPathComponent("Frameworks")
-        if FileManager.default.fileExists(atPath: frameworksURL.path) {
-            let fwEnumerator = FileManager.default.enumerator(at: frameworksURL, includingPropertiesForKeys: [.isRegularFileKey])
-            while let itemURL = fwEnumerator?.nextObject() as? URL {
+        // Scan Embedded Frameworks & Dynamic Libraries across the entire .app (Frameworks/, Dylibs/, DynamicLibraries/, root *.dylib)
+        let mainExecCanonical = execURL.standardizedFileURL.path
+        let pluginsPrefix = url.appendingPathComponent("PlugIns").standardizedFileURL.path + "/"
+        if let bundleEnum = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey]) {
+            while let itemURL = bundleEnum.nextObject() as? URL {
+                let itemCanonical = itemURL.standardizedFileURL.path
+                if itemCanonical == mainExecCanonical || itemCanonical.hasPrefix(pluginsPrefix) {
+                    continue
+                }
                 let isDylib = itemURL.pathExtension.lowercased() == "dylib"
                 let isFrameworkBinary = itemURL.deletingLastPathComponent().pathExtension.lowercased() == "framework" && itemURL.pathExtension.isEmpty
-                if isDylib || isFrameworkBinary,
-                   let dylibData = try? Data(contentsOf: itemURL, options: .mappedIfSafe),
-                   let fwMachO = try? MachOParser.shared.parse(data: dylibData) {
-                    let fwDetails = machoScanner.parseMachO(file: fwMachO, rawData: dylibData)
-                    let fwFinding = machoScanner.scan(details: fwDetails, context: context)
+                if isDylib || isFrameworkBinary {
                     let relPath = itemURL.path.replacingOccurrences(of: url.path + "/", with: "")
-                    for ind in fwFinding.indicators {
-                        allIndicators.append(ThreatIndicator(
-                            signature: ind.signature,
-                            description: "\(ind.description) [\(relPath)]",
-                            category: ind.category,
-                            location: "\(relPath): \(ind.location)",
-                            severity: ind.severity
-                        ))
+                    if isDylib {
+                        allLinkedDylibs.insert("@executable_path/\(relPath)")
                     }
-                    allMatchedSymbols.formUnion(fwFinding.evidence.matchedSymbols)
-                    allLinkedDylibs.formUnion(fwDetails.linkedDylibs)
-                    allSymbols.formUnion(fwDetails.symbols)
-                    if fwFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
-                    if fwFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+                    if let dylibData = try? Data(contentsOf: itemURL, options: .mappedIfSafe),
+                       let fwSlices = try? MachOParser.shared.parseAllSlices(data: dylibData),
+                       !fwSlices.isEmpty {
+                        let fwDetails = machoScanner.parseMachO(files: fwSlices, rawData: dylibData)
+                        var fwGroups = gating.appGroups
+                        for s in fwSlices {
+                            let (_, sg) = CSBlobParser.shared.extractAppGroups(from: s.codeSignatureData)
+                            for g in sg where !fwGroups.contains(g) { fwGroups.append(g) }
+                        }
+                        let fwContext = MachOScanner.ScanContext(
+                            bundleId: bundleId,
+                            displayName: displayName,
+                            version: version,
+                            teamId: channelResult.teamIdentifier,
+                            bundlePath: url.path,
+                            executablePath: itemURL.path,
+                            installChannel: channelResult.channel,
+                            appGroups: fwGroups
+                        )
+                        let fwFinding = machoScanner.scan(details: fwDetails, context: fwContext)
+                        for ind in fwFinding.indicators {
+                            allIndicators.append(ThreatIndicator(
+                                signature: ind.signature,
+                                description: "\(ind.description) [\(relPath)]",
+                                category: ind.category,
+                                location: "\(relPath): \(ind.location)",
+                                severity: ind.severity
+                            ))
+                        }
+                        allMatchedSymbols.formUnion(fwFinding.evidence.matchedSymbols)
+                        allLinkedDylibs.formUnion(fwDetails.linkedDylibs)
+                        allSymbols.formUnion(fwDetails.symbols)
+                        if fwFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
+                        if fwFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+                    }
                 }
             }
         }
         
-        // Scan Embedded App Extensions (PlugIns)
+        // Scan Embedded App Extensions (PlugIns/*.appex) with each extension's OWN independent CSBlob entitlements
         let pluginsURL = url.appendingPathComponent("PlugIns")
         if FileManager.default.fileExists(atPath: pluginsURL.path) {
             let plugEnumerator = FileManager.default.enumerator(at: pluginsURL, includingPropertiesForKeys: [.isDirectoryKey])
@@ -227,11 +261,41 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                     if let pData = try? Data(contentsOf: plugInfoPlistURL),
                        let pDict = (try? PropertyListSerialization.propertyList(from: pData, options: [], format: nil)) as? [String: Any],
                        let plugExec = pDict["CFBundleExecutable"] as? String {
+                        let plugBundleId = pDict["CFBundleIdentifier"] as? String ?? "\(bundleId).appex"
+                        let plugName = pDict["CFBundleDisplayName"] as? String ?? pDict["CFBundleName"] as? String ?? plugExec
+                        let plugBgModes = pDict["UIBackgroundModes"] as? [String] ?? []
+                        for mode in plugBgModes where !backgroundModes.contains(mode) {
+                            backgroundModes.append(mode)
+                        }
                         let plugBinURL = itemURL.appendingPathComponent(plugExec)
                         if let binData = try? Data(contentsOf: plugBinURL, options: .mappedIfSafe),
-                           let plugMachO = try? MachOParser.shared.parse(data: binData) {
-                            let plugDetails = machoScanner.parseMachO(file: plugMachO, rawData: binData)
-                            let plugFinding = machoScanner.scan(details: plugDetails, context: context)
+                           let plugSlices = try? MachOParser.shared.parseAllSlices(data: binData),
+                           !plugSlices.isEmpty {
+                            let plugDetails = machoScanner.parseMachO(files: plugSlices, rawData: binData)
+                            var plugGroups: [String] = []
+                            for s in plugSlices {
+                                let (_, sg) = CSBlobParser.shared.extractAppGroups(from: s.codeSignatureData)
+                                for g in sg where !plugGroups.contains(g) { plugGroups.append(g) }
+                                let sEnts = CSBlobParser.shared.parseMergedEntitlements(from: s.codeSignatureData)
+                                for (k, v) in sEnts where entitlementsDict[k] == nil {
+                                    entitlementsDict[k] = v
+                                }
+                            }
+                            let plugGating = EntitlementGating.evaluate(hasAppGroups: !plugGroups.isEmpty, appGroups: plugGroups)
+                            for g in plugGating.appGroups where !combinedAppGroups.contains(g) {
+                                combinedAppGroups.append(g)
+                            }
+                            let plugContext = MachOScanner.ScanContext(
+                                bundleId: plugBundleId,
+                                displayName: plugName,
+                                version: version,
+                                teamId: channelResult.teamIdentifier,
+                                bundlePath: itemURL.path,
+                                executablePath: plugBinURL.path,
+                                installChannel: channelResult.channel,
+                                appGroups: plugGating.appGroups
+                            )
+                            let plugFinding = machoScanner.scan(details: plugDetails, context: plugContext)
                             let relPath = plugBinURL.path.replacingOccurrences(of: url.path + "/", with: "")
                             for ind in plugFinding.indicators {
                                 allIndicators.append(ThreatIndicator(
@@ -247,6 +311,42 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                             allSymbols.formUnion(plugDetails.symbols)
                             if plugFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
                             if plugFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+                            
+                            // Scan nested dylibs / frameworks inside the .appex
+                            let plugExecCanonical = plugBinURL.standardizedFileURL.path
+                            if let extEnum = FileManager.default.enumerator(at: itemURL, includingPropertiesForKeys: [.isRegularFileKey]) {
+                                while let extFile = extEnum.nextObject() as? URL {
+                                    if extFile.standardizedFileURL.path == plugExecCanonical { continue }
+                                    let extIsDylib = extFile.pathExtension.lowercased() == "dylib"
+                                    let extIsFw = extFile.deletingLastPathComponent().pathExtension.lowercased() == "framework" && extFile.pathExtension.isEmpty
+                                    if extIsDylib || extIsFw {
+                                        let extRel = extFile.path.replacingOccurrences(of: url.path + "/", with: "")
+                                        if extIsDylib {
+                                            allLinkedDylibs.insert("@executable_path/\(extRel)")
+                                        }
+                                        if let extData = try? Data(contentsOf: extFile, options: .mappedIfSafe),
+                                           let extSlices = try? MachOParser.shared.parseAllSlices(data: extData),
+                                           !extSlices.isEmpty {
+                                            let extDetails = machoScanner.parseMachO(files: extSlices, rawData: extData)
+                                            let extFinding = machoScanner.scan(details: extDetails, context: plugContext)
+                                            for ind in extFinding.indicators {
+                                                allIndicators.append(ThreatIndicator(
+                                                    signature: ind.signature,
+                                                    description: "\(ind.description) [\(extRel)]",
+                                                    category: ind.category,
+                                                    location: "\(extRel): \(ind.location)",
+                                                    severity: ind.severity
+                                                ))
+                                            }
+                                            allMatchedSymbols.formUnion(extFinding.evidence.matchedSymbols)
+                                            allLinkedDylibs.formUnion(extDetails.linkedDylibs)
+                                            allSymbols.formUnion(extDetails.symbols)
+                                            if extFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
+                                            if extFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -300,7 +400,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         if provisionalRisk == .highRisk || provisionalRisk == .caution {
             let wlResult = whitelistEngine.isWhitelisted(
                 bundleId: bundleId,
-                appGroups: gating.appGroups,
+                appGroups: combinedAppGroups,
                 matchedSignatures: Array(allMatchedSymbols),
                 teamId: channelResult.teamIdentifier
             )
@@ -326,8 +426,8 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         let evidence = AuditEvidence(
             matchedSymbols: Array(allMatchedSymbols).sorted(),
             linkedDylibs: Array(allLinkedDylibs).sorted(),
-            hasAppGroups: !gating.appGroups.isEmpty,
-            appGroups: gating.appGroups,
+            hasAppGroups: !combinedAppGroups.isEmpty,
+            appGroups: combinedAppGroups,
             installChannel: channelResult.channel,
             cryptid: details.cryptid,
             isFairPlayEncrypted: details.isFairPlayEncrypted,
@@ -488,11 +588,8 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             matchedSignatures: mergedSymbols,
             teamId: effectiveTeamId
         )
-        let infraName = (provisionalRisk != .highRisk)
-            ? InstalledAppRegistryScanner.matchKnownSideloadInfrastructure(bundleId: registry.bundleId, displayName: registry.displayName)
-            : nil
-        let isKnown = wl.isWhitelisted || (infraName != nil)
-        let resolvedToolName = wl.toolName ?? infraName
+        let isKnown = wl.isWhitelisted
+        let resolvedToolName = wl.toolName
         let finalRisk: RiskTier = isKnown ? .knownTool : provisionalRisk
 
         let pkgFileName = (package.bundlePath as NSString).lastPathComponent
@@ -782,7 +879,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         var findings: [ScanFinding] = []
         for targetURL in discovery.targets {
             let ext = targetURL.pathExtension.lowercased()
-            if ext == "ipa", let finding = try? scanIPA(at: targetURL) {
+            if (ext == "ipa" || ext == "tipa"), let finding = try? scanIPA(at: targetURL) {
                 findings.append(finding)
             } else if let finding = try? scanBundle(at: targetURL) {
                 findings.append(finding)
@@ -872,9 +969,10 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             var count = 0
             for url in specificTargets {
                 let f: ScanFinding
-                if url.pathExtension.lowercased() == "ipa" {
+                let ext = url.pathExtension.lowercased()
+                if ext == "ipa" || ext == "tipa" {
                     f = try self.scanIPA(at: url)
-                } else if url.pathExtension.lowercased() == "app" {
+                } else if ext == "app" {
                     f = try self.scanBundle(at: url)
                 } else {
                     f = try self.scanBinary(at: url)

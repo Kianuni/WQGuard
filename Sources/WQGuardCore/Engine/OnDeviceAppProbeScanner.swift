@@ -176,13 +176,26 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
             guard let activeScheme = matchedScheme else { continue }
 
             var indicators: [ThreatIndicator] = []
-            var provisionalRisk: RiskTier = .knownTool
+            let provisionalRisk: RiskTier = .caution
 
             switch item.role {
-            case .sideloadSigner, .localDevDebugger:
-                provisionalRisk = .knownTool
+            case .sideloadSigner:
+                indicators.append(ThreatIndicator(
+                    signature: "URLScheme(\(activeScheme)://)",
+                    description: "\(item.summaryZh)（零信任审计：第三方侧载签名器默认不予白名单豁免，请谨慎复核签名源包。）",
+                    category: "Third-Party Sideload Signer",
+                    location: "UIApplication.canOpenURL(\(activeScheme)://)",
+                    severity: .caution
+                ))
+            case .localDevDebugger:
+                indicators.append(ThreatIndicator(
+                    signature: "URLScheme(\(activeScheme)://)",
+                    description: item.summaryZh,
+                    category: "Local Loopback / Debug Tool",
+                    location: "UIApplication.canOpenURL(\(activeScheme)://)",
+                    severity: .caution
+                ))
             case .privilegedContainerTool:
-                provisionalRisk = .caution
                 indicators.append(ThreatIndicator(
                     signature: "URLScheme(\(activeScheme)://)",
                     description: item.summaryZh,
@@ -195,7 +208,7 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
             let wl = whitelistEngine.isWhitelisted(
                 bundleId: item.canonicalBundleId,
                 appGroups: [],
-                matchedSignatures: [],
+                matchedSignatures: ["URLScheme(\(activeScheme)://)"],
                 teamId: nil
             )
             let finalRisk: RiskTier = wl.isWhitelisted ? .knownTool : provisionalRisk
@@ -225,8 +238,8 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
                 bundlePath: "\(activeScheme):// (本机在位)",
                 installChannel: .developerSideloaded,
                 riskTier: finalRisk,
-                isWhitelisted: wl.isWhitelisted || item.role != .privilegedContainerTool,
-                whitelistedToolName: wl.toolName ?? (item.role != .privilegedContainerTool ? item.displayName : nil),
+                isWhitelisted: wl.isWhitelisted,
+                whitelistedToolName: wl.toolName,
                 indicators: indicators,
                 evidence: evidence,
                 scanTimestamp: Date()

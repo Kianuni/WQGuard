@@ -158,7 +158,9 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
 
         let esign = findings.first { $0.bundleId == "p3.xyz.yyyue.esign" }
         XCTAssertNotNil(esign)
-        XCTAssertEqual(esign?.riskTier, .knownTool)
+        XCTAssertEqual(esign?.riskTier, .caution, "Strict zero trust: third-party sideload signers must NEVER be auto-whitelisted by default")
+        XCTAssertFalse(esign?.isWhitelisted ?? true)
+        XCTAssertNil(esign?.whitelistedToolName)
         XCTAssertEqual(esign?.evidence.auditDepth, .onDeviceProbe)
 
         let filza = findings.first { $0.bundleId == "com.tigisoftware.Filza" }
@@ -377,7 +379,7 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
                 booleanEntitlements: ["get-task-allow": true],
                 bundlePath: "/private/var/containers/Bundle/Application/UUID-SPOOF/HealthSpoof.app"
             ),
-            // 5. Legitimate Feather sideload manager -> MUST BE `.knownTool` (not Caution)
+            // 5. Third-party Feather sideload manager -> Strict zero trust: MUST BE `.caution` (NEVER auto-whitelisted)
             InstalledAppRegistryRecord(
                 bundleId: "kh.crysalis.feather.CERT999",
                 displayName: "Feather",
@@ -420,9 +422,9 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
 
             let feather = findings.first { $0.bundleId == "kh.crysalis.feather.CERT999" }
             XCTAssertNotNil(feather)
-            XCTAssertEqual(feather?.riskTier, .knownTool)
-            XCTAssertTrue(feather?.isWhitelisted ?? false)
-            XCTAssertEqual(feather?.whitelistedToolName, "Feather")
+            XCTAssertEqual(feather?.riskTier, .caution)
+            XCTAssertFalse(feather?.isWhitelisted ?? true)
+            XCTAssertNil(feather?.whitelistedToolName)
 
             let moddedWX = findings.first { $0.bundleId == "com.tencent.wx" }
             XCTAssertNotNil(moddedWX)

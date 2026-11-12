@@ -113,8 +113,21 @@ final class SurgeModuleTests: XCTestCase {
     func testResponseScriptBlocksUnsolicitedBrotli() {
         let template = SurgeBrotliShieldHelper.rawModuleTemplate
         XCTAssertTrue(template.contains("brotli-response-guard"))
-        XCTAssertTrue(template.contains("status: 403"))
-        XCTAssertTrue(template.contains("Blocked unsolicited Brotli response stream"))
+        XCTAssertTrue(template.contains("requires-body=false"))
+        XCTAssertTrue(template.contains("script-path=https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/scripts/brotli-guard.js"))
+        XCTAssertFalse(template.contains("script-text="), "Surge .sgmodule [Script] must use script-path= instead of API-only script-text=")
+
+        let stashShield = SurgeBrotliShieldHelper.shared.generateShieldContent(for: .stash)
+        XCTAssertTrue(stashShield.contains("require-body: false"))
+        guard let payloadRange = stashShield.range(of: "payload: |") else {
+            XCTFail("Missing payload: | section in Stash shield")
+            return
+        }
+        let jsPayload = String(stashShield[payloadRange.upperBound...])
+        XCTAssertTrue(jsPayload.contains("status: 403"))
+        XCTAssertTrue(jsPayload.contains("'Content-Length': '0'"))
+        XCTAssertFalse(jsPayload.contains("response:"), "http-response script must use top-level status: 403, never nested response:")
+        XCTAssertFalse(jsPayload.contains("body:"), "requires-body=false script must never pass body:")
     }
 
     // MARK: - 4. Platform Metadata, URL Schemes, Argument Substitution & File Export

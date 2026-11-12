@@ -235,6 +235,8 @@ public enum SignatureCatalog {
         "symlink",
         "symlinkat",
         "createSymbolicLinkAtPath:withDestinationPath:",
+        "createSymbolicLinkAtPath:withDestinationPath:error:",
+        "createSymbolicLinkAtURL:withDestinationURL:error:",
         "createSymbolicLinkAtPath"
     ]
     

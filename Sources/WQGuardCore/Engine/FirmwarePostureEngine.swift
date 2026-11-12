@@ -244,8 +244,16 @@ public final class FirmwarePostureEngine: Sendable {
             }
 
         case .coreGraphics2D:
-            // CVE-2026-86950: Affects iOS < 27.0
-            return version.major < 27
+            // CVE-2026-86950: Patched in iOS 27.0, iOS 26.7.1, and iOS 18.7.11
+            if version.major >= 27 {
+                return false
+            } else if version.major == 26 {
+                return version < SystemOSVersion(major: 26, minor: 7, patch: 1)
+            } else if version.major == 18 {
+                return version < SystemOSVersion(major: 18, minor: 7, patch: 11)
+            } else {
+                return true
+            }
 
         case .appIntentsBypass:
             // CVE-2026-113963: Affects iOS < 27.2.1 and iOS 26 < 26.7.3
@@ -414,9 +422,9 @@ public final class FirmwarePostureEngine: Sendable {
             subsystem: "CoreGraphics / Quartz2D",
             cvssScore: 8.6,
             severity: .highRisk,
-            affectedDescription: "iOS < 27.0",
-            patchedVersionDescription: "iOS 27.0",
-            details: "iOS 26.x 图像子系统解析特定 ICC Profile 时存在无界内存复制缺陷，在未升级至 iOS 27 时极易被图元触发崩溃或利用。",
+            affectedDescription: "iOS 26 < 26.7.1、iOS 18 < 18.7.11（及未获回移植补丁的旧分支）",
+            patchedVersionDescription: "iOS 27.0 / iOS 26.7.1 / iOS 18.7.11",
+            details: "图像子系统解析特定 ICC Profile 时存在无界内存复制缺陷（Apple 已在 iOS 27.0、iOS 26.7.1 与 iOS 18.7.11 发布官方安全补丁）；停留在低于 26.7.1 或 18.7.11 的设备易被恶意图像触发内存破坏。",
             mitigations: [
                 ActionableMitigation(
                     title: "禁用通讯软件图像自动渲染",

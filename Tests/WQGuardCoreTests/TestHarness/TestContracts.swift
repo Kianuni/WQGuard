@@ -374,7 +374,7 @@ public enum TestWhitelistFixtures {
             name: "Erosion-CN",
             allowedBundleIds: ["com.jbdotparty.Erosion-*", "com.jbdotparty.Erosion.*", "com.jbdotparty.ErosionCN*"],
             allowedAppGroups: ["group.com.jbdotparty.Erosion*", "group.*.com.jbdotparty.Erosion*"],
-            expectedSignatures: ["container_query_create"],
+            expectedSignatures: ["container_query_create", "container_copy_sandbox_token", "sandbox_extension_consume"],
             description: "Sample test rule for Erosion-CN",
             isEnabled: true,
             isBuiltIn: false
@@ -383,7 +383,7 @@ public enum TestWhitelistFixtures {
             name: "GestaltX",
             allowedBundleIds: ["com.*.gestaltx", "com.*gestaltx", "*.gestaltx", "com.straight-tamago.gestaltx"],
             allowedAppGroups: ["group.*.gestaltx", "group.*gestaltx", "*.gestaltx"],
-            expectedSignatures: ["container_query_create"],
+            expectedSignatures: ["container_query_create", "container_copy_sandbox_token", "sandbox_extension_consume"],
             description: "Sample test rule for GestaltX",
             isEnabled: true,
             isBuiltIn: false
@@ -392,7 +392,7 @@ public enum TestWhitelistFixtures {
             name: "WQFiles",
             allowedBundleIds: ["cz.kolbi.wqfiles"],
             allowedAppGroups: ["group.cz.kolbi.wqfiles"],
-            expectedSignatures: ["container_query_create"],
+            expectedSignatures: ["container_query_create", "container_copy_sandbox_token", "sandbox_extension_consume", "worse_query", "fsgetpath"],
             description: "Sample test rule for WQFiles",
             isEnabled: true,
             isBuiltIn: false
@@ -401,7 +401,7 @@ public enum TestWhitelistFixtures {
             name: "WQFiles-CN",
             allowedBundleIds: ["cz.kolbi.wqfiles-*", "cz.kolbi.wqfiles.*", "cz.kolbi.wqfilesCN*", "cz.kolbi.wqfiles-cn*"],
             allowedAppGroups: ["group.cz.kolbi.wqfiles*", "group.*.cz.kolbi.wqfiles*"],
-            expectedSignatures: ["container_query_create"],
+            expectedSignatures: ["container_query_create", "container_copy_sandbox_token", "sandbox_extension_consume", "worse_query", "fsgetpath"],
             description: "Sample test rule for WQFiles-CN",
             isEnabled: true,
             isBuiltIn: false

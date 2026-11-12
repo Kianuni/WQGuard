@@ -38,9 +38,9 @@ final class AdversarialM3It2Challenger2Tests: XCTestCase {
         XCTAssertFalse(engine.isVulnerable(.coreGraphicsPDF, in: v26_7_2))
         XCTAssertFalse(engine.isVulnerable(.coreGraphicsPDF, in: v26_7_3))
 
-        // 5. coreGraphics2D (affects iOS < 27.0: true on both)
-        XCTAssertTrue(engine.isVulnerable(.coreGraphics2D, in: v26_7_2))
-        XCTAssertTrue(engine.isVulnerable(.coreGraphics2D, in: v26_7_3))
+        // 5. coreGraphics2D (patched in 26.7.1 / 18.7.11 / 27.0: false on both 26.7.2 and 26.7.3)
+        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v26_7_2))
+        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v26_7_3))
 
         // 6. appIntentsBypass (patched in 26.7.3: true on 26.7.2, false on 26.7.3)
         XCTAssertTrue(engine.isVulnerable(.appIntentsBypass, in: v26_7_2))
@@ -57,12 +57,12 @@ final class AdversarialM3It2Challenger2Tests: XCTestCase {
         // Check aggregate counts
         let report_26_7_2 = engine.evaluate(osVersion: v26_7_2)
         XCTAssertEqual(report_26_7_2.totalEvaluated, 8)
-        XCTAssertEqual(report_26_7_2.exposedCount, 6, "iOS 26.7.2 must have exactly 6 exposed CVEs")
+        XCTAssertEqual(report_26_7_2.exposedCount, 5, "iOS 26.7.2 must have exactly 5 exposed CVEs")
         XCTAssertEqual(report_26_7_2.overallRiskTier, .highRisk)
 
         let report_26_7_3 = engine.evaluate(osVersion: v26_7_3)
         XCTAssertEqual(report_26_7_3.totalEvaluated, 8)
-        XCTAssertEqual(report_26_7_3.exposedCount, 2, "iOS 26.7.3 must have exactly 2 exposed CVEs (0day + CoreGraphics2D)")
+        XCTAssertEqual(report_26_7_3.exposedCount, 1, "iOS 26.7.3 must have exactly 1 exposed CVE (unpatched worse_query 0day)")
         XCTAssertEqual(report_26_7_3.overallRiskTier, .highRisk)
     }
 

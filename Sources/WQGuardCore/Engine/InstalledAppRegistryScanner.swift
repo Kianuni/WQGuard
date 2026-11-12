@@ -481,8 +481,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         return false
     }
 
-    /// Recognizes standard open-source sideload managers & LocalDevVPN companions so their benign
-    /// background server / App Group declarations are categorized as `.knownTool` rather than false-positive Caution.
+    /// Identifies third-party sideloading signers/managers for informational attribution ONLY (strict zero trust: NEVER auto-whitelisted).
     public static func matchKnownSideloadInfrastructure(bundleId: String, displayName: String) -> String? {
         let lowerBid = bundleId.lowercased()
         let lowerName = displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -728,10 +727,19 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
         if cryptid == 0 && channel.isSideloadedOrEnterprise {
             let lowerBid = record.bundleId.lowercased()
-            let lowerName = record.displayName.lowercased()
+            let lowerName = record.displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let nameTokens = Set(lowerName.split { !$0.isLetter && !$0.isNumber }.map(String.init))
             for extra in Self.extraSideloadImpersonationTargets {
-                let matchBid = extra.bundleIdPatterns.contains { lowerBid.contains($0) }
-                let matchName = extra.displayNames.contains { lowerName == $0 || lowerName.hasPrefix($0 + " ") || lowerName.contains($0) }
+                let matchBid = extra.bundleIdPatterns.contains { pat in
+                    lowerBid == pat || lowerBid.hasPrefix(pat + ".") || lowerBid.contains("." + pat + ".") || lowerBid.hasSuffix("." + pat)
+                }
+                let matchName = extra.displayNames.contains { pat in
+                    let isASCII = pat.unicodeScalars.allSatisfy { $0.isASCII }
+                    if isASCII && !pat.contains(" ") {
+                        return lowerName == pat || nameTokens.contains(pat)
+                    }
+                    return lowerName == pat || lowerName.contains(pat)
+                }
                 if matchBid || matchName {
                     let sig = "IMPERSONATION:\(extra.name)"
                     if !matchedSignatures.contains(sig) {
@@ -765,7 +773,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             }
         }
 
-        // 8. Risk Tier & Whitelist Resolution
+        // 8. Risk Tier & Whitelist Resolution (Strict Zero Trust: ONLY explicit WhitelistEngine rules grant .knownTool)
         var provisionalRisk: RiskTier = .safe
         if indicators.contains(where: { $0.severity == .highRisk }) {
             provisionalRisk = .highRisk
@@ -787,11 +795,6 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             isWhitelisted = true
             whitelistedToolName = wlResult.toolName
             finalRisk = .knownTool
-        } else if provisionalRisk != .highRisk,
-                  let infraName = Self.matchKnownSideloadInfrastructure(bundleId: record.bundleId, displayName: record.displayName) {
-            isWhitelisted = true
-            whitelistedToolName = infraName
-            finalRisk = .knownTool
         }
 
         let remediation: String
@@ -799,7 +802,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         case .highRisk:
             remediation = "系统注册表审计发现高危越权特征（无沙盒特权、TCC 免授权隐私绕过或高危仿冒客户端），建议立即在桌面长按卸载并前往「设置 -> 通用 -> VPN 与设备管理」移除对应证书/描述文件。"
         case .knownTool:
-            remediation = "已安装应用匹配已知开源研究工具白名单（\(whitelistedToolName ?? "Known Tool")）。当前为系统注册表权限审计结果。"
+            remediation = "已安装应用匹配受信任白名单规则（\(whitelistedToolName ?? "Known Tool")）。当前为系统注册表权限审计结果。"
         case .caution:
             remediation = "已安装侧载应用包含共享容器权限、常驻后台或改版特征。可手动选择对应 .ipa 安装包加入扫描列表自动按 Bundle ID 完成二进制深度复核。"
         case .safe:

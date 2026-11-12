@@ -206,9 +206,16 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
             let nameData = data.subdata(in: (cur + 46)..<(cur + 46 + nameLen))
             let path = String(decoding: nameData, as: UTF8.self)
             
-            // Zip Slip validation
-            if path.contains("..") || path.hasPrefix("/") || path.contains("\\") {
+            // Zip Slip validation: block absolute paths, Windows backslashes, NUL bytes, and ".." path segments
+            // without false-positively rejecting valid filenames containing consecutive dots (e.g. "icon..png").
+            let hasParentTraversal = path
+                .split(separator: "/", omittingEmptySubsequences: false)
+                .contains("..")
+            if hasParentTraversal || path.hasPrefix("/") || path.contains("\\") || path.contains("\0") {
                 throw IPAPackageScannerError.zipSlipDetected(path)
+            }
+            guard compSize >= 0, uncompSize >= 0 else {
+                throw IPAPackageScannerError.corruptHeader("ZIP 条目大小字段异常")
             }
             
             cumulativeUncompressedBytes += uncompSize
@@ -237,6 +244,37 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
     /// Extracts a single entry's uncompressed data.
     public func extract(entry: ZIPArchiveEntry) throws -> Data {
         if entry.isDirectory || entry.uncompressedSize == 0 {
+            if entry.compressionMethod == 8 && entry.compressedSize > 64 {
+                // Guard against spoofed 0-byte uncompressedSize header hiding a Deflate bomb
+                var strm = z_stream()
+                let initStatus = inflateInit2_(&strm, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+                if initStatus == Z_OK {
+                    defer { inflateEnd(&strm) }
+                    let localOffset = entry.localHeaderOffset
+                    if localOffset + 30 <= data.count {
+                        let nameLen = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: localOffset + 26, as: UInt16.self).littleEndian })
+                        let extraLen = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: localOffset + 28, as: UInt16.self).littleEndian })
+                        let dataStart = localOffset + 30 + nameLen + extraLen
+                        let dataEnd = dataStart + entry.compressedSize
+                        if dataEnd <= data.count {
+                            let rawCompressed = data.subdata(in: dataStart..<dataEnd)
+                            var probe = Data(count: 1)
+                            let st = rawCompressed.withUnsafeBytes { inPtr in
+                                probe.withUnsafeMutableBytes { outPtr in
+                                    strm.next_in = UnsafeMutablePointer(mutating: inPtr.bindMemory(to: Bytef.self).baseAddress)
+                                    strm.avail_in = uInt(entry.compressedSize)
+                                    strm.next_out = outPtr.bindMemory(to: Bytef.self).baseAddress
+                                    strm.avail_out = 1
+                                    return inflate(&strm, Z_FINISH)
+                                }
+                            }
+                            if strm.total_out > 0 || (st == Z_OK && strm.avail_in > 0) {
+                                throw IPAPackageScannerError.quotaExceeded("ZIP 条目实际解压体积超出声明大小 0 字节")
+                            }
+                        }
+                    }
+                }
+            }
             return Data()
         }
         
@@ -279,23 +317,25 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
             }
             defer { inflateEnd(&strm) }
             
-            var decompressed = Data(count: entry.uncompressedSize)
+            // Allocate +1 sentinel byte so Z_FINISH reliably detects streams inflating past declared uncompressedSize
+            var decompressed = Data(count: entry.uncompressedSize + 1)
             let status: Int32 = rawCompressed.withUnsafeBytes { inPtr in
                 decompressed.withUnsafeMutableBytes { outPtr in
                     strm.next_in = UnsafeMutablePointer(mutating: inPtr.bindMemory(to: Bytef.self).baseAddress)
                     strm.avail_in = uInt(entry.compressedSize)
                     strm.next_out = outPtr.bindMemory(to: Bytef.self).baseAddress
-                    strm.avail_out = uInt(entry.uncompressedSize)
+                    strm.avail_out = uInt(entry.uncompressedSize + 1)
                     return inflate(&strm, Z_FINISH)
                 }
             }
             
+            if Int(strm.total_out) > entry.uncompressedSize || (status == Z_OK && strm.avail_out == 0) {
+                throw IPAPackageScannerError.quotaExceeded("ZIP 条目实际解压字节数超过声明上限 (\(entry.uncompressedSize) 字节)")
+            }
             guard status == Z_STREAM_END || status == Z_OK else {
                 throw IPAPackageScannerError.decompressionFailed(status)
             }
-            if Int(strm.total_out) < decompressed.count {
-                decompressed.count = Int(strm.total_out)
-            }
+            decompressed.count = Int(strm.total_out)
             return decompressed
         default:
             throw IPAPackageScannerError.unsupportedCompressionMethod(entry.compressionMethod)
@@ -347,10 +387,16 @@ public final class IPAPackageScanner: @unchecked Sendable {
         let bundleURL = tempSandbox.appendingPathComponent(appBundleName)
         try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
         
-        // Extract required security auditing files preserving relative path
+        // Extract required security auditing files preserving relative path (stripping archive symlinks)
         for entry in entries where entry.path.hasPrefix(appBundlePrefix) {
             let relativePath = String(entry.path.dropFirst(appBundlePrefix.count))
             if relativePath.isEmpty { continue }
+
+            // Strip POSIX symbolic link entries (S_IFLNK = 0o120000) so archive symlinks are never materialized on disk
+            let unixMode = (entry.externalFileAttributes >> 16) & 0o170000
+            if unixMode == 0o120000 {
+                continue
+            }
             
             let destURL = bundleURL.appendingPathComponent(relativePath)
             let destCanonical = destURL.standardizedFileURL.path
@@ -361,7 +407,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
             if entry.isDirectory {
                 try FileManager.default.createDirectory(at: destURL, withIntermediateDirectories: true)
             } else {
-                // Filter: Skip bulky UI/media/localization assets while preserving all Mach-O executables (even if executable name contains dots), dylibs, plists, mobileprovision, and receipts
+                // Filter: Skip bulky UI/media/localization assets while preserving all Mach-O executables, dylibs, plists, mobileprovision, and receipts
                 let ext = destURL.pathExtension.lowercased()
                 let skippedAssetExtensions: Set<String> = [
                     "png", "jpg", "jpeg", "gif", "webp", "heic", "ico", "bmp", "tiff",
@@ -398,7 +444,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
             throw IPAPackageScannerError.fileNotFound(ipaURL.path)
         }
         
-        return try withTemporarySandbox(ipaURL: ipaURL) { (bundleURL, entries) in
+        return try withTemporarySandbox(ipaURL: ipaURL) { (bundleURL, _) in
             // 1. Parse Info.plist
             let infoPlistURL = bundleURL.appendingPathComponent("Info.plist")
             guard FileManager.default.fileExists(atPath: infoPlistURL.path),
@@ -418,21 +464,26 @@ public final class IPAPackageScanner: @unchecked Sendable {
             }
             
             let mainExecData = try Data(contentsOf: mainExecURL, options: .mappedIfSafe)
-            let mainMachO = try MachOParser.shared.parse(data: mainExecData)
-            let mainDetails = MachOScanner.shared.parseMachO(file: mainMachO, rawData: mainExecData)
+            let mainSlices = try MachOParser.shared.parseAllSlices(data: mainExecData)
+            let mainDetails = MachOScanner.shared.parseMachO(files: mainSlices, rawData: mainExecData)
             
-            // 2. Layer 1: Install Channel & Entitlement Gating
+            // 2. Layer 1: Install Channel & Entitlement Gating (merging XML Slot 5 + DER Slot 7 across all slices)
             let channelResult = ChannelClassifier.classifyBundle(at: bundleURL, cryptid: mainDetails.cryptid)
-            let (hasGroups, appGroups) = CSBlobParser.shared.extractAppGroups(from: mainMachO.codeSignatureData)
-            let gating = EntitlementGating.evaluate(hasAppGroups: hasGroups, appGroups: appGroups)
-            let backgroundModes = infoDict["UIBackgroundModes"] as? [String] ?? []
+            var mainAppGroups: [String] = []
             var entitlementsDict: [String: Any] = [:]
-            if let csData = mainMachO.codeSignatureData,
-               let parsed = try? CSBlobParser.shared.parseSuperBlob(csData),
-               let rawXml = parsed.rawXML,
-               let dict = try? CSBlobParser.shared.parseXMLPlist(Data(rawXml.utf8)) {
-                entitlementsDict = dict
+            for slice in mainSlices {
+                let (_, sliceGroups) = CSBlobParser.shared.extractAppGroups(from: slice.codeSignatureData)
+                for g in sliceGroups where !mainAppGroups.contains(g) {
+                    mainAppGroups.append(g)
+                }
+                let sliceEnts = CSBlobParser.shared.parseMergedEntitlements(from: slice.codeSignatureData)
+                for (k, v) in sliceEnts where entitlementsDict[k] == nil {
+                    entitlementsDict[k] = v
+                }
             }
+            let gating = EntitlementGating.evaluate(hasAppGroups: !mainAppGroups.isEmpty, appGroups: mainAppGroups)
+            var combinedAppGroups = gating.appGroups
+            let backgroundModes = infoDict["UIBackgroundModes"] as? [String] ?? []
             
             // 3. Layer 2: Main Executable Scan
             let scanContext = MachOScanner.ScanContext(
@@ -460,22 +511,44 @@ public final class IPAPackageScanner: @unchecked Sendable {
             if mainFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
             if mainFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
             
-            // 4. Scan Embedded Frameworks & Dynamic Libraries
-            let frameworksURL = bundleURL.appendingPathComponent("Frameworks")
-            if FileManager.default.fileExists(atPath: frameworksURL.path) {
-                let fwEnumerator = FileManager.default.enumerator(at: frameworksURL, includingPropertiesForKeys: [.isRegularFileKey])
-                while let itemURL = fwEnumerator?.nextObject() as? URL {
+            // 4. Scan Embedded Frameworks & Dynamic Libraries across the entire .app (Frameworks/, Dylibs/, DynamicLibraries/, root *.dylib)
+            let mainExecCanonical = mainExecURL.standardizedFileURL.path
+            let pluginsPrefix = bundleURL.appendingPathComponent("PlugIns").standardizedFileURL.path + "/"
+            if let bundleEnum = FileManager.default.enumerator(at: bundleURL, includingPropertiesForKeys: [.isRegularFileKey]) {
+                while let itemURL = bundleEnum.nextObject() as? URL {
+                    let itemCanonical = itemURL.standardizedFileURL.path
+                    if itemCanonical == mainExecCanonical || itemCanonical.hasPrefix(pluginsPrefix) {
+                        continue
+                    }
                     let isDylib = itemURL.pathExtension.lowercased() == "dylib"
                     let isFrameworkBinary = itemURL.deletingLastPathComponent().pathExtension.lowercased() == "framework" && itemURL.pathExtension.isEmpty
                     
                     if isDylib || isFrameworkBinary {
+                        let relPath = itemURL.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
+                        if isDylib {
+                            allLinkedDylibs.insert("@executable_path/\(relPath)")
+                        }
                         if let dylibData = try? Data(contentsOf: itemURL, options: .mappedIfSafe),
-                           let fwMachO = try? MachOParser.shared.parse(data: dylibData) {
-                            let fwDetails = MachOScanner.shared.parseMachO(file: fwMachO, rawData: dylibData)
-                            let fwFinding = MachOScanner.shared.scan(details: fwDetails, context: scanContext)
+                           let fwSlices = try? MachOParser.shared.parseAllSlices(data: dylibData),
+                           !fwSlices.isEmpty {
+                            let fwDetails = MachOScanner.shared.parseMachO(files: fwSlices, rawData: dylibData)
+                            var fwGroups = gating.appGroups
+                            for s in fwSlices {
+                                let (_, sg) = CSBlobParser.shared.extractAppGroups(from: s.codeSignatureData)
+                                for g in sg where !fwGroups.contains(g) { fwGroups.append(g) }
+                            }
+                            let fwContext = MachOScanner.ScanContext(
+                                bundleId: bundleId,
+                                displayName: appName,
+                                version: version,
+                                teamId: channelResult.teamIdentifier,
+                                bundlePath: ipaURL.path,
+                                executablePath: itemURL.path,
+                                installChannel: channelResult.channel,
+                                appGroups: fwGroups
+                            )
+                            let fwFinding = MachOScanner.shared.scan(details: fwDetails, context: fwContext)
                             
-                            // Prefix indicator locations with framework subpath
-                            let relPath = itemURL.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
                             for ind in fwFinding.indicators {
                                 allIndicators.append(ThreatIndicator(
                                     signature: ind.signature,
@@ -495,7 +568,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
                 }
             }
             
-            // 5. Scan Embedded App Extensions (PlugIns)
+            // 5. Scan Embedded App Extensions (PlugIns/*.appex) with each extension's OWN independent CSBlob entitlements
             let pluginsURL = bundleURL.appendingPathComponent("PlugIns")
             if FileManager.default.fileExists(atPath: pluginsURL.path) {
                 let plugEnumerator = FileManager.default.enumerator(at: pluginsURL, includingPropertiesForKeys: [.isDirectoryKey])
@@ -505,11 +578,38 @@ public final class IPAPackageScanner: @unchecked Sendable {
                         if let pData = try? Data(contentsOf: plugInfoPlistURL),
                            let pDict = (try? PropertyListSerialization.propertyList(from: pData, options: [], format: nil)) as? [String: Any],
                            let plugExec = pDict["CFBundleExecutable"] as? String {
+                            let plugBundleId = pDict["CFBundleIdentifier"] as? String ?? "\(bundleId).appex"
+                            let plugName = pDict["CFBundleDisplayName"] as? String ?? pDict["CFBundleName"] as? String ?? plugExec
+                            let plugBgModes = pDict["UIBackgroundModes"] as? [String] ?? []
                             let plugBinURL = itemURL.appendingPathComponent(plugExec)
                             if let binData = try? Data(contentsOf: plugBinURL, options: .mappedIfSafe),
-                               let plugMachO = try? MachOParser.shared.parse(data: binData) {
-                                let plugDetails = MachOScanner.shared.parseMachO(file: plugMachO, rawData: binData)
-                                let plugFinding = MachOScanner.shared.scan(details: plugDetails, context: scanContext)
+                               let plugSlices = try? MachOParser.shared.parseAllSlices(data: binData),
+                               !plugSlices.isEmpty {
+                                let plugDetails = MachOScanner.shared.parseMachO(files: plugSlices, rawData: binData)
+                                var plugGroups: [String] = []
+                                for s in plugSlices {
+                                    let (_, sg) = CSBlobParser.shared.extractAppGroups(from: s.codeSignatureData)
+                                    for g in sg where !plugGroups.contains(g) { plugGroups.append(g) }
+                                    let sEnts = CSBlobParser.shared.parseMergedEntitlements(from: s.codeSignatureData)
+                                    for (k, v) in sEnts where entitlementsDict[k] == nil {
+                                        entitlementsDict[k] = v
+                                    }
+                                }
+                                let plugGating = EntitlementGating.evaluate(hasAppGroups: !plugGroups.isEmpty, appGroups: plugGroups)
+                                for g in plugGating.appGroups where !combinedAppGroups.contains(g) {
+                                    combinedAppGroups.append(g)
+                                }
+                                let plugContext = MachOScanner.ScanContext(
+                                    bundleId: plugBundleId,
+                                    displayName: plugName,
+                                    version: version,
+                                    teamId: channelResult.teamIdentifier,
+                                    bundlePath: itemURL.path,
+                                    executablePath: plugBinURL.path,
+                                    installChannel: channelResult.channel,
+                                    appGroups: plugGating.appGroups
+                                )
+                                let plugFinding = MachOScanner.shared.scan(details: plugDetails, context: plugContext)
                                 
                                 let relPath = plugBinURL.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
                                 for ind in plugFinding.indicators {
@@ -526,6 +626,50 @@ public final class IPAPackageScanner: @unchecked Sendable {
                                 allSymbols.formUnion(plugDetails.symbols)
                                 if plugFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
                                 if plugFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+
+                                if !plugDetails.isFairPlayEncrypted,
+                                   let extClip = ExpandedThreatCatalog.evaluateClipboardSnooping(
+                                       backgroundModes: plugBgModes,
+                                       symbols: plugDetails.symbols,
+                                       cryptid: plugDetails.cryptid
+                                   ) {
+                                    allIndicators.append(extClip)
+                                }
+
+                                // Also scan any dylibs/frameworks nested inside this .appex
+                                let plugBinCanonical = plugBinURL.standardizedFileURL.path
+                                if let extEnum = FileManager.default.enumerator(at: itemURL, includingPropertiesForKeys: [.isRegularFileKey]) {
+                                    while let subURL = extEnum.nextObject() as? URL {
+                                        if subURL.standardizedFileURL.path == plugBinCanonical { continue }
+                                        let subIsDylib = subURL.pathExtension.lowercased() == "dylib"
+                                        let subIsFw = subURL.deletingLastPathComponent().pathExtension.lowercased() == "framework" && subURL.pathExtension.isEmpty
+                                        if subIsDylib || subIsFw,
+                                           let subData = try? Data(contentsOf: subURL, options: .mappedIfSafe),
+                                           let subSlices = try? MachOParser.shared.parseAllSlices(data: subData),
+                                           !subSlices.isEmpty {
+                                            let subRel = subURL.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
+                                            if subIsDylib {
+                                                allLinkedDylibs.insert("@executable_path/\(subRel)")
+                                            }
+                                            let subDetails = MachOScanner.shared.parseMachO(files: subSlices, rawData: subData)
+                                            let subFinding = MachOScanner.shared.scan(details: subDetails, context: plugContext)
+                                            for ind in subFinding.indicators {
+                                                allIndicators.append(ThreatIndicator(
+                                                    signature: ind.signature,
+                                                    description: "\(ind.description) [\(subRel)]",
+                                                    category: ind.category,
+                                                    location: "\(subRel): \(ind.location)",
+                                                    severity: ind.severity
+                                                ))
+                                            }
+                                            allMatchedSymbols.formUnion(subFinding.evidence.matchedSymbols)
+                                            allLinkedDylibs.formUnion(subDetails.linkedDylibs)
+                                            allSymbols.formUnion(subDetails.symbols)
+                                            if subFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
+                                            if subFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -580,7 +724,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
             if provisionalRisk == .highRisk || provisionalRisk == .caution {
                 let wlResult = WhitelistEngine.shared.isWhitelisted(
                     bundleId: bundleId,
-                    appGroups: gating.appGroups,
+                    appGroups: combinedAppGroups,
                     matchedSignatures: Array(allMatchedSymbols),
                     teamId: channelResult.teamIdentifier
                 )
@@ -605,8 +749,8 @@ public final class IPAPackageScanner: @unchecked Sendable {
             let evidence = AuditEvidence(
                 matchedSymbols: Array(allMatchedSymbols).sorted(),
                 linkedDylibs: Array(allLinkedDylibs).sorted(),
-                hasAppGroups: !gating.appGroups.isEmpty,
-                appGroups: gating.appGroups,
+                hasAppGroups: !combinedAppGroups.isEmpty,
+                appGroups: combinedAppGroups,
                 installChannel: channelResult.channel,
                 cryptid: mainDetails.cryptid,
                 isFairPlayEncrypted: mainDetails.isFairPlayEncrypted,

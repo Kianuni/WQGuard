@@ -152,7 +152,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
         "-*.alipay.com"
     ]
 
-    /// Default 20 high-risk phishing / abuse TLDs targeted for MITM inspection without impacting mainstream apps.
+    /// Default 21 high-risk phishing / abuse TLDs targeted for MITM inspection without impacting mainstream apps.
     public static let defaultHighRiskTLDs: [String] = [
         "*.xyz", "*.top", "*.icu", "*.cyou", "*.sbs", "*.cfd", "*.buzz", "*.fun",
         "*.click", "*.link", "*.site", "*.online", "*.shop", "*.vip", "*.pw",
@@ -165,7 +165,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
     public static let rawModuleTemplate: String = """
     #!name=WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
     #!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 系统未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell, CVSS 9.2)，在网络传输层剥离 Accept-Encoding 中的 br 算法强制降级为 gzip/deflate。内置 16 项严苛负向排除规则，确保 Apple Intelligence、Siri、iCloud 与网银支付绝对不被拦截。
-    #!version=1.0.0
+    #!version=1.2.1
     #!category=安全防护
     #!arguments=EXTRA_MITM_HOSTS:*.example.invalid
     #!arguments-desc=可追加需要强制 Brotli 降级保护的高风险自定义域名（支持通配符如 *.example.com；如需保护全部 Safari/WebView 流量可填入 *，内置排除列表已保护 Apple 核心服务与金融应用）。
@@ -175,8 +175,8 @@ public final class SurgeBrotliShieldHelper: Sendable {
     ^https?:// header-replace Accept-Encoding "gzip, deflate"
 
     [Script]
-    # 防御不遵从客户端协商、强行回传 Content-Encoding: br 的恶意服务端响应
-    brotli-response-guard = type=http-response,pattern=^https?://,requires-body=false,max-size=0,script-text="const ce = ($response.headers['Content-Encoding'] || $response.headers['content-encoding'] || '').toLowerCase(); if (ce.includes('br')) { $done({response: {status: 403, headers: {'Content-Type': 'text/plain; charset=utf-8'}, body: 'WQGuard Brotli Shield: Blocked unsolicited Brotli response stream to mitigate CVE-2026-111497.'}}); } else { $done({}); }"
+    # 零解压（requires-body=false）拦截不遵从客户端协商、强行回传 Content-Encoding: br 的恶意服务端响应
+    brotli-response-guard = type=http-response,pattern=^https?://.+,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/scripts/brotli-guard.js
 
     [MITM]
     # 严苛负向排除规则保障：Apple Intelligence、普通话 Siri、PCC 中继、OpenAI 及银行绝对不走 MITM！
@@ -288,10 +288,12 @@ public final class SurgeBrotliShieldHelper: Sendable {
                   const ce = String(headers['Content-Encoding'] || headers['content-encoding'] || '');
                   if (/(^|[,\\s])br($|[,\\s;])/i.test(ce)) {
                     $done({
-                      response: {
-                        status: 403,
-                        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-WQGuard-Shield': 'Blocked-Unsolicited-Brotli' },
-                        body: 'WQGuard Brotli Shield: Blocked unsolicited Brotli response stream to mitigate CVE-2026-111497.'
+                      status: 403,
+                      headers: {
+                        'Content-Type': 'text/plain; charset=utf-8',
+                        'Content-Length': '0',
+                        'Connection': 'close',
+                        'X-WQGuard-Shield': 'Blocked-Unsolicited-Brotli'
                       }
                     });
                   } else {
@@ -344,7 +346,12 @@ public final class SurgeBrotliShieldHelper: Sendable {
         case .surge:
             hasValidMetadata = content.contains("#!name=") && content.contains("#!category=") && content.contains("#!arguments=")
             hasHeaderRewrite = content.contains("[Header Rewrite]") && content.contains("Accept-Encoding") && content.contains("\"gzip, deflate\"")
-            hasScriptGuard = content.contains("[Script]") && content.contains("brotli-response-guard")
+            hasScriptGuard = content.contains("[Script]")
+                && content.contains("brotli-response-guard")
+                && content.contains("requires-body=false")
+                && content.contains("script-path=")
+                && content.contains("brotli-guard.js")
+                && !content.contains("script-text=")
         case .shadowrocket:
             hasValidMetadata = content.contains("#!name=") && content.contains("#!desc=")
             hasHeaderRewrite = content.contains("[Header Rewrite]") && content.contains("Accept-Encoding") && content.contains("gzip,deflate")
@@ -360,7 +367,11 @@ public final class SurgeBrotliShieldHelper: Sendable {
         case .stash:
             hasValidMetadata = content.contains("name:") && content.contains("desc:")
             hasHeaderRewrite = content.contains("header-rewrite:") && content.contains("Accept-Encoding") && content.contains("gzip, deflate")
-            hasScriptGuard = content.contains("script-providers:") && content.contains("brotli-response-guard") && content.contains("require-body: false")
+            hasScriptGuard = content.contains("script-providers:")
+                && content.contains("brotli-response-guard")
+                && content.contains("require-body: false")
+                && content.contains("status: 403")
+                && !content.contains("response:")
         }
 
         if !hasValidMetadata {

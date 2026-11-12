@@ -39,14 +39,14 @@
 "ipa_import_title" = "Import Local IPA Package";
 "ipa_import_sub" = "Pre-installation sandbox analysis for containermanagerd escape, private photos & dylib injection";
 "select_ipa_button" = "Select .ipa Files (Multi-Select)";
-"ipa_analyzing" = "Performing 4-layer sandbox analysis & Mach-O static decompilation...";
+"ipa_analyzing" = "Performing 4-layer sandbox analysis & Mach-O static binary audit...";
 "ipa_analysis_failed" = "IPA Analysis Failed";
 "preinstall_alert_high_risk" = "Pre-install Warning: Detected sandbox escape exploit! Do NOT install!";
 "preinstall_alert_safe" = "Pre-install Assessment: Clean. No exploit signatures detected.";
 
 /* Settings View */
-"settings_builtin_whitelist" = "Built-in Research Tools Whitelist";
-"settings_builtin_whitelist_footer" = "When enabled, apps matching open-source research tools are classified as Known Tools rather than High Risk.";
+"settings_builtin_whitelist" = "Built-in Self-Identity Whitelist";
+"settings_builtin_whitelist_footer" = "Only WQGuard's own self-identity rule is built-in (strict zero trust for third-party sideload tools). User-authorized rules are classified as Known Tools.";
 "settings_custom_rules" = "Custom Whitelist Rules";
 "settings_no_custom_rules" = "No custom rules configured";
 "settings_add_rule" = "Add Custom Bundle ID Rule";
@@ -69,8 +69,8 @@
 "risk_caution" = "Caution";
 "risk_safe" = "Safe";
 "risk_desc_high_risk" = "Detected unauthorized sandbox escape signatures or escaping symlinks.";
-"risk_desc_known_tool" = "Matched known security utility in authorized whitelist.";
-"risk_desc_caution" = "Possesses App Group entitlements with dynamic symbol resolution (dlopen/dlsym).";
+"risk_desc_known_tool" = "Matched WQGuard self-identity or user-authorized whitelist rule.";
+"risk_desc_caution" = "Possesses App Group entitlements, embedded dylibs, or third-party sideload traits.";
 "risk_desc_safe" = "No suspicious cross-container access signatures or App Groups; safe.";
 
 /* Channels */
@@ -84,12 +84,12 @@
 "posture_status_scanning_title" = "Deep Audit in Progress...";
 "posture_status_high_risk_title" = "High Risk Warning";
 "posture_status_caution_title" = "Caution Advised";
-"posture_status_known_tool_title" = "Known Research Tools Detected";
+"posture_status_known_tool_title" = "Known Whitelisted Tools Detected";
 "posture_status_safe_title" = "System Posture Safe & Compliant";
 "posture_status_scanning_sub" = "Scanning Mach-O private symbols & shared container symlink traversals...";
 "posture_status_high_risk_sub" = "Detected unauthorized containermanagerd sandbox escape or escaping symlinks!";
-"posture_status_caution_sub" = "App declares App Group shared containers with dynamic symbol resolution.";
-"posture_status_known_tool_sub" = "Matched sideload signers or trusted whitelist rules (Feather, LocalDevVPN, etc.).";
+"posture_status_caution_sub" = "App declares App Group shared containers, persistent background modes, or third-party dylibs.";
+"posture_status_known_tool_sub" = "Matched WQGuard self-identity or user-configured custom whitelist rules.";
 "posture_status_safe_sub" = "All scanned targets strictly comply with iOS sandbox boundaries.";
 
 /* Metric Grid & Progress */
@@ -130,7 +130,7 @@
 "ipa_distribution_channel" = "Distribution Channel";
 "ipa_team_id_self_signed" = "None (Ad-hoc / Self-signed)";
 "ipa_drm_encrypted" = "FairPlay Encrypted (cryptid: 1)";
-"ipa_drm_unencrypted" = "Unencrypted (cryptid: 0, full static decompilation completed)";
+"ipa_drm_unencrypted" = "Unencrypted (cryptid: 0, full static binary audit completed)";
 "ipa_declared_app_groups" = "Declared App Groups";
 "ipa_app_groups_none" = "None (Physically incapable of escape)";
 "ipa_dylib_count_label" = "Dynamic Libraries Count";

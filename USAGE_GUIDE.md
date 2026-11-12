@@ -1,8 +1,8 @@
 # WQGuard Technical Architecture, Exploit Deep Dive & Reference Manual
 
-> **Document Version**: 1.0.0  
+> **Document Version**: 1.2.1  
 > **Target Systems**: iOS 26.2+ / iOS 27.x, macOS Darwin 24.x+ (Host Tooling)  
-> **Security Baseline**: 100% Read-Only Inspection, Zero-Modification Guarantee  
+> **Security Baseline**: 100% Read-Only Inspection, Zero-Modification & Strict Zero-Trust Sideload Policy  
 > **Classification**: Technical Architecture, Vulnerability Anatomy & Threat Catalog  
 
 ---
@@ -66,14 +66,14 @@ In the iOS security architecture, applications from the same developer organizat
 /var/mobile/Containers/Shared/AppGroup/<UUID>/
 ```
 To prevent arbitrary apps from accessing another developer's shared container, Apple enforces cryptographic entitlement verification at the kernel and daemon level:
-1. The app's Mach-O binary must embed an Apple-signed `CSBlob` (SuperBlob magic `0xfade0cc0`).
-2. The `CSBlob` contains the entitlements dictionary in **Slot 5 (XML Plist, `0xfade7171`)** or **Slot 7 (ASN.1 DER, `0xfade7172`)**.
+1. The app's Mach-O binary (and each embedded `PlugIns/*.appex` extension) must embed an Apple-signed `CSBlob` (SuperBlob magic `0xfade0cc0`).
+2. The `CSBlob` contains the entitlements dictionary in **Slot 5 (XML Plist, `0xfade7171`)** and/or **Slot 7 (Apple CoreEntitlements v1 ASN.1 DER wrapped in `[APPLICATION 16]` `0x70` + `[CONTEXT 16]` `0xb0`, `0xfade7172`)**, which WQGuard unions across all executable ARM slices.
 3. The entitlement key `com.apple.security.application-groups` must list the group identifier.
 
 #### The Impossibility Invariant
 `containermanagerd` strictly checks whether the client's code signing credentials include the requested group identifier before performing any container operation. An application lacking `com.apple.security.application-groups` **is physically rejected by containermanagerd with error -1**.
 
-Therefore, WQGuard's **Layer 1 Gating Engine** validates Mach-O code signatures: any binary lacking `com.apple.security.application-groups` is classified as `RiskTier.safe` in constant time ($O(1)$ fast-path), eliminating false alarms for benign applications.
+Therefore, after checking App-Group-independent APFS inode enumeration syscalls (`fsgetpath` / `CM-05`) and bundle-level threats, WQGuard's **Layer 1 Gating Engine** fast-paths any binary lacking `com.apple.security.application-groups` (and lacking standalone syscalls) as `RiskTier.safe` in constant time ($O(1)$ fast-path), eliminating false alarms for benign applications.
 
 #### WQGuard Native App Group Declarations
 In WQGuard's own deployment architecture:
@@ -219,7 +219,7 @@ Once the target victim container UUID is acquired, the attacker executes the sec
 ---
 
 ### 1.5 Kernel Sandbox Extension Table Exhaustion (SEC-M5-02)
-As documented in `Erosion/SECURITY_AUDIT_REPORT.md` (`SEC-M5-02`), every call to `sandbox_extension_consume(token)` allocates a slot in the Darwin kernel's fixed-size per-process sandbox extension table (typically 256 or 512 entries).
+Every call to `sandbox_extension_consume(token)` allocates a slot in the Darwin kernel's fixed-size per-process sandbox extension table (typically 256 or 512 entries).
 
 ```c
 // Failure Mode
@@ -271,15 +271,17 @@ Malicious developers employ evasion techniques to bypass static string scanning:
 Even if every string is encrypted, the operating system enforces structural constraints:
 - `com.apple.security.application-groups` **cannot be obfuscated** because kernel AMFI validates the plaintext `CSBlob`.
 - Unencrypted binaries (`cryptid == 0`) must invoke dynamic loader APIs (`dlopen`, `dlsym`) to resolve unlinked APIs.
-- The exploit **must invoke symlink creation APIs** (`symlink`, `symlinkat`, `createSymbolicLinkAtPath:`) or sandbox consumption (`sandbox_extension_consume`).
+- The exploit **must invoke symlink creation APIs** (`symlink`, `symlinkat`, `createSymbolicLinkAtPath:withDestinationPath:error:`, `createSymbolicLinkAtURL:withDestinationURL:error:`) or sandbox consumption (`sandbox_extension_consume`).
 
-When WQGuard detects this combination in an unencrypted sideloaded binary:
+When WQGuard detects this combination in an unencrypted sideloaded binary (across both `LC_SYMTAB` and stripped Objective-C `__objc_methname` selector tables):
 $$\text{cryptid} = 0 \quad\land\quad \text{AppGroups} \quad\land\quad (\text{dlopen} \land \text{dlsym}) \quad\land\quad (\text{symlink} \lor \text{sandbox\_consume} \lor \text{fsgetpath})$$
 It raises **`TUPLE_OBFUSCATED_EXPLOIT` (`CM-07`, High Risk)**, neutralizing symbol-stripping and XOR evasion.
 
 ---
 
 ## 2. LaunchServices CSStore2 Cache & MCM Metadata Analysis
+
+> **Deployment Boundary Note (Standard iOS Seatbelt vs. Host/Unsandboxed Forensics)**: On non-jailbroken stock iOS devices, Apple's Seatbelt sandbox prevents standard user applications from reading `/var/mobile/Library/Caches/*.csstore` or enumerating `/var/mobile/Containers/Shared/AppGroup` outside their own developer group. On stock iOS, WQGuard audits installed apps without exploits via `lockdownd` / `installation_proxy` (`Engine 1A/1B`), `.ipa` / `.tipa` binary inspection (`Engine 2`), and URL-scheme presence probes (`Engine 3`). `CSStore2Parser`, `MCMReader`, and `ContainerScanner` operate in **macOS host/backup forensics (`wqguard-cli --scan-system` / `--container`) and unsandboxed (`com.apple.private.security.no-sandbox` / TrollStore / jailbroken) research environments**.
 
 ### 2.1 CSStore2 Database Format ("bdsl") & Memory-Mapped Architecture
 Apple's LaunchServices daemon (`lsd`) maintains a fast, compiled binary database of all installed applications, app extensions, URL schemes, and container bindings. These caches reside in:
@@ -380,12 +382,12 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 - **Detection Layer**: Layer 2 Static Scanner (`LC_LOAD_DYLIB`)
 - **Technical Description**: The Mach-O binary contains an explicit `LC_LOAD_DYLIB` command linking `/usr/lib/system/libsystem_containermanager.dylib`. Normal iOS App Store applications are prohibited from linking this private system library.
 - **Exploit Path**: Used by container exploit tools to link IPC wrappers for querying `containermanagerd`.
-- **Remediation**: If found in an unknown sideloaded or enterprise app, uninstall immediately. Authorized tools (e.g., WQFiles, Erosion) should be verified against the transparent whitelist.
+- **Remediation**: Uninstall immediately and revoke any associated provisioning profile. Under WQGuard's strict zero-trust policy, no third-party container or sideloading tool is exempted by default.
 
 #### `CM-02`: containermanager Query & Token Symbol References
 - **Identifier**: `SYM_CONTAINER_APIS` (`SYM_QUERY_CREATE`, `SYM_SET_GROUP_IDENTIFIERS`, `SYM_SET_PART`, `SYM_SET_FLAGS`, `SYM_GET_SINGLE_RESULT`, `SYM_COPY_SANDBOX_TOKEN`)
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB`, dynamic symbol stubs)
+- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB` across all ARM slices)
 - **Technical Description**: Binary references private symbols including `container_query_create`, `container_query_operation_set_part`, `container_query_operation_set_flags`, `container_copy_sandbox_token`, or `container_query_get_single_result`.
 - **Exploit Path**: The exact C function call sequence required to trigger the `worse_query` sandbox escape.
 - **Remediation**: The app contains functional exploit code for container sandbox escaping. Isolate and remove the binary.
@@ -401,7 +403,7 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 #### `CM-04`: Darwin Seatbelt Sandbox Extension Token Consumption
 - **Identifier**: `SYM_SANDBOX_EXTENSION_CONSUME` / `SYM_SANDBOX_EXTENSION_RELEASE`
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB`, Dyld chained fixups)
+- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB` across all ARM slices)
 - **Technical Description**: Binary imports `sandbox_extension_consume` or `sandbox_extension_release` from libsystem.
 - **Exploit Path**: Final stage of sandbox escape: converts the token received from `containermanagerd` into kernel filesystem access privileges.
 - **Remediation**: Legitimate third-party apps never call Seatbelt extension consumption APIs directly. Treat binary as an active exploit payload.
@@ -409,8 +411,8 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 #### `CM-05`: APFS Inode Brute-Force Path Leak Primitive
 - **Identifier**: `SYM_FSGETPATH` / `SYM_CONTAINER_OBJECT_GET_PATH`
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB` + `__TEXT` string patterns)
-- **Technical Description**: Binary imports the BSD syscall `fsgetpath` or `container_object_get_path`, frequently paired with container path prefixes (`/Containers/Data/`, `/Containers/Shared/`).
+- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB` + `__TEXT` string patterns, evaluated prior to App Group fast-path gating)
+- **Technical Description**: Binary imports the BSD syscall `fsgetpath` or `container_object_get_path`, frequently paired with container path prefixes (`/Containers/Data/`, `/Containers/Shared/`). Evaluated independently of `com.apple.security.application-groups` so standalone reconnaissance binaries are never gated out.
 - **Exploit Path**: Stage 1 container UUID discovery (`bad_query` / `pathleak`).
 - **Remediation**: `fsgetpath` has zero legitimate use in consumer iOS apps. Indicates active sandbox reconnaissance.
 
@@ -420,13 +422,13 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 - **Detection Layer**: Layer 3 Container Artifact Scanner (`lstat`, `readlink`)
 - **Technical Description**: `Library/Caches` inside an App Group container, or a file within it, has been replaced by a symbolic link (`S_ISLNK`) resolving outside the container boundary.
 - **Exploit Path**: Artifact left behind by `worse_query` or persistent cross-container read/write tunnels.
-- **Remediation**: WQGuard flags the exact symlink destination without traversing it. Delete the escaping symbolic link and restore the standard directory structure.
+- **Remediation**: WQGuard records the exact symlink destination in 100% read-only mode without traversing or modifying the filesystem. Uninstall the offending application and reboot the device to revoke active kernel tokens.
 
 #### `CM-07`: Obfuscation-Resistant Behavioral Tuple
 - **Identifier**: `TUPLE_OBFUSCATED_EXPLOIT`
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 2 Heuristic Behavioral Engine
-- **Technical Description**: An unencrypted binary (`cryptid == 0`) combining `com.apple.security.application-groups`, dynamic loading primitives (`dlopen`/`dlsym`), and symlink manipulation (`symlink`, `symlinkat`) or sandbox APIs.
+- **Detection Layer**: Layer 2 Heuristic Behavioral Engine (`LC_SYMTAB` + `__objc_methname`)
+- **Technical Description**: An unencrypted binary (`cryptid == 0`) combining `com.apple.security.application-groups`, dynamic loading primitives (`dlopen`/`dlsym`), and symlink manipulation (`symlink`, `symlinkat`, `createSymbolicLinkAtPath:withDestinationPath:error:`, `createSymbolicLinkAtURL:withDestinationURL:error:`) or sandbox APIs.
 - **Exploit Path**: Catches stripped, XOR-encrypted, or dynamically obfuscated variants of `worse_query`.
 - **Remediation**: High-confidence heuristic alert. Binary is actively concealing exploit primitives. Block execution.
 
@@ -445,15 +447,15 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 #### `EXP-02`: Private Apple Photos API & Symbol Reference
 - **Identifier**: `EXP-02:PhotosSymbols`
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB`)
-- **Technical Description**: Binary references `PLPhotoLibrary`, `_OBJC_CLASS_$_PLPhotoLibrary`, or `-[PLPhotoLibrary openPhotoLibrary]`.
+- **Detection Layer**: Layer 2 Static Scanner (`LC_SYMTAB` + `__objc_methname`)
+- **Technical Description**: Binary references `PLPhotoLibrary`, `_OBJC_CLASS_$_PLPhotoLibrary`, `systemPhotoLibrary`, or `openPhotoLibrary`.
 - **Exploit Path**: Direct invocation of private Photos daemon IPC methods.
 - **Remediation**: Quarantine binary. Do not store sensitive credentials or recovery phrases in system photos.
 
 #### `EXP-03`: Unauthorized Private Photos Entitlement
 - **Identifier**: `EXP-03:PhotosEntitlement`
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 1 CSBlob Entitlement Parser
+- **Detection Layer**: Layer 1 CSBlob Entitlement Parser (merged XML Slot 5 + CoreEntitlements DER Slot 7)
 - **Technical Description**: App declares internal Apple entitlements: `com.apple.private.photos.*` or `com.apple.photos.bourgeoisie`.
 - **Exploit Path**: Entitlement-based privacy bypass allowing background photo exfiltration.
 - **Remediation**: Delete application immediately. Only first-party Apple components can legitimately possess this entitlement.
@@ -464,12 +466,12 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 - **Detection Layer**: Layer 2 Static Scanner (`LC_LOAD_DYLIB`, `LC_SYMTAB`)
 - **Technical Description**: Binary bundles `libbrotli`, `brotli.framework`, or references `BrotliDecoderDecompressStream`.
 - **Exploit Path**: Supply chain exposure to `CVE-2026-111497` (`HTTP2Shell`, CVSS 9.2). Out-of-bounds heap write during Brotli stream decoding.
-- **Remediation**: Verify embedded `libbrotli` is version $\ge$ 1.2.1. Deploy WQGuard Surge Brotli Shield to strip `br` streams.
+- **Remediation**: Verify embedded `libbrotli` is version $\ge$ 1.2.1. Deploy WQGuard Brotli Shield to strip HTTP `br` streams.
 
 #### `EXP-05`: Repackaged Web3 Crypto Wallet Impersonation
 - **Identifier**: `EXP-05:WalletImpersonation`
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 2 Bundle & Identity Inspector
+- **Detection Layer**: Layer 2 Bundle & Identity Inspector (word-token & dot-delimited boundary matcher)
 - **Technical Description**: Sideloaded or enterprise package (`cryptid == 0`) impersonating major crypto wallet brands: MetaMask, Trust Wallet, Phantom, OKX, Binance, TokenPocket, imToken, Bitget.
 - **Exploit Path**: #1 real-world iOS crypto theft vector: repackaged drainers logging seed phrases and private keys.
 - **Remediation**: **CRITICAL DANGER**. Never enter seed phrases into sideloaded wallet apps. Install wallets exclusively from the official Apple App Store.
@@ -477,18 +479,18 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 #### `EXP-06`: Repackaged Encrypted Messenger Impersonation
 - **Identifier**: `EXP-06:MessengerImpersonation`
 - **Severity**: `HIGH` (`RiskTier.highRisk`)
-- **Detection Layer**: Layer 2 Bundle & Identity Inspector
-- **Technical Description**: Sideloaded or enterprise package (`cryptid == 0`) impersonating Telegram or other secure messengers.
+- **Detection Layer**: Layer 2 Bundle & Identity Inspector (word-token & dot-delimited boundary matcher)
+- **Technical Description**: Sideloaded or enterprise package (`cryptid == 0`) impersonating Telegram or other secure messengers (matched on exact token/dot boundaries so unrelated developer apps like `NetGuard`, `PostgREST`, or `GitGraph` never false-positive).
 - **Exploit Path**: Modified client uploading session tokens (`session.dat`), chat histories, and 2FA SMS codes to third-party servers.
 - **Remediation**: Delete immediately. Revoke active Telegram sessions from official desktop/mobile clients.
 
 #### `EXP-07`: Injected Dynamic Tweak & Hooking Framework Enumeration
 - **Identifier**: `EXP-07:InjectedTweaks`
 - **Severity**: `MEDIUM` (`RiskTier.caution`)
-- **Detection Layer**: Layer 2 Static Scanner (`LC_LOAD_DYLIB`, `Frameworks/`)
-- **Technical Description**: Mach-O binary loads hooking frameworks (`ElleKit`, `CydiaSubstrate`, `libsubstitute`, `libhooker`) or non-system frameworks (`@executable_path/Frameworks/*inject*.dylib`, `*tweak*`, `*hook*`).
+- **Detection Layer**: Layer 2 Static Scanner (`LC_LOAD_DYLIB`, `Frameworks/`, `Dylibs/`, `DynamicLibraries/`, `PlugIns/*.appex`)
+- **Technical Description**: Mach-O binary or bundle contains hooking frameworks (`ElleKit`, `CydiaSubstrate`, `libsubstitute`, `libhooker`), dedicated sideload injection libraries (`.app/Dylibs/*.dylib`, `.app/DynamicLibraries/*.dylib` used by Feather / Cyan / Azule), or suspicious `@executable_path/` / `@rpath/` tweaks.
 - **Exploit Path**: Sideloaded modded IPA with injected dylibs capable of runtime method swizzling and credential interception.
-- **Remediation**: Audit injected dylib list displayed in WQGuard findings. Ensure modded libraries originate from trusted open-source developers.
+- **Remediation**: Audit injected dylib list displayed in WQGuard findings. Under strict zero-trust policy, verify every injected dylib independently before installing.
 
 #### `EXP-08`: Background Clipboard Snooping Tuple & Rogue Supervision
 - **Identifier**: `EXP-08:ClipboardSnooping` / `EXP-08:FakeSupervision`
@@ -502,7 +504,7 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
   - (B) Retail device fake supervision causing Infinite Setup Assistant Loops (SEC-M4-01).
 - **Remediation**:
   - (A) Revoke background permissions and uninstall snooper app.
-  - (B) Use WQGuard safe supervision cleanup to delete rogue `CloudConfigurationDetails.plist`.
+  - (B) WQGuard flags rogue `CloudConfigurationDetails.plist` artifacts strictly read-only (never mutating or deleting system files); back up user data and perform a clean restore via Finder / Apple Configurator if unauthorized supervision was applied.
 
 ---
 
@@ -542,41 +544,42 @@ WQGuard's **`FirmwarePostureEngine`** evaluates the host OS version against 8 co
 | **`CVE-2026-112676`** | Apple Photos Privacy TCC Bypass | Photos / TCC | **7.5** | iOS < 27.2 & 26 < 26.7.2 | iOS 27.2 / 26.7.2 |
 | **`CVE-2026-111497`** | Brotli Decoder Heap OOB Write | libbrotli / WebKit | **9.2** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
 | **`CVE-2026-112611`** | CoreGraphics PDF OOB Write | CoreGraphics / PDFKit| **8.8** | iOS < 27.2 & 26 < 26.7.2 | iOS 27.2 / 26.7.2 |
-| **`CVE-2026-86950`** | CoreGraphics 2D Memory Corruption | CoreGraphics / Quartz| **8.6** | iOS < 27.0 | iOS 27.0 |
+| **`CVE-2026-86950`** | CoreGraphics 2D Memory Corruption | CoreGraphics / Quartz| **8.6** | iOS 26 < 26.7.1 & 18 < 18.7.11 | iOS 27.0 / 26.7.1 / 18.7.11 |
 | **`CVE-2026-113963`** | App Intents Authorization Bypass | Shortcuts / Intents | **7.8** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
 | **`CVE-2026-113960/1`**| iMessage Blastdoor Group Leak | Messages / Blastdoor | **8.1** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
 | **`CVE-2026-113964–70`**| Bluetooth CoreUtils & AirPlay UAF| Bluetooth / rapportd | **8.8** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
 
 ---
 
-### 4.2 Surge Brotli Shield Architecture (CVE-2026-111497 / HTTP2Shell)
-`CVE-2026-111497` (CVSS 9.2) is a critical heap buffer overflow in `c/dec/decode.c` within `libbrotli`. Malicious web servers or network-level attackers serving HTTP/2 streams can deliver a weaponized `Content-Encoding: br` payload that triggers remote code execution (RCE) in CFNetwork and WebKit processes.
+### 4.2 Multi-Client Brotli Shield Architecture (CVE-2026-111497 / HTTP2Shell)
+`CVE-2026-111497` (CVSS 9.2) is a critical heap buffer overflow in `c/dec/decode.c` within `libbrotli`. Malicious web servers or network-level attackers serving HTTP/1.1 or HTTP/2 streams can deliver a weaponized `Content-Encoding: br` payload that triggers remote code execution (RCE) in CFNetwork and WebKit processes.
 
-WQGuard provides a standalone Surge module: `Surge/WQGuard-Brotli-Shield.sgmodule`.
+WQGuard provides ready-to-import shield profiles across **Surge (`.sgmodule`), Shadowrocket (`.module`), Quantumult X (`.conf`), Loon (`.plugin`), and Stash (`.stoverride`)** under `Shields/` (e.g., `Shields/Surge/WQGuard-Brotli-Shield.sgmodule`):
 
 ```ini
 #!name=WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
-#!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 系统未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell, CVSS 9.2)，在网络传输层剥离 Accept-Encoding 中的 br 算法强制降级为 gzip/deflate。内置 16 项严苛负向排除规则，确保 Apple Intelligence、Siri、iCloud 与网银支付绝对不被拦截。
-#!version=1.0.0
+#!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 系统未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell, CVSS 9.2)，在网络传输层剥离 Accept-Encoding 中的 br 算法强制降级为 gzip/deflate。内置 16 项严苛负向排除规则，确保 Apple Intelligence、普通话 Siri、iCloud 与网银支付绝对不被拦截。
+#!version=1.2.1
 #!category=安全防护
 #!arguments=EXTRA_MITM_HOSTS:*.example.invalid
-#!arguments-desc=可追加需要强制 Brotli 降级保护的高风险自定义域名。
+#!arguments-desc=可追加需要强制 Brotli 降级保护的高风险自定义域名（支持通配符如 *.example.com；如需保护全部 Safari/WebView 流量可填入 *，内置排除列表已保护 Apple 核心服务与金融应用）。
 
 [Header Rewrite]
 # 强制剥离客户端请求中的 br 压缩声明，降级至安全的 gzip 与 deflate 编码
 ^https?:// header-replace Accept-Encoding "gzip, deflate"
 
 [Script]
-# 防御不遵从客户端协商、强行回传 Content-Encoding: br 的恶意服务端响应
-brotli-response-guard = type=http-response,pattern=^https?://,requires-body=false,max-size=0,script-text="const ce = ($response.headers['Content-Encoding'] || $response.headers['content-encoding'] || '').toLowerCase(); if (ce.includes('br')) { $done({response: {status: 403, headers: {'Content-Type': 'text/plain; charset=utf-8'}, body: 'WQGuard Brotli Shield: Blocked unsolicited Brotli response stream to mitigate CVE-2026-111497.'}}); } else { $done({}); }"
+# 零解压（requires-body=false）拦截不遵从客户端协商、强行回传 Content-Encoding: br 的恶意服务端响应
+brotli-response-guard = type=http-response,pattern=^https?://.+,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/scripts/brotli-guard.js
 
 [MITM]
 hostname = %APPEND% -*.apple.com, -*.icloud.com, -*.icloud-content.com, -*.mzstatic.com, -*.cdn-apple.com, -guzzoni.apple.com, -*.siri.apple.com, -gspe1-ssl.ls.apple.com, -apple-relay.*, -cp4.cloudflare.com, -*.openai.com, -*.chatgpt.com, -*.binance.com, -*.okx.com, -*.tenpay.com, -*.alipay.com, *.xyz, *.top, *.icu, *.cyou, *.sbs, *.cfd, *.buzz, *.fun, *.click, *.link, *.site, *.online, *.shop, *.vip, *.pw, *.work, *.rest, *.monster, *.quest, *.zip, *.mov, {{{EXTRA_MITM_HOSTS}}}
 ```
 
-#### Dual Defense Layers:
-1. **Request Header Replace**: Changes client `Accept-Encoding` from `gzip, deflate, br, zstd` to `gzip, deflate`. Compliant servers respond with gzip.
-2. **Response Script Guard (`brotli-response-guard`)**: If an attacker's server ignores the request and force-sends `Content-Encoding: br`, the script intercepts the stream before CFNetwork reaches the Brotli decompressor, returning HTTP 403.
+#### Dual Defense Layers & Protocol Boundaries:
+1. **Request Header Replace**: Rewrites client `Accept-Encoding` to `gzip, deflate` so compliant origins serve gzip/deflate instead of Brotli.
+2. **Response Script Guard (`brotli-guard.js`)**: Executes in `http-response` (`requires-body=false`) mode and returns a top-level `{ status: 403, headers: { "Content-Length": "0", "Connection": "close" } }` circuit-breaker response (or `HTTP/1.1 403 Forbidden` on Quantumult X `script-response-header`) without touching or decompressing a single body byte.
+3. **Explicit Protocol Scope**: By default, MITM targets 21 high-abuse TLDs (`*.xyz` .. `*.mov`) for zero daily overhead; set `EXTRA_MITM_HOSTS = *` to cover `.com` / `.net` browsing as well. Note that **WebKit CSS `@font-face` `.woff2` font decoding (which embeds Brotli internally) and unintercepted HTTP/3 QUIC streams** are not governed by HTTP `Accept-Encoding` — for high-risk targeted threat models, pair this shield with **iOS Lockdown Mode** (Section 4.4, which disables custom WOFF2 font rendering) and block UDP 443 / QUIC in your proxy client.
 
 ---
 
@@ -656,6 +659,11 @@ OPTIONS:
         Evaluate OS version against 8 2026 CVEs (e.g., Photos bypass,
         Brotli OOB RCE, worse_query 0day) using FirmwarePostureEngine.
         If os_version is omitted, current device OS version is used.
+
+  --export-shield <path>
+        Export multi-client Brotli downgrade shield auto-detected by extension
+        (.sgmodule / .module / .conf / .plugin / .stoverride) with 16 negative
+        host exclusions via SurgeBrotliShieldHelper.
 
   --export-surge <path>
         Export WQGuard-Brotli-Shield.sgmodule with 16 negative exclusions
@@ -830,6 +838,7 @@ WQGuard adheres to strict vendor-neutral, production-grade identity standards ac
 | **Primary App Group** | `group.com.wqguard.app` | Shared container for scan reports & state | `WQGuard.entitlements` |
 | **Dedicated Scanner Group** | `group.com.wqguard.scanner` | Dedicated container for scoped read-only queries | `WhitelistEngine.swift` |
 
-### 6.2 Third-Party Identity Isolation & Whitelist Clarification
-- **Minimal Default Whitelist**: By default, `WhitelistEngine.swift` whitelists **only `WQGuard` itself** (`com.wqguard.app`), ensuring all third-party container research utilities and sideloaded binaries are transparently surfaced rather than silently exempted. Users may register custom Bundle ID rules as needed.
+### 6.2 Third-Party Identity Isolation & Strict Zero-Trust Sideload Policy
+- **Strict Zero-Trust Default Whitelist**: By default, `WhitelistEngine.swift` whitelists **only `WQGuard` itself** (`com.wqguard.app` with exact App Group verification AND a strict read-only self-scan `expectedSignatures` subset check — any Trojanized binary carrying `container_copy_sandbox_token`, `fsgetpath`, or `libsystem_containermanager.dylib` under `com.wqguard.app` is immediately rejected).
+- **Zero Implicit Exemptions for Third-Party Sideloading Tools**: Third-party sideload signers, certificate managers, and loopback debuggers (`Feather`, `SideStore`, `AltStore`, `全能签 / ESign`, `GBox`, `Scarlet`, `LocalDevVPN`, `StikDebug`) are **never auto-whitelisted** (`isWhitelisted == false`), surfacing transparently as `Caution` (`🟠`) or `High Risk` (`🔴`) unless a user explicitly registers a local custom rule.
 - **Portability & Hygiene**: Zero personal machine paths (e.g., `/Users/<username>/`), private author emails, or local hostnames exist within WQGuard distribution artifacts, test suites, or CI pipelines.

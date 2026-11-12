@@ -524,6 +524,52 @@ public struct MachOFile: Sendable {
         guard UInt64(cs.dataoff) + UInt64(cs.datasize) <= UInt64(sliceData.count) else { return nil }
         return sliceData.subdata(in: Int(cs.dataoff)..<Int(cs.dataoff + cs.datasize))
     }
+
+    /// Extracts Objective-C selector strings from unencrypted `__objc_methname` sections
+    /// so stripped release binaries without `LC_SYMTAB` entries still surface private/sensitive selectors.
+    public var objcMethodNames: [String] {
+        guard !isFairPlayEncrypted else { return [] }
+        let encRange = encryptionInfo?.encryptedRange
+        var selectors: [String] = []
+
+        for seg in segments {
+            for sect in seg.sections where sect.sectionName == "__objc_methname" && sect.size > 0 {
+                let start = Int(sect.offset)
+                guard let sizeInt = Int(exactly: sect.size),
+                      start >= 0, sizeInt > 0,
+                      start <= sliceData.count,
+                      sizeInt <= sliceData.count - start else {
+                    continue
+                }
+                let sectRange = start..<(start + sizeInt)
+                if let er = encRange, er.overlaps(sectRange) {
+                    continue
+                }
+                sliceData.withUnsafeBytes { raw in
+                    guard let base = raw.baseAddress?.advanced(by: start).assumingMemoryBound(to: UInt8.self) else { return }
+                    var cur = 0
+                    while cur < sizeInt && selectors.count < 65_536 {
+                        while cur < sizeInt && base[cur] == 0 {
+                            cur += 1
+                        }
+                        if cur >= sizeInt { break }
+                        let strStart = cur
+                        while cur < sizeInt && base[cur] != 0 {
+                            cur += 1
+                        }
+                        let len = cur - strStart
+                        if len >= 2 && len <= 512 {
+                            let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: strStart), count: len), as: UTF8.self)
+                            if !s.isEmpty {
+                                selectors.append(s)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return selectors
+    }
 }
 
 // MARK: - Mach-O Parser Engine
@@ -536,6 +582,19 @@ public final class MachOParser: Sendable {
     /// Instance forwarding method for singleton delegation.
     public func parse(data: Data, preferredCpuType: cpu_type_t? = nil) throws -> MachOFile {
         try Self.parse(data: data, preferredCpuType: preferredCpuType)
+    }
+
+    /// Instance forwarding method for parsing all slices in Thin or Universal/FAT binaries.
+    public func parseAllSlices(data: Data) throws -> [MachOFile] {
+        try Self.parseAllSlices(data: data)
+    }
+
+    /// Selects all iOS-executable ARM architecture slices (`arm64`, `arm64e`, `arm64_32`, `armv7`) when present,
+    /// defeating `arm64` + `arm64e` multi-slice shadowing while avoiding dead `x86_64` simulator slice pollution.
+    /// Falls back to all slices when no ARM slice exists (e.g. host macOS x86_64 test binaries).
+    public static func selectAuditSlices(from files: [MachOFile]) -> [MachOFile] {
+        let armSlices = files.filter { ($0.cpuType & 0x00ff_ffff) == CPU_TYPE_ARM }
+        return armSlices.isEmpty ? files : armSlices
     }
 
     /// Instance forwarding method for local filesystem URL parsing.
@@ -557,6 +616,55 @@ public final class MachOParser: Sendable {
     public static func parse(url: URL, preferredCpuType: cpu_type_t? = nil) throws -> MachOFile {
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         return try parse(data: data, preferredCpuType: preferredCpuType)
+    }
+
+    /// Parses ALL architecture slices embedded in a Universal FAT or Thin Mach-O binary so secondary
+    /// slices (e.g., `arm64e` shadowed behind a clean `arm64` slice) cannot evade static inspection.
+    public static func parseAllSlices(data: Data) throws -> [MachOFile] {
+        guard data.count >= 4 else {
+            throw MachOParserError.fileTooSmall(actual: data.count, minimum: 4)
+        }
+
+        let reader = BinaryReader(data: data)
+        guard let rawMagic = reader.readUInt32(at: 0) else {
+            throw MachOParserError.fileTooSmall(actual: data.count, minimum: 4)
+        }
+
+        let isFat32BE = (rawMagic.byteSwapped == FAT_MAGIC)
+        let isFat32LE = (rawMagic == FAT_MAGIC)
+        let isFat64BE = (rawMagic.byteSwapped == FAT_MAGIC_64)
+        let isFat64LE = (rawMagic == FAT_MAGIC_64)
+
+        if isFat32BE || isFat32LE || isFat64BE || isFat64LE {
+            let isFat64 = isFat64BE || isFat64LE
+            let fatSwapped = isFat32BE || isFat64BE
+            let slices = try parseFatSlices(reader: reader, isFat64: isFat64, swapped: fatSwapped)
+            guard !slices.isEmpty else {
+                throw MachOParserError.fatBinaryEmpty
+            }
+
+            var parsedFiles: [MachOFile] = []
+            var firstError: Error?
+            for slice in slices {
+                guard slice.offset <= UInt64(data.count),
+                      slice.size <= UInt64(data.count) - slice.offset else {
+                    throw MachOParserError.sliceOutOfBounds(offset: slice.offset, size: slice.size, total: data.count)
+                }
+                let sliceSubdata = data.subdata(in: Int(slice.offset)..<Int(slice.offset + slice.size))
+                do {
+                    let file = try parseThinSlice(sliceData: sliceSubdata, containerSlices: slices)
+                    parsedFiles.append(file)
+                } catch {
+                    if firstError == nil { firstError = error }
+                }
+            }
+            if parsedFiles.isEmpty {
+                throw firstError ?? MachOParserError.fatBinaryEmpty
+            }
+            return parsedFiles
+        }
+
+        return [try parseThinSlice(sliceData: data, containerSlices: [])]
     }
 
     /// Parses a Mach-O binary from raw Data (supports Thin 32-bit, Thin 64-bit, and Universal FAT).

@@ -39,14 +39,14 @@
 "ipa_import_title" = "导入本地 IPA 安装包";
 "ipa_import_sub" = "安装前在沙盒内深度检测 containermanagerd 越权、私有相册调用与注入动态库";
 "select_ipa_button" = "选择 .ipa 文件加入扫描（支持多选）";
-"ipa_analyzing" = "正在进行 4 层沙盒解析与 Mach-O 静态反编译...";
+"ipa_analyzing" = "正在进行 4 层沙盒解析与 Mach-O 静态二进制审计...";
 "ipa_analysis_failed" = "IPA 分析失败";
 "preinstall_alert_high_risk" = "安装前预警：检测到越界沙盒逃逸特征，切勿安装！";
 "preinstall_alert_safe" = "安装前评估：未发现已知越权利用特征，处于安全状态。";
 
 /* Settings View */
-"settings_builtin_whitelist" = "内置已知研究工具白名单";
-"settings_builtin_whitelist_footer" = "启用白名单后，匹配开源工具特征的应用将评级为「已知工具提示」而非「高危告警」。";
+"settings_builtin_whitelist" = "内置自身身份白名单";
+"settings_builtin_whitelist_footer" = "默认仅保留 WQGuard 自身身份规则（对第三方侧载工具严格零信任）。用户显式添加白名单的应用将评级为「已知工具提示」。";
 "settings_custom_rules" = "自定义白名单规则";
 "settings_no_custom_rules" = "暂无自定义规则";
 "settings_add_rule" = "添加自定义 Bundle ID 规则";
@@ -69,8 +69,8 @@
 "risk_caution" = "前置条件留意";
 "risk_safe" = "安全";
 "risk_desc_high_risk" = "检测到越界沙盒访问特征或异常逃逸符号链接，存在越权风险。";
-"risk_desc_known_tool" = "检测到已知越权测试工具（已授权白名单），符合已知特征。";
-"risk_desc_caution" = "检测到 App Group 共享容器权限并伴随动态符号解析特征，建议留意。";
+"risk_desc_known_tool" = "匹配 WQGuard 自身身份或用户显式添加的受信任白名单规则。";
+"risk_desc_caution" = "检测到 App Group 共享容器权限、第三方动态库或侧载组件特征，建议留意。";
 "risk_desc_safe" = "未发现可疑跨容器访问特征或无 App Group 权限，处于安全状态。";
 
 /* Channels */
@@ -89,7 +89,7 @@
 "posture_status_scanning_sub" = "正在执行权限注册表核验与二进制特征排查";
 "posture_status_high_risk_sub" = "检出高危越权特征或仿冒应用，点击卡片立即查看高危应用清单！";
 "posture_status_caution_sub" = "部分侧载/企业签应用含共享容器、常驻后台或改版特征，点击查看详情。";
-"posture_status_known_tool_sub" = "已识别开源签名器或自定义白名单工具（Feather、LocalDevVPN 等），点击查看清单。";
+"posture_status_known_tool_sub" = "已匹配 WQGuard 自身身份或用户自定义信任白名单规则，点击查看清单。";
 "posture_status_safe_sub" = "所有已扫描目标均符合 iOS 沙盒隔离边界，未检出越权风险。";
 
 /* Metric Grid & Progress */
@@ -130,7 +130,7 @@
 "ipa_distribution_channel" = "分发渠道";
 "ipa_team_id_self_signed" = "无 (Ad-hoc / 个人自签)";
 "ipa_drm_encrypted" = "FairPlay 加密 (cryptid: 1)";
-"ipa_drm_unencrypted" = "未加密 (cryptid: 0, 完整静态反编译已完成)";
+"ipa_drm_unencrypted" = "未加密 (cryptid: 0, 完整静态二进制审计已完成)";
 "ipa_declared_app_groups" = "声明的 App Groups";
 "ipa_app_groups_none" = "无 (物理无法逃逸)";
 "ipa_dylib_count_label" = "动态链接库数量";

@@ -88,8 +88,12 @@ final class FirmwarePostureTests: XCTestCase {
 
     func testCoreGraphics2DMatrix() {
         let engine = FirmwarePostureEngine.shared
-        // Affects iOS < 27.0
-        XCTAssertTrue(engine.isVulnerable(.coreGraphics2D, in: SystemOSVersion(major: 26, minor: 7, patch: 3)))
+        // Patched in iOS 27.0, iOS 26.7.1, and iOS 18.7.11
+        XCTAssertTrue(engine.isVulnerable(.coreGraphics2D, in: SystemOSVersion(major: 18, minor: 7, patch: 10)))
+        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: SystemOSVersion(major: 18, minor: 7, patch: 11)))
+        XCTAssertTrue(engine.isVulnerable(.coreGraphics2D, in: SystemOSVersion(major: 26, minor: 7, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: SystemOSVersion(major: 26, minor: 7, patch: 1)))
+        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: SystemOSVersion(major: 26, minor: 7, patch: 3)))
         XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: SystemOSVersion(major: 27, minor: 0, patch: 0)))
     }
 

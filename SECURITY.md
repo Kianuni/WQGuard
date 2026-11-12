@@ -45,14 +45,14 @@ let data = try Data(contentsOf: url, options: [.mappedIfSafe])
 iOS 内核为单个进程分配的沙盒扩展槽位（Sandbox Extension Slots）数量有限。若扫描器连续校验数百个容器而未及时释放句柄，将触发内核表耗尽（错误码 `-6` / `EXFULL`）。WQGuard 通过线程安全的 RAII 封装类 `ScopedSandboxToken`，确保每次单点检查退出作用域或 `deinit` 时立即释放对应句柄。
 
 #### 2.5 本地数据隔离与无痕临时拆包
-- **`.ipa` 无痕拆包自毁**：未安装的 `.ipa` / `.tipa` 仅解压至随机 UUID 命名的隔离临时目录 `NSTemporaryDirectory()/WQGuard_IPA_<UUID>/`，并由 Swift `defer` 块保证无论解析成功或抛出异常均在函数返回前彻底删除临时目录。
-- **配对记录与环回通信隔离**：用户导入的 `.mobiledevicepairing` 仅保存在本机沙盒 `Application Support/WQGuardRegistry/` 内，支持随时一键销毁；连接 `installation_proxy` 时仅与本机虚拟环回地址（如 `10.7.0.1` 或同网段本机隧道端）建立本地 TLS 握手，绝不向外部网络发送任何字节。
+- **`.ipa` / `.tipa` 按需隔离拆包与自毁**：未安装的 `.ipa` / `.tipa` 仅按 ZIP 中央目录提取可执行程序、动态库、扩展插件与签名元数据（自动剥离压缩包内 `S_IFLNK` 符号链接条目并校验实际解压字节上限）至随机 UUID 命名的隔离临时目录 `NSTemporaryDirectory()/wqguard_ipa_<UUID>/`，由 Swift `defer` 块保证无论解析成功或抛出异常均在函数返回前彻底删除临时目录。
+- **配对记录与环回通信隔离**：用户导入的 `.mobiledevicepairing` 仅保存在本机沙盒 `Application Support/WQGuardRegistry/` 内，支持随时一键销毁；连接 `installation_proxy` 时仅与本机虚拟环回地址（如 `10.7.0.1` 或同网段本机隧道端）建立严格校验证书指纹（Fail-Closed）的本地 TLS 握手，绝不向外部网络发送任何字节。
 
 ---
 
 ### 3. 自动化只读回归验证体系
 
-WQGuard 的只读承诺由 **664 项自动化单元测试**（含 `ReadOnlyAssertions.swift` 对抗测试套件）在每次构建时强制校验：
+WQGuard 的只读承诺由 **673 项自动化单元测试**（含 `ReadOnlyAssertions.swift` 与 `SecurityAuditV121RegressionTests.swift` 对抗测试套件）在每次构建时强制校验：
 1. **全目录逐字节 SHA-256 前后比对**：扫描前后对目标目录全部文件计算 SHA-256，任何 1 比特变化立即判定测试失败。
 2. **纳秒级文件系统时间戳校验**：比对 `st_mtimespec.tv_sec` 与 `st_mtimespec.tv_nsec`，确保扫描绝不污染文件修改时间。
 3. **描述符只读模式断言**：通过 `fcntl(fd, F_GETFL)` 校验 `flags & O_ACCMODE == O_RDONLY`。
@@ -65,7 +65,7 @@ WQGuard 的只读承诺由 **664 项自动化单元测试**（含 `ReadOnlyAsser
 
 ### 1. Security Design Principles
 
-**WQGuard** is an open-source, production-grade security scanner and multi-client firmware CVE guard for iOS 26.2+ / iOS 27.x and macOS Darwin hosts. Because WQGuard inspects potentially hostile third-party `.ipa` archives, shared containers, and installed-app registries, it enforces **three strict zero-trust invariants**:
+**WQGuard** is an open-source, production-grade security scanner and multi-client firmware CVE guard for iOS 26.2+ / iOS 27.x and macOS Darwin hosts. Because WQGuard inspects potentially hostile third-party `.ipa` / `.tipa` archives, shared containers, and installed-app registries, it enforces **three strict zero-trust invariants**:
 
 1. **100% Physical Read-Only Invariant**: Under no circumstances does WQGuard modify, create, rewrite, truncate, or touch any inspected binary, container metadata, or system file.
 2. **Zero-Exploit Architecture**: WQGuard embeds **zero sandbox escape or kernel exploit primitives** (no `worse_query`, no `bad_query`, no `fsgetpath` brute-forcing), preventing `containermanagerd` crashes, `0x8badf00d` watchdog kills, or dangling symlinks.
@@ -79,13 +79,13 @@ WQGuard 的只读承诺由 **664 项自动化单元测试**（含 `ReadOnlyAsser
 2. **Read-Only Memory Mapping (`.mappedIfSafe` / `PROT_READ`)**: Binary parsers operate on read-only mapped pages guarded by overflow-checked 64-bit bounds validation.
 3. **Non-Recursive Symlink Forensics (`lstat` + `readlink`)**: `ContainerScanner` never calls `stat()` or recurses into symbolic links, capturing escaping destinations safely without traversing outside container boundaries.
 4. **Scoped RAII Sandbox Token Release (`ScopedSandboxToken`)**: Immediately releases Seatbelt extension handles upon scope exit to prevent kernel table exhaustion (`EXFULL`).
-5. **Ephemeral Scratch Unpacking & Local Loopback Isolation**: Uninstalled `.ipa` archives unpack into randomized `NSTemporaryDirectory()/WQGuard_IPA_<UUID>/` directories guaranteed to be wiped via `defer`; `LocalDevVPN` pairing connections communicate strictly over local virtual loopback with the device's own `lockdownd` service.
+5. **Ephemeral Scratch Unpacking & Fail-Closed Loopback TLS**: Uninstalled `.ipa` / `.tipa` archives selectively unpack binaries and metadata (stripping ZIP `S_IFLNK` symlink entries and enforcing inflate byte ceilings) into randomized `NSTemporaryDirectory()/wqguard_ipa_<UUID>/` directories guaranteed to be wiped via `defer`; `LocalDevVPN` pairing connections communicate strictly over local virtual loopback with fail-closed certificate pinning against the device's own `lockdownd` service.
 
 ---
 
 ### 3. Automated Read-Only Regression Verification
 
-Continuously enforced across **664 automated unit tests** (`ReadOnlyAssertions.swift`):
+Continuously enforced across **673 automated unit tests** (`ReadOnlyAssertions.swift` & `SecurityAuditV121RegressionTests.swift`):
 - Pre/post bit-for-bit **SHA-256 checksum equality** across all scanned files;
 - Pre/post **nanosecond `st_mtimespec` timestamp equality**;
 - Descriptor access mode verification (`fcntl(fd, F_GETFL) & O_ACCMODE == O_RDONLY`);

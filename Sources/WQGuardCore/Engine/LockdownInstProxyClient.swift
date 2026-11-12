@@ -785,8 +785,8 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                 }
             }
 
-            // If pairing file omitted DeviceCertificate/RootCertificate, allow local loopback peer
-            completion(expectedDeviceDER == nil && expectedRootDER == nil)
+            // Fail-closed: never accept unverified STARTTLS peers when pinning certificates are missing or mismatched
+            completion(false)
         }, verifyQueue)
 
         return tls

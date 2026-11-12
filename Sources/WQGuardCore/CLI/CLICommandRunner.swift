@@ -209,11 +209,18 @@ public enum CLICommandRunner: Sendable {
             }
         }
 
-        // 6.3 System Scanning
+        // 6.3 System Scanning (host backup / unsandboxed CLI forensics)
         if config.scanSystem {
-            findAndParseCSStore()
+            let csSnapshot = findAndParseCSStore()
+            var extraBundleURLs: [URL] = []
+            if let snap = csSnapshot {
+                let candidatePaths = Set(snap.discoveredAppBundles).union(snap.bundlePaths.values)
+                for path in candidatePaths.sorted() where FileManager.default.fileExists(atPath: path) {
+                    extraBundleURLs.append(URL(fileURLWithPath: path))
+                }
+            }
             do {
-                let sysFindings = try await SecurityPipeline.shared.scanInstalledAppsAsync { progress in
+                let sysFindings = try await SecurityPipeline.shared.scanInstalledAppsAsync(additionalLocations: extraBundleURLs) { progress in
                     styler.printProgress(progress, to: stderr)
                 }
                 findings.append(contentsOf: sysFindings)
@@ -307,7 +314,7 @@ public enum CLICommandRunner: Sendable {
         return hasHighRisk ? 1 : 0
     }
 
-    private static func findAndParseCSStore() {
+    private static func findAndParseCSStore() -> CSStoreSnapshot? {
         #if os(macOS)
         let homeCaches = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches").path
         #else
@@ -322,12 +329,13 @@ public enum CLICommandRunner: Sendable {
             if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
                 for f in files where f.hasPrefix("com.apple.LaunchServices-") && f.hasSuffix(".csstore") {
                     let csURL = URL(fileURLWithPath: (dir as NSString).appendingPathComponent(f))
-                    if let _ = try? CSStore2Parser.shared.parse(at: csURL) {
-                        return
+                    if let snap = try? CSStore2Parser.shared.parse(at: csURL) {
+                        return snap
                     }
                 }
             }
         }
+        return nil
     }
 
     private static func formatFirmwareReportText(report: FirmwarePostureReport, styler: TerminalStyler) -> String {

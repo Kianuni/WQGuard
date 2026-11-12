@@ -131,24 +131,29 @@ public final class WhitelistEngine: @unchecked Sendable {
     private var tools: [WhitelistedTool]
 
     /// Built-in default whitelist containing only WQGuard's own self-identity rule.
-    /// Third-party research utilities exploiting `containermanagerd` are intentionally NOT built-in.
+    /// Third-party sideloading tools and research utilities are strictly zero-trust and NEVER built-in.
     public static let defaultTools: [WhitelistedTool] = [
         WhitelistedTool(
             name: "WQGuard",
             allowedBundleIds: [
                 "com.wqguard.app",
-                "com.wqguard.app.*",
-                "com.antigravity.wqguard*"
+                "com.wqguard.app.debug",
+                "com.antigravity.wqguard"
             ],
             allowedAppGroups: [
                 "group.com.wqguard.app",
-                "group.com.wqguard.app*",
-                "group.*.com.wqguard.app*",
                 "group.com.wqguard.scanner"
             ],
             expectedSignatures: [
                 "container_query_create",
-                "container_query_get_single_result"
+                "container_query_get_single_result",
+                "com.apple.containermanagerd",
+                "com.apple.containermanagerd.system",
+                ".com.apple.mobile_container_manager.metadata.plist",
+                ".csstore",
+                "com.apple.LaunchServices-",
+                "dlopen",
+                "dlsym"
             ],
             description: "Self-identity whitelist for WQGuard security scanner",
             isEnabled: true,
@@ -202,7 +207,7 @@ public final class WhitelistEngine: @unchecked Sendable {
         tools.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
     }
 
-    /// Resets all rules to the 6 default built-in tools.
+    /// Resets all rules to the built-in default WQGuard rule.
     public func resetToDefaults() {
         lock.lock()
         defer { lock.unlock() }
@@ -251,6 +256,19 @@ public final class WhitelistEngine: @unchecked Sendable {
                 guard let candidateTeam = teamId, allowedTeams.contains(candidateTeam) else {
                     continue
                 }
+            }
+
+            // 4. Matched signatures subset check (prevents Trojanized builds carrying unexpected exploit primitives from spoofing a whitelist rule)
+            if !tool.expectedSignatures.isEmpty && !matchedSignatures.isEmpty {
+                let allExpected = matchedSignatures.allSatisfy { sig in
+                    let cleanSig = sig.hasPrefix("_") ? String(sig.dropFirst()) : sig
+                    return tool.expectedSignatures.contains { pattern in
+                        let cleanPattern = pattern.hasPrefix("_") ? String(pattern.dropFirst()) : pattern
+                        return PatternMatcher.matches(pattern: pattern, value: sig)
+                            || PatternMatcher.matches(pattern: cleanPattern, value: cleanSig)
+                    }
+                }
+                guard allExpected else { continue }
             }
 
             // Successfully matched all criteria
