@@ -74,10 +74,7 @@ public final class ScanViewModel: ObservableObject {
         self.refreshBookmarkedFolderNames()
     }
 
-    private func saveDirectoryBookmark(for url: URL) {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return }
-        guard let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else { return }
+    private func saveDirectoryBookmarkData(_ data: Data) {
         var existing = UserDefaults.standard.array(forKey: Self.bookmarkedDirsKey) as? [Data] ?? []
         if !existing.contains(data) {
             existing.append(data)
@@ -257,16 +254,18 @@ public final class ScanViewModel: ObservableObject {
                     for itemURL in urls {
                         var isDir: ObjCBool = false
                         let ext = itemURL.pathExtension.lowercased()
-                        if ext == "ipa" || ext == "app" {
+                        if ext == "ipa" || ext == "tipa" || ext == "app" {
                             addTarget(itemURL)
                         } else if fm.fileExists(atPath: itemURL.path, isDirectory: &isDir), isDir.boolValue {
-                            Task { @MainActor [weak self] in
-                                self?.saveDirectoryBookmark(for: itemURL)
+                            if let bData = try? itemURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                                Task { @MainActor [weak self] in
+                                    self?.saveDirectoryBookmarkData(bData)
+                                }
                             }
                             if let enumerator = fm.enumerator(at: itemURL, includingPropertiesForKeys: [.isDirectoryKey]) {
                                 while let subURL = enumerator.nextObject() as? URL {
                                     let subExt = subURL.pathExtension.lowercased()
-                                    if subExt == "ipa" {
+                                    if subExt == "ipa" || subExt == "tipa" {
                                         addTarget(subURL)
                                     } else if subExt == "app" {
                                         addTarget(subURL)
