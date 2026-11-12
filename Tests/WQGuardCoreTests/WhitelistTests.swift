@@ -15,8 +15,8 @@ final class WhitelistTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        // Instantiate fresh isolated engine for each test case
-        engine = WhitelistEngine()
+        // Instantiate engine with sample custom rules to test exact/prefix/glob/anti-spoofing mechanics
+        engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
     }
 
     override func tearDown() {
@@ -27,24 +27,31 @@ final class WhitelistTests: XCTestCase {
     // MARK: - 1. Default Built-in Tools Verification
 
     func testDefaultToolsCountAndIdentities() {
-        let tools = engine.allTools
-        XCTAssertEqual(tools.count, 6, "Expected exactly 6 default built-in tools")
-        
+        let defaultEngine = WhitelistEngine()
+        let tools = defaultEngine.allTools
+        XCTAssertEqual(tools.count, 1, "Expected ONLY WQGuard as built-in default whitelist tool")
+
         let toolNames = Set(tools.map { $0.name })
-        let expectedNames: Set<String> = [
-            "Erosion",
-            "Erosion-CN",
-            "GestaltX",
-            "WQFiles",
-            "WQFiles-CN",
-            "WQGuard"
-        ]
-        XCTAssertEqual(toolNames, expectedNames)
-        
+        XCTAssertEqual(toolNames, ["WQGuard"])
+
         for tool in tools {
             XCTAssertTrue(tool.isEnabled, "\(tool.name) should be enabled by default")
             XCTAssertTrue(tool.isBuiltIn, "\(tool.name) should be marked as built-in")
         }
+
+        // Verify third-party research utilities (Erosion, WQFiles, GestaltX) are NOT whitelisted by default
+        XCTAssertFalse(defaultEngine.isWhitelisted(
+            bundleId: "com.jbdotparty.Erosion",
+            appGroups: ["group.com.jbdotparty.Erosion.WQ"]
+        ).isWhitelisted)
+        XCTAssertFalse(defaultEngine.isWhitelisted(
+            bundleId: "cz.kolbi.wqfiles",
+            appGroups: ["group.cz.kolbi.wqfiles"]
+        ).isWhitelisted)
+        XCTAssertFalse(defaultEngine.isWhitelisted(
+            bundleId: "com.straight-tamago.gestaltx",
+            appGroups: ["group.straight-tamago.gestaltx"]
+        ).isWhitelisted)
     }
 
     // MARK: - 2. Exact Match Tests
@@ -278,16 +285,18 @@ final class WhitelistTests: XCTestCase {
     func testResetToDefaults() {
         // Mutate engine state
         engine.registerCustomTool(WhitelistedTool(name: "TempCustom", allowedBundleIds: ["com.temp"]))
-        engine.toggleTool(named: "WQFiles", isEnabled: false)
+        engine.toggleTool(named: "WQGuard", isEnabled: false)
 
         XCTAssertEqual(engine.allTools.count, 7)
-        XCTAssertFalse(engine.tool(named: "WQFiles")!.isEnabled)
+        XCTAssertFalse(engine.tool(named: "WQGuard")!.isEnabled)
 
-        // Reset
+        // Reset restores ONLY the single built-in WQGuard rule
         engine.resetToDefaults()
 
-        XCTAssertEqual(engine.allTools.count, 6)
-        XCTAssertTrue(engine.tool(named: "WQFiles")!.isEnabled)
+        XCTAssertEqual(engine.allTools.count, 1)
+        XCTAssertTrue(engine.tool(named: "WQGuard")!.isEnabled)
+        XCTAssertNil(engine.tool(named: "Erosion"))
+        XCTAssertNil(engine.tool(named: "WQFiles"))
         XCTAssertNil(engine.tool(named: "TempCustom"))
     }
 

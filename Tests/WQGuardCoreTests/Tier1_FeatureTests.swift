@@ -767,7 +767,8 @@ final class Tier1_FeatureTests: XCTestCase {
     // MARK: - Feature 15: Known Tools Whitelist Engine (5 tests)
 
     func test_F15_whitelist_erosionMatchExact() throws {
-        let result = WhitelistEngine.shared.isWhitelisted(
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let result = engine.isWhitelisted(
             bundleId: "com.jbdotparty.Erosion",
             appGroups: ["group.com.jbdotparty.Erosion.WQ"],
             matchedSignatures: ["container_query_create"]
@@ -777,7 +778,8 @@ final class Tier1_FeatureTests: XCTestCase {
     }
 
     func test_F15_whitelist_erosionCNWildcardMatch() throws {
-        let result = WhitelistEngine.shared.isWhitelisted(
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let result = engine.isWhitelisted(
             bundleId: "com.jbdotparty.Erosion-CN",
             appGroups: ["group.com.jbdotparty.Erosion"],
             matchedSignatures: []
@@ -786,7 +788,8 @@ final class Tier1_FeatureTests: XCTestCase {
     }
 
     func test_F15_whitelist_wqfilesMatch() throws {
-        let result = WhitelistEngine.shared.isWhitelisted(
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let result = engine.isWhitelisted(
             bundleId: "cz.kolbi.wqfiles",
             appGroups: ["group.cz.kolbi.wqfiles"],
             matchedSignatures: ["worse_query"]
@@ -796,7 +799,8 @@ final class Tier1_FeatureTests: XCTestCase {
     }
 
     func test_F15_whitelist_gestaltXMatch() throws {
-        let result = WhitelistEngine.shared.isWhitelisted(
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let result = engine.isWhitelisted(
             bundleId: "com.antigravity.gestaltx",
             appGroups: ["group.com.antigravity.gestaltx"],
             matchedSignatures: []
@@ -806,6 +810,7 @@ final class Tier1_FeatureTests: XCTestCase {
     }
 
     func test_F15_whitelist_customToolRegistrationAndSuppression() throws {
+        defer { WhitelistEngine.shared.resetToDefaults() }
         let custom = WhitelistedTool(
             name: "MyAuditedTool",
             allowedBundleIds: ["com.custom.securitytool"],

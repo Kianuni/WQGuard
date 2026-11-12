@@ -89,7 +89,7 @@
 "posture_status_scanning_sub" = "正在执行权限注册表核验与二进制特征排查";
 "posture_status_high_risk_sub" = "检出高危越权特征或仿冒应用，点击卡片立即查看高危应用清单！";
 "posture_status_caution_sub" = "部分侧载/企业签应用含共享容器、常驻后台或改版特征，点击查看详情。";
-"posture_status_known_tool_sub" = "已识别开源签名器或研究工具（Feather、LocalDevVPN、Erosion 等），点击查看清单。";
+"posture_status_known_tool_sub" = "已识别开源签名器或自定义白名单工具（Feather、LocalDevVPN 等），点击查看清单。";
 "posture_status_safe_sub" = "所有已扫描目标均符合 iOS 沙盒隔离边界，未检出越权风险。";
 
 /* Metric Grid & Progress */
@@ -160,7 +160,7 @@
 /* Settings Confirmation Dialog & Add Rule Sheet */
 "settings_reset_confirm_title" = "确认重置白名单？";
 "settings_reset_confirm_action" = "确认重置为默认";
-"settings_reset_confirm_message" = "将清除所有自定义规则，并将内置 6 款开源工具恢复为默认启用状态。";
+"settings_reset_confirm_message" = "将清除所有自定义规则，并仅保留 WQGuard 自身默认白名单。";
 "rule_sheet_tool_name_placeholder" = "工具/应用名称 (例如: MyTool)";
 "rule_sheet_bundle_id_placeholder" = "Bundle Identifier (例如: com.example.tool*)";
 "rule_sheet_app_group_placeholder" = "App Group (可选，例如: group.com.example)";

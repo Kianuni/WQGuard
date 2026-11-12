@@ -115,11 +115,23 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             }
             return false
         }()
-        let hasITunesMeta = dict["iTunesMetadata"] != nil || (dict["IsAppStoreVendable"] as? Bool == true)
+        let hasITunesMeta = dict["iTunesMetadata"] != nil
+            || (dict["IsAppStoreVendable"] as? Bool == true)
+            || (dict["HasMIDBasedSINF"] as? Bool == true)
         let isAppleStoreSigner = (signerIdentity == "Apple iPhone OS Application Signing") && !profileValidated
         let hasAppStoreMetadata = hasDSID || hasITunesMeta || isAppleStoreSigner
 
         let entDict = (dict["Entitlements"] as? [String: Any]) ?? [:]
+        let numericBoolKeys: Set<String> = [
+            "beta-reports-active",
+            "get-task-allow",
+            "com.apple.private.security.no-container",
+            "com.apple.private.security.no-sandbox",
+            "com.apple.private.security.container-required",
+            "com.apple.private.MobileContainerManager.allowed",
+            "com.apple.private.security.storage.AppDataContainers",
+            "platform-application"
+        ]
         var boolEnts: [String: Bool] = [:]
         var strEnts: [String: String] = [:]
         for (k, v) in entDict {
@@ -127,9 +139,14 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
                 boolEnts[k] = b
             } else if let num = v as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() {
                 boolEnts[k] = num.boolValue
+            } else if let num = v as? NSNumber, numericBoolKeys.contains(k) {
+                boolEnts[k] = (num.intValue != 0)
             } else if let s = v as? String {
                 strEnts[k] = s
             }
+        }
+        if (dict["BetaApp"] as? Bool == true) || (dict["IsTestFlight"] as? Bool == true) {
+            boolEnts["beta-reports-active"] = true
         }
 
         let appGroups = (entDict["com.apple.security.application-groups"] as? [String] ?? [])
@@ -231,9 +248,16 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         }()
 
         let containerPath = dict["dataContainerPath"] as? String
+        var boolEnts: [String: Bool] = [:]
         var allEntKeys: [String] = []
         if !sortedGroups.isEmpty {
             allEntKeys.append("com.apple.security.application-groups")
+        }
+        if (dict["isBeta"] as? Bool == true) ||
+           (dict["testFlight"] as? Bool == true) ||
+           (dict["betaReportsActive"] as? Bool == true) {
+            boolEnts["beta-reports-active"] = true
+            allEntKeys.append("beta-reports-active")
         }
 
         return InstalledAppRegistryRecord(
@@ -248,7 +272,7 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             appGroups: sortedGroups,
             keychainAccessGroups: [],
             tccAllowedServices: [],
-            booleanEntitlements: [:],
+            booleanEntitlements: boolEnts,
             stringEntitlements: [:],
             allEntitlementKeys: allEntKeys,
             backgroundModes: [],
@@ -492,8 +516,24 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return (.developerSideloaded, false)
         }
 
-        if record.booleanEntitlements["beta-reports-active"] == true && !record.profileValidated {
-            return (.testFlight, true)
+        let signerLower = record.signerIdentity?.lowercased() ?? ""
+        let hasDangerousPrivateEscape =
+            record.booleanEntitlements["com.apple.private.security.no-container"] == true ||
+            record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true ||
+            !record.tccAllowedServices.isEmpty
+
+        // TestFlight Beta builds:
+        // On iOS, TestFlight apps embed a 90-day beta provisioning profile (`profileValidated == true`),
+        // carry `Entitlements["beta-reports-active"] == true` (only issued on App Store Connect / TestFlight
+        // distribution profiles and rejected by installd on sideloaded/enterprise IPAs), and are signed with
+        // "Apple Distribution: ...", "iPhone Distribution: ...", "Apple TestFlight Beta Distribution",
+        // or "Apple iPhone OS Application Signing".
+        if !hasDangerousPrivateEscape {
+            if record.booleanEntitlements["beta-reports-active"] == true ||
+               signerLower.contains("testflight") ||
+               (record.profileValidated && signerLower == "apple iphone os application signing") {
+                return (.testFlight, true)
+            }
         }
 
         if record.hasAppStoreMetadata && !record.profileValidated {

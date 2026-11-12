@@ -197,7 +197,18 @@ final class SecurityPipelineTests: XCTestCase {
     }
 
     func test_Pipeline_resignedErosionAppGroup_remainsKnownTool() throws {
-        let wl = WhitelistEngine.shared.isWhitelisted(
+        // Default shared engine does NOT built-in whitelist Erosion
+        let defaultCheck = WhitelistEngine.shared.isWhitelisted(
+            bundleId: "com.jbdotparty.Erosion.XYZ987",
+            appGroups: ["group.XYZ987.com.jbdotparty.Erosion"],
+            matchedSignatures: ["container_query_create", "container_copy_sandbox_token"],
+            teamId: "XYZ987"
+        )
+        XCTAssertFalse(defaultCheck.isWhitelisted)
+
+        // Custom rule engine supports wildcard resigned App Groups
+        let customEngine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let wl = customEngine.isWhitelisted(
             bundleId: "com.jbdotparty.Erosion.XYZ987",
             appGroups: ["group.XYZ987.com.jbdotparty.Erosion"],
             matchedSignatures: ["container_query_create", "container_copy_sandbox_token"],

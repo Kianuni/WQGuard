@@ -68,7 +68,7 @@ WQGuard implements a decoupled, high-performance 4-layer inspection pipeline:
 ┌────────────────────────────────────────────────────────────────────────┐
 │ Layer 4: 4-Tier Risk Grading & Whitelist Engine                        │
 │ • Evaluates evidence into: HIGH RISK, KNOWN TOOL, CAUTION, or SAFE     │
-│ • Built-in transparent whitelist: Erosion, GestaltX, WQFiles, WQGuard  │
+│ • Built-in self-identity whitelist (WQGuard) + user custom rules       │
 │ • Generates cryptographic AuditEvidence & multi-format reports         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -88,7 +88,7 @@ WQGuard implements a decoupled, high-performance 4-layer inspection pipeline:
   - Inspects `systemgroup.com.apple.configurationprofiles` for unauthorized `CloudConfigurationDetails.plist` (`IsSupervised == true`).
 - **Layer 4: 4-Tier Risk Grading & Whitelist Engine**:
   - **High Risk (高危告警)**: Unknown apps matching `containermanagerd` sandbox escape signatures, escaping symlinks, impersonated crypto wallets, or private photos framework bypasses.
-  - **Known Tool (已知工具提示)**: Applications matching verified open-source utilities (`Erosion`, `Erosion-CN`, `GestaltX`, `WQFiles`, `WQFiles-CN`, `WQGuard`) with team ID and signature verification.
+  - **Known Tool (已知工具提示)**: Applications matching WQGuard's self-identity rule, standard sideload managers, or user-configured custom whitelist rules with Bundle ID / App Group / Team ID verification.
   - **Caution (前置条件留意)**: Sideloaded apps with App Group entitlement and dynamic loading (`dlopen`/`dlsym`), bundled `libbrotli` supply-chain notice, or injected tweak dylibs.
   - **Safe (安全)**: Clean apps lacking App Group entitlement or passing all scanning layers without indicators.
 
@@ -310,7 +310,7 @@ WQGuard 采用分层解耦的渐进式检测引擎：
 ┌────────────────────────────────────────────────────────────────────────┐
 │ 第 4 层：4 级风险裁决与已知开源工具白名单引擎                          │
 │ • 裁决 4 级状态：高危告警、已知工具提示、前置条件留意、安全合规       │
-│ • 内置透明已知工具白名单（Erosion、GestaltX、WQFiles、WQGuard 等）     │
+│ • 仅内置 WQGuard 自身默认白名单，支持用户按需添加自定义规则           │
 │ • 生成具备可追溯链条的 AuditEvidence 审计报告与证据导出                │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -330,7 +330,7 @@ WQGuard 采用分层解耦的渐进式检测引擎：
   - 探查 `systemgroup.com.apple.configurationprofiles` 中是否存在非官方残留的 `CloudConfigurationDetails.plist`（`IsSupervised == true`）。
 - **第 4 层：4 级风险裁决与白名单匹配**：
   - **高危告警 (HIGH_RISK)**：未知应用命中 `containermanagerd` 逃逸特征、容器内存在越界软链接、冒充加密钱包、或非法调用相册私有框架。
-  - **已知工具提示 (KNOWN_TOOL)**：应用匹配经过安全社区公开审计的开源工具白名单（如 `Erosion`、`Erosion-CN`、`GestaltX`、`WQFiles`、`WQFiles-CN`、`WQGuard` 本身），提示为安全研究工具而非恶意攻击。
+  - **已知工具提示 (KNOWN_TOOL)**：应用匹配 `WQGuard` 自身白名单、标准侧载签名器或用户手动添加的自定义信任白名单规则。第三方利用漏洞的研究工具默认不再内置豁免，确保所有 `containermanagerd` 利用特征被无死角检出。
   - **前置留意 (CAUTION)**：侧载应用声明了 App Group 且具备动态调用能力、内嵌未确认版本的 `libbrotli`、或发现内嵌调试挂钩 dylib。
   - **安全合规 (SAFE)**：未声明共享权限或经检测完全合规的应用。
 

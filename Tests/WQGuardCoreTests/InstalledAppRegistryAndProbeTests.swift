@@ -80,9 +80,9 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
         XCTAssertTrue(drainer.indicators.contains { $0.signature == "IMPERSONATION:MetaMask" })
 
         let erosion = try XCTUnwrap(findings.first { $0.bundleId == "com.jbdotparty.Erosion.MYTEAM123" })
-        XCTAssertEqual(erosion.riskTier, .knownTool)
-        XCTAssertTrue(erosion.isWhitelisted)
-        XCTAssertEqual(erosion.whitelistedToolName, "Erosion-CN")
+        XCTAssertEqual(erosion.riskTier, .caution, "Erosion is no longer built-in whitelisted; registry App Group surfaces as Caution until binary correlation")
+        XCTAssertFalse(erosion.isWhitelisted)
+        XCTAssertNil(erosion.whitelistedToolName)
     }
 
     func testParsePyMobileDeviceJSONSnapshotAndNoSandboxEntitlement() throws {
@@ -428,6 +428,66 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
             XCTAssertNotNil(moddedWX)
             XCTAssertEqual(moddedWX?.riskTier, .caution)
             XCTAssertTrue(moddedWX?.indicators.contains { $0.signature == "IMPERSONATION:WeChat (微信)" } ?? false)
+        }
+    }
+
+    func testTestFlightAppsSurgeAndAPTVNotMisclassifiedAsEnterprise() throws {
+        // Real-world TestFlight apps carry `ProfileValidated == true` (90-day TestFlight provisioning profile),
+        // `SignerIdentity` containing "Apple Distribution: ..." or "Apple TestFlight Beta Distribution",
+        // AND `Entitlements["beta-reports-active"] == true`.
+        let rawApps: [String: Any] = [
+            "com.nssurge.inc.surge-ios": [
+                "CFBundleIdentifier": "com.nssurge.inc.surge-ios",
+                "CFBundleDisplayName": "Surge",
+                "CFBundleShortVersionString": "5.14.0",
+                "ApplicationType": "User",
+                "SignerIdentity": "Apple Distribution: Surge Networks Inc. (TEAM123456)",
+                "ProfileValidated": true,
+                "ApplicationDSID": 987654321,
+                "UIBackgroundModes": ["network-authentication", "fetch"],
+                "Entitlements": [
+                    "application-identifier": "TEAM123456.com.nssurge.inc.surge-ios",
+                    "com.apple.developer.team-identifier": "TEAM123456",
+                    "beta-reports-active": true,
+                    "com.apple.security.application-groups": ["group.com.nssurge.inc.surge-ios"]
+                ],
+                "Path": "/private/var/containers/Bundle/Application/UUID-SURGE/Surge-iOS.app"
+            ],
+            "com.kimen.aptvpro": [
+                "CFBundleIdentifier": "com.kimen.aptvpro",
+                "CFBundleDisplayName": "APTV",
+                "CFBundleShortVersionString": "2.4.1",
+                "ApplicationType": "User",
+                "SignerIdentity": "Apple Distribution: Kimen Studio (APTV888888)",
+                "ProfileValidated": true,
+                "UIBackgroundModes": ["audio"],
+                "Entitlements": [
+                    "application-identifier": "APTV888888.com.kimen.aptvpro",
+                    "com.apple.developer.team-identifier": "APTV888888",
+                    "beta-reports-active": 1,
+                    "com.apple.security.application-groups": ["group.com.kimen.aptvpro"]
+                ],
+                "Path": "/private/var/containers/Bundle/Application/UUID-APTV/APTV.app"
+            ]
+        ]
+
+        let jsonData = try JSONSerialization.data(withJSONObject: rawApps, options: [])
+        let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(jsonData)
+        XCTAssertEqual(records.count, 2)
+
+        // 1. When `includeAppStoreApps: false`, TestFlight apps are trusted official builds and excluded
+        let sideloadOnly = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: false)
+        XCTAssertTrue(sideloadOnly.isEmpty, "TestFlight apps Surge and APTV must not be treated as Enterprise/Sideloaded")
+
+        // 2. When `includeAppStoreApps: true`, both are classified as `.testFlight` + `.safe` with FairPlay DRM
+        let allFindings = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: true)
+        XCTAssertEqual(allFindings.count, 2)
+        for finding in allFindings {
+            XCTAssertEqual(finding.installChannel, .testFlight, "\(finding.displayName) must be .testFlight, not .enterpriseInHouse")
+            XCTAssertEqual(finding.riskTier, .safe, "\(finding.displayName) must be .safe, not .caution")
+            XCTAssertTrue(finding.evidence.isFairPlayEncrypted)
+            XCTAssertEqual(finding.evidence.cryptid, 1)
+            XCTAssertTrue(finding.indicators.isEmpty)
         }
     }
 }

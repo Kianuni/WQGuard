@@ -837,7 +837,7 @@ final class AdversarialM6Challenger1Tests: XCTestCase {
 
     /// Verifies that when primary Erosion rule is disabled, com.jbdotparty.Erosion is NOT matched by Erosion-CN.
     func test_M6_C1_WhitelistEngine_ErosionCN_distinctFromErosion() {
-        let engine = WhitelistEngine()
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
 
         // 1. When Erosion is enabled, it matches Erosion
         let initial = engine.isWhitelisted(
@@ -869,7 +869,7 @@ final class AdversarialM6Challenger1Tests: XCTestCase {
 
     /// Verifies spoofing resistance: matching bundle ID without valid App Group is rejected.
     func test_M6_C1_WhitelistEngine_spoofingResistance_appGroupMustMatch() {
-        let engine = WhitelistEngine()
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
 
         // Spoofed Erosion bundle ID with attacker's App Group -> REJECTED
         let spoofedErosion = engine.isWhitelisted(
@@ -938,7 +938,7 @@ final class AdversarialM6Challenger1Tests: XCTestCase {
 
     /// Verifies WhitelistEngine thread safety under concurrent reader and writer contention across 100 threads.
     func test_M6_C1_WhitelistEngine_concurrentQueriesAndMutations() {
-        let engine = WhitelistEngine()
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
         let group = DispatchGroup()
         let queue = DispatchQueue(label: "com.adversarial.whitelist.concurrency", attributes: .concurrent)
 

@@ -66,7 +66,7 @@ public enum WQStrings {
     public static var postureStatusScanningSub: String { localized("posture_status_scanning_sub", en: "Scanning Mach-O private symbols & shared container symlink traversals...", zh: "正在执行权限注册表核验与二进制特征排查") }
     public static var postureStatusHighRiskSub: String { localized("posture_status_high_risk_sub", en: "Detected unauthorized sandbox escape entitlements, private symbols, or impersonation!", zh: "检出高危越权特征或仿冒应用，点击卡片立即查看高危应用清单！") }
     public static var postureStatusCautionSub: String { localized("posture_status_caution_sub", en: "Sideloaded apps declare shared App Groups, persistent background modes, or mod traits. Tap to review.", zh: "部分侧载/企业签应用含共享容器、常驻后台或改版特征，点击查看详情。") }
-    public static var postureStatusKnownToolSub: String { localized("posture_status_known_tool_sub", en: "Matched authorized open-source tools (Feather, LocalDevVPN, Erosion, WQFiles, etc.).", zh: "已识别开源签名器或研究工具（Feather、LocalDevVPN、Erosion 等），点击查看清单。") }
+    public static var postureStatusKnownToolSub: String { localized("posture_status_known_tool_sub", en: "Matched sideload signers or trusted whitelist rules (Feather, LocalDevVPN, etc.).", zh: "已识别开源签名器或自定义白名单工具（Feather、LocalDevVPN 等），点击查看清单。") }
     public static var postureStatusSafeSub: String { localized("posture_status_safe_sub", en: "All scanned targets strictly comply with iOS sandbox boundaries.", zh: "所有已扫描目标均符合 iOS 沙盒隔离边界，未检出越权风险。") }
 
     public static func posturePendingTitle(exposedCount: Int) -> String {
@@ -321,8 +321,8 @@ public enum WQStrings {
 
     public static var settingsResetConfirmMessage: String {
         localized("settings_reset_confirm_message",
-                  en: "This will remove all custom whitelist rules and restore the 6 built-in research tools to enabled state.",
-                  zh: "将清除所有自定义规则，并将内置 6 款开源工具恢复为默认启用状态。")
+                  en: "This will remove all custom whitelist rules and restore only the built-in WQGuard self-identity rule.",
+                  zh: "将清除所有自定义规则，并仅保留 WQGuard 自身默认白名单。")
     }
 
     public static var ruleSheetToolNamePlaceholder: String {

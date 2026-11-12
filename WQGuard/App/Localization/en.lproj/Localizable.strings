@@ -89,7 +89,7 @@
 "posture_status_scanning_sub" = "Scanning Mach-O private symbols & shared container symlink traversals...";
 "posture_status_high_risk_sub" = "Detected unauthorized containermanagerd sandbox escape or escaping symlinks!";
 "posture_status_caution_sub" = "App declares App Group shared containers with dynamic symbol resolution.";
-"posture_status_known_tool_sub" = "Matched authorized open-source research tools (Erosion, WQFiles, etc.).";
+"posture_status_known_tool_sub" = "Matched sideload signers or trusted whitelist rules (Feather, LocalDevVPN, etc.).";
 "posture_status_safe_sub" = "All scanned targets strictly comply with iOS sandbox boundaries.";
 
 /* Metric Grid & Progress */
@@ -160,7 +160,7 @@
 /* Settings Confirmation Dialog & Add Rule Sheet */
 "settings_reset_confirm_title" = "Reset Whitelist to Defaults?";
 "settings_reset_confirm_action" = "Reset to Defaults";
-"settings_reset_confirm_message" = "This will remove all custom whitelist rules and restore the 6 built-in research tools to enabled state.";
+"settings_reset_confirm_message" = "This will remove all custom whitelist rules and restore only the built-in WQGuard self-identity rule.";
 "rule_sheet_tool_name_placeholder" = "Tool / App Name (e.g. MyTool)";
 "rule_sheet_bundle_id_placeholder" = "Bundle Identifier (e.g. com.example.tool*)";
 "rule_sheet_app_group_placeholder" = "App Group (Optional, e.g. group.com.example)";

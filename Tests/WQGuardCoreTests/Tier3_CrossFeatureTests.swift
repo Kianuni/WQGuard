@@ -113,8 +113,9 @@ final class Tier3_CrossFeatureTests: XCTestCase {
         let binURL = try SyntheticMachOGenerator.shared.writeToTempFile(data: binaryData)
         tempFiles.append(binURL)
 
-        // Known tool Erosion matching whitelist -> KNOWN_TOOL (not HIGH_RISK)
-        let check = WhitelistEngine.shared.isWhitelisted(
+        // Custom whitelisted tool matching whitelist -> KNOWN_TOOL (not HIGH_RISK)
+        let customEngine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let check = customEngine.isWhitelisted(
             bundleId: "com.jbdotparty.Erosion",
             appGroups: ["group.com.jbdotparty.Erosion.WQ"],
             matchedSignatures: ["container_query_create"]
@@ -143,9 +144,10 @@ final class Tier3_CrossFeatureTests: XCTestCase {
         XCTAssertFalse(check.isWhitelisted)
     }
 
-    // MARK: - Cross-Feature Test 5: Whitelisted Tool (WQFiles) + App Group + fsgetpath
+    // MARK: - Cross-Feature Test 5: Custom Whitelisted Tool (WQFiles) + App Group + fsgetpath
     func test_T3_05_cryptid1_whitelistedWQFiles_withAppGroup_and_fsgetpath() throws {
-        let check = WhitelistEngine.shared.isWhitelisted(
+        let customEngine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let check = customEngine.isWhitelisted(
             bundleId: "cz.kolbi.wqfiles",
             appGroups: ["group.cz.kolbi.wqfiles"],
             matchedSignatures: ["fsgetpath"]

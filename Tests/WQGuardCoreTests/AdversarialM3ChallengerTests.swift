@@ -65,12 +65,11 @@ final class AdversarialM3ChallengerTests: XCTestCase {
 
         let finding = try IPAPackageScanner.shared.scan(ipaURL: ipaURL)
 
-        // Functional assertions
+        // Functional assertions: non-built-in research exploit tool is flagged High Risk by default
         XCTAssertEqual(finding.bundleId, "cz.kolbi.wqfiles")
         XCTAssertEqual(finding.installChannel, .developerSideloaded)
-        XCTAssertTrue(finding.isWhitelisted)
-        XCTAssertEqual(finding.riskTier, .knownTool)
-        XCTAssertEqual(finding.whitelistedToolName, "WQFiles")
+        XCTAssertFalse(finding.isWhitelisted)
+        XCTAssertEqual(finding.riskTier, .highRisk)
 
         // 100% Read-Only Invariant: Zero modification to source IPA
         let shaAfter = try computeSHA256(of: ipaURL)
@@ -93,11 +92,10 @@ final class AdversarialM3ChallengerTests: XCTestCase {
 
         let finding = try IPAPackageScanner.shared.scan(ipaURL: ipaURL)
 
-        // Functional assertions
+        // Functional assertions: non-built-in research exploit tool is flagged High Risk by default
         XCTAssertEqual(finding.bundleId, "com.jbdotparty.Erosion")
-        XCTAssertTrue(finding.isWhitelisted)
-        XCTAssertEqual(finding.riskTier, .knownTool)
-        XCTAssertEqual(finding.whitelistedToolName, "Erosion")
+        XCTAssertFalse(finding.isWhitelisted)
+        XCTAssertEqual(finding.riskTier, .highRisk)
 
         // 100% Read-Only Invariant: Zero modification to source IPA
         let shaAfter = try computeSHA256(of: ipaURL)
@@ -121,7 +119,8 @@ final class AdversarialM3ChallengerTests: XCTestCase {
             let targetURL = (index % 2 == 0) ? wqURL : erosionURL
             do {
                 let finding = try IPAPackageScanner.shared.scan(ipaURL: targetURL)
-                XCTAssertEqual(finding.riskTier, .knownTool)
+                XCTAssertEqual(finding.riskTier, .highRisk)
+                XCTAssertFalse(finding.isWhitelisted)
             } catch {
                 XCTFail("Concurrent scan iteration \(index) failed with: \(error)")
             }

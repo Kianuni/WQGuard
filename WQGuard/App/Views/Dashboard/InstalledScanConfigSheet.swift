@@ -16,16 +16,27 @@ public struct InstalledScanConfigSheet: View {
     @EnvironmentObject var vm: ScanViewModel
     @Environment(\.dismiss) private var dismiss
 
+    private enum TutorialTab: String, CaseIterable, Identifiable {
+        case modeB = "方式 B · Mac导出"
+        case modeA = "方式 A · 无线直连"
+        case engine2 = "引擎 2 · 源包深扫"
+        var id: String { rawValue }
+    }
+
+    @State private var copiedInstallPyToast = false
     @State private var copiedCommandToast = false
     @State private var copiedDeviceCtlToast = false
+    @State private var copiedCdDesktopToast = false
     @State private var copiedTunnelToast = false
     @State private var copiedDeviceToast = false
     @State private var showTutorial = false
+    @State private var selectedTutorialTab: TutorialTab = .modeB
     @State private var localBannerText: String? = nil
     @State private var localBannerIsError: Bool = false
 
+    private let cliInstallPyCommand = #"command -v brew >/dev/null 2>&1 && brew install pymobiledevice3 || python3 -m pip install --user -U pymobiledevice3"#
+    private let cliExportCommand = #"(command -v pymobiledevice3 >/dev/null 2>&1 && pymobiledevice3 apps list > ~/Desktop/installed_apps.json || python3 -m pymobiledevice3 apps list > ~/Desktop/installed_apps.json) && echo "✅ 已导出到桌面: ~/Desktop/installed_apps.json""#
     private let cliDeviceCtlCommand = #"ID=$(xcrun devicectl list devices -j - | python3 -c "import sys,json; devs=json.load(sys.stdin).get('result',{}).get('devices',[]); print(next((d['identifier'] for d in devs if 'Simulator' not in str(d)), ''))") && xcrun devicectl device info apps --device "$ID" --include-all-apps --include-app-group-identifiers --include-container-paths --json-output ~/Desktop/installed_apps.json && echo "✅ 已导出 ~/Desktop/installed_apps.json""#
-    private let cliExportCommand = "pymobiledevice3 apps list > installed_apps.json"
 
     private var subnetDiagnosis: LocalNetworkSubnetDiagnosis {
         LocalNetworkSubnetDiagnosis.inspect(configuredHost: vm.lockdownHost)
@@ -49,44 +60,40 @@ public struct InstalledScanConfigSheet: View {
                     }
                 }
 
-                // Built-in Quick Setup Guide
+                // Built-in Detailed Step-by-Step Setup & Export Tutorial
                 Section {
-                    DisclosureGroup("📖 开启教程：方式 A / 方式 B 二选一即可", isExpanded: $showTutorial) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("① 方式 A 与 方式 B 需要同时开吗？")
+                    DisclosureGroup("📖 保姆级图文步骤教程（Mac 软件安装 · 连线 · 导出）", isExpanded: $showTutorial) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("💡 方式 A 与 方式 B 二选一即可（无需同时开启）")
                                     .font(.caption.bold())
                                     .foregroundColor(.cyan)
-                                Text("**不需要，二选一即可！** 两者读取的都是 iOS 官方 `installation_proxy` 全机已安装应用注册表。推荐**方式 A**（导入配对 `.plist` / `.mobiledevicepairing` + 开启 **LocalDevVPN** 后，以后在手机上随时一键无线直连扫描全机）。")
+                                Text("• **新手最推荐「方式 B」**：不用在手机装 VPN、不用改 IP，连上 Mac 电脑几秒钟导出 `installed_apps.json` 隔空投送到手机即可扫全机应用。\n• **进阶推荐「方式 A」**：只需用 Mac 导出一次配对文件导入手机，以后出门在外无需电脑，打开 `LocalDevVPN` 就能随时无线直连扫描！")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
 
-                            Divider()
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("② 绑定 Feather / 全能签子目录（联动深扫二进制）")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.orange)
-                                Text("进入『我的 iPhone → Feather → Signed』（或全能签子文件夹），直接点击右上角「打开」即可绑定。")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                            Picker("教程分类", selection: $selectedTutorialTab) {
+                                ForEach(TutorialTab.allCases) { tab in
+                                    Text(tab.rawValue).tag(tab)
+                                }
                             }
+                            .pickerStyle(.segmented)
 
-                            Divider()
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("③ 方式 B（不想开 VPN 时：电脑导出离线快照）")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.teal)
-                                Text("手机连电脑执行 `pip3 install pymobiledevice3` 后运行下方复制的命令生成 `installed_apps.json`，发到手机导入即可。")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                            switch selectedTutorialTab {
+                            case .modeB:
+                                modeBTutorialView
+                            case .modeA:
+                                modeATutorialView
+                            case .engine2:
+                                engine2TutorialView
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 6)
                     }
                     .font(.subheadline.bold())
+                } header: {
+                    Text("新手必读 · 详细操作指南")
                 }
 
                 // Engine 1A: LocalDevVPN + Pairing File Direct Connection
@@ -235,15 +242,15 @@ public struct InstalledScanConfigSheet: View {
 
                     Button(action: {
                         #if os(iOS)
-                        UIPasteboard.general.string = cliDeviceCtlCommand
+                        UIPasteboard.general.string = cliExportCommand
                         #endif
-                        copiedDeviceCtlToast = true
+                        copiedCommandToast = true
                     }) {
                         HStack {
-                            Label("复制 Mac 免装插件一键导出命令（推荐 iOS 27）", systemImage: "apple.terminal.fill")
+                            Label("复制 pymobiledevice3 导出到桌面命令（推荐·全量权限）", systemImage: "terminal.fill")
                                 .foregroundColor(.teal)
                             Spacer()
-                            if copiedDeviceCtlToast {
+                            if copiedCommandToast {
                                 Text("已复制")
                                     .font(.caption.bold())
                                     .foregroundColor(.green)
@@ -253,14 +260,14 @@ public struct InstalledScanConfigSheet: View {
 
                     Button(action: {
                         #if os(iOS)
-                        UIPasteboard.general.string = cliExportCommand
+                        UIPasteboard.general.string = cliDeviceCtlCommand
                         #endif
-                        copiedCommandToast = true
+                        copiedDeviceCtlToast = true
                     }) {
                         HStack {
-                            Label("复制 pymobiledevice3 导出命令（跨平台）", systemImage: "terminal.fill")
+                            Label("复制 Xcode devicectl 导出命令（已装 Xcode 免插件）", systemImage: "apple.terminal.fill")
                             Spacer()
-                            if copiedCommandToast {
+                            if copiedDeviceCtlToast {
                                 Text("已复制")
                                     .font(.caption.bold())
                                     .foregroundColor(.green)
@@ -278,12 +285,12 @@ public struct InstalledScanConfigSheet: View {
                         }
                     }
 
-                    Toggle("同时展示第三方 App Store 官方应用（已自动排除苹果系统服务）", isOn: $vm.includeAppStoreAppsInRegistry)
+                    Toggle("同时展示第三方 App Store / TestFlight 应用（已排除苹果系统服务）", isOn: $vm.includeAppStoreAppsInRegistry)
                         .font(.subheadline)
                 } header: {
                     Text("引擎 1B · 离线注册表快照（无需 VPN，100% 兼容 iOS 27）")
                 } footer: {
-                    Text("Mac 连接手机后直接在「终端」粘贴上方第一条命令（调用苹果 Xcode 原生 CoreDevice 通道，无需安装第三方工具），将桌面生成的 installed_apps.json 隔空投送至手机用 WQGuard 打开即可秒扫全机应用。")
+                    Text("推荐优先使用 pymobiledevice3 导出命令（可读取企业签、个人侧载、TestFlight 与官方应用的完整 Entitlements 权限表并直接输出到 Mac 桌面 ~/Desktop/installed_apps.json），隔空投送到手机即可一键完成全盘审计。")
                 }
 
                 // Engine 2: Signer Source Package & Folder Correlation
@@ -371,12 +378,186 @@ public struct InstalledScanConfigSheet: View {
                 }
             }
             .onAppear {
+                if !vm.hasPairingFile && !vm.hasSavedSnapshot {
+                    showTutorial = true
+                }
                 if let autoMsg = vm.autoImportFromDocumentsFolderIfNeeded() {
                     localBannerIsError = false
                     localBannerText = autoMsg
                 }
             }
         }
+    }
+
+    // MARK: - Step-by-Step Tutorial Subviews
+
+    private var modeBTutorialView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            tutorialStepCard(
+                badge: "第 1 步",
+                title: "在 Mac 上打开「终端」并安装 pymobiledevice3",
+                color: .teal,
+                detail: "1. 在 Mac 键盘同时按下 Command ⌘ + 空格，输入「终端」(Terminal) 回车打开。\n2. 点击下方按钮复制安装命令，粘贴到 Mac 终端窗口按回车运行（只需安装一次；若弹窗提示安装命令行工具点「安装」即可；若你电脑已安装苹果官方 Xcode 也可跳过此步用下方 Xcode 命令）："
+            )
+            inlineCopyButton(
+                title: copiedInstallPyToast ? "✅ 已复制 Mac 安装命令" : "📋 复制 Mac 安装工具命令 (brew / pip)",
+                color: .teal
+            ) {
+                #if os(iOS)
+                UIPasteboard.general.string = cliInstallPyCommand
+                #endif
+                copiedInstallPyToast = true
+            }
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "第 2 步",
+                title: "数据线连接 iPhone 与 Mac，点击「信任」",
+                color: .cyan,
+                detail: "1. 用支持数据传输的 USB / Type-C 数据线将 iPhone 插入 Mac，解锁手机保持在桌面亮屏。\n2. 手机屏幕弹出「要信任此电脑吗？」时，点击「信任」并输入手机锁屏密码。\n3. 打开 Mac 左下角「访达」(Finder)，在左侧栏点一下你的 iPhone，若右侧也显示「信任」按钮请点一下。"
+            )
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "第 3 步",
+                title: "在 Mac 终端一键导出快照文件到桌面",
+                color: .orange,
+                detail: "点击下方按钮复制导出命令，可通过微信/通用剪贴板发到 Mac，粘贴进「终端」按回车。等待约 3～8 秒看到“✅ 已导出到桌面”后，Mac 桌面就会出现 installed_apps.json 文件："
+            )
+            inlineCopyButton(
+                title: copiedCommandToast ? "✅ 已复制导出到桌面命令" : "📋 复制导出命令（自动存到 Mac 桌面）",
+                color: .orange
+            ) {
+                #if os(iOS)
+                UIPasteboard.general.string = cliExportCommand
+                #endif
+                copiedCommandToast = true
+            }
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "第 4 步",
+                title: "隔空投送到 iPhone 并导入 WQGuard",
+                color: .green,
+                detail: "1. 在 Mac 桌面上右键点击 installed_apps.json → 选择「共享」→「隔空投送 (AirDrop)」发给你的 iPhone（或通过微信文件传输助手发送）。\n2. 手机收到后直接选「用 WQGuard 打开」自动开扫；或者选「存储到“文件”」，再点本页下方引擎 1B 的「选择注册表快照文件」选中它即可！"
+            )
+        }
+    }
+
+    private var modeATutorialView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            tutorialStepCard(
+                badge: "第 1 步",
+                title: "手机端下载什么？安装免费 App「LocalDevVPN」",
+                color: .cyan,
+                detail: "打开 iPhone 的 App Store，搜索并免费下载安装「LocalDevVPN」（如果你手机上已经装有 StikDebug 或 SideStore，也可直接使用它们内置的隧道）。"
+            )
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "第 2 步",
+                title: "Mac 端下载什么？用 jitterbugpair 生成配对文件",
+                color: .teal,
+                detail: "• 如果你以前给 SideStore / StikDebug 生成过 .mobiledevicepairing 或 .plist 配对文件，直接跳到第 3 步复用即可！\n• 首次生成操作：\n  1. 在 Mac 浏览器打开 github.com/osy/JitterBug/releases 下载 jitterbugpair-macos.zip 并双击解压出 jitterbugpair；\n  2. 数据线把 iPhone 连上 Mac，解锁手机亮屏点「信任」输密码；\n  3. 打开 Mac「终端」，先输入 cd ~/Desktop 回车，再把解压出的 jitterbugpair 拖进终端窗口按回车运行（若 Mac 拦截未验证开发者，前往 Mac「系统设置 → 隐私与安全性」底部点「仍要打开」后再运行一次）；\n  4. 运行成功后，Mac 桌面即会生成 <手机UDID>.mobiledevicepairing 配对文件！"
+            )
+            inlineCopyButton(
+                title: copiedCdDesktopToast ? "✅ 已复制 cd ~/Desktop" : "📋 复制终端切换桌面目录命令 (cd ~/Desktop)",
+                color: .teal
+            ) {
+                #if os(iOS)
+                UIPasteboard.general.string = "cd ~/Desktop"
+                #endif
+                copiedCdDesktopToast = true
+            }
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "第 3 步",
+                title: "把配对文件传到手机并导入引擎 1A",
+                color: .orange,
+                detail: "在 Mac 桌面右键该 .mobiledevicepairing 文件 →「共享 → 隔空投送」发到 iPhone → 选「存储到“文件”」（建议存到『我的 iPhone → WQGuard』目录），然后点本页下方引擎 1A 的「从文件选择配对文件」导入。"
+            )
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "第 4 步",
+                title: "开启 VPN 直连（iOS 26.4+ / iOS 27 子网对齐）",
+                color: .green,
+                detail: "• iOS 26.3 及更早：打开 LocalDevVPN 点 Connect 连接，回本页点「立即直连扫描」即可。\n• iOS 26.4+ / iOS 27 必做：苹果要求隧道与当前 Wi-Fi 同网段。保持手机连 Wi-Fi，先点下方橙色提示框的「复制 Tunnel」，打开 LocalDevVPN 右上角 ⚙️ 设置粘贴到 Tunnel IP；再回本页点「复制 Device 并填入」粘贴到 LocalDevVPN 的 Device IP，保存并重连 VPN，回 WQGuard 点「立即直连扫描」（首次弹窗允许本地网络权限）即可 1 秒扫完全机！"
+            )
+        }
+    }
+
+    private var engine2TutorialView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            tutorialStepCard(
+                badge: "作用说明",
+                title: "为什么可以配合引擎 2 联动 Feather / 全能签？",
+                color: .cyan,
+                detail: "方式 A / B 能查出全机所有应用的签名证书、App Groups 与越权权限表，而受 iOS 沙盒隔离限制无法直接拆包其他已安装应用的主程序。通过下方「引擎 2」导入签名器里的源包后，WQGuard 会按 Bundle ID 自动将注册表与二进制合并升级为「🔬 全量深扫」，精准检出 containermanagerd 漏洞符号与注入动态库！"
+            )
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "方法 ①",
+                title: "在 WQGuard 内直接点选 Feather Signed 里的 .app",
+                color: .teal,
+                detail: "由于 Feather 未开启文件夹级原位共享，系统不允许直接对 Signed 外层目录点打开。请点击本页下方引擎 2 的「导入 Feather / 签名器源包」，依次点进『我的 iPhone → Feather → Signed → 乱码UUID文件夹』，直接点击里面的 .app 应用包即可永久缓存并自动关联！"
+            )
+
+            Divider()
+
+            tutorialStepCard(
+                badge: "方法 ②",
+                title: "在 Feather 内一键导出 IPA 到 WQGuard",
+                color: .orange,
+                detail: "打开 Feather → 底部切换到「库」→ 在「已签名」列表点击应用 → 选择「导出 IPA」→ 在系统分享菜单点击「WQGuard」即可直接深扫并永久关联。"
+            )
+        }
+    }
+
+    private func tutorialStepCard(badge: String, title: String, color: Color, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 6) {
+                Text(badge)
+                    .font(.caption2.bold())
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(color)
+                    .cornerRadius(4)
+                Text(title)
+                    .font(.caption.bold())
+                    .foregroundColor(.primary)
+            }
+            Text(detail)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func inlineCopyButton(title: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption2.bold())
+                    .foregroundColor(color)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(color.opacity(0.12))
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
     }
 
     private func pastePairingFromClipboard() {

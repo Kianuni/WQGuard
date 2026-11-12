@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(WQGuardCore)
+import WQGuardCore
+#endif
 
 #if !canImport(WQGuardCore)
 // MARK: - Interface Contracts from PROJECT.md (Active only when WQGuardCore is not yet compiled)
@@ -345,5 +348,74 @@ public enum SamplePathResolver: Sendable {
                 "Erosion.ipa"
             ]
         )
+    }
+}
+
+/// Sample custom research-tool rules used exclusively in unit tests that exercise
+/// `WhitelistEngine` exact/prefix/wildcard/anti-spoofing matching mechanics.
+/// Production `WhitelistEngine.defaultTools` intentionally contains ONLY `WQGuard`.
+public enum TestWhitelistFixtures {
+    public static let sampleResearchTools: [WhitelistedTool] = [
+        WhitelistedTool(
+            name: "Erosion",
+            allowedBundleIds: ["com.jbdotparty.Erosion"],
+            allowedAppGroups: ["group.com.jbdotparty.Erosion.WQ"],
+            expectedSignatures: [
+                "libsystem_containermanager.dylib",
+                "container_query_create",
+                "container_copy_sandbox_token",
+                "sandbox_extension_consume"
+            ],
+            description: "Sample test rule for Erosion",
+            isEnabled: true,
+            isBuiltIn: false
+        ),
+        WhitelistedTool(
+            name: "Erosion-CN",
+            allowedBundleIds: ["com.jbdotparty.Erosion-*", "com.jbdotparty.Erosion.*", "com.jbdotparty.ErosionCN*"],
+            allowedAppGroups: ["group.com.jbdotparty.Erosion*", "group.*.com.jbdotparty.Erosion*"],
+            expectedSignatures: ["container_query_create"],
+            description: "Sample test rule for Erosion-CN",
+            isEnabled: true,
+            isBuiltIn: false
+        ),
+        WhitelistedTool(
+            name: "GestaltX",
+            allowedBundleIds: ["com.*.gestaltx", "com.*gestaltx", "*.gestaltx", "com.straight-tamago.gestaltx"],
+            allowedAppGroups: ["group.*.gestaltx", "group.*gestaltx", "*.gestaltx"],
+            expectedSignatures: ["container_query_create"],
+            description: "Sample test rule for GestaltX",
+            isEnabled: true,
+            isBuiltIn: false
+        ),
+        WhitelistedTool(
+            name: "WQFiles",
+            allowedBundleIds: ["cz.kolbi.wqfiles"],
+            allowedAppGroups: ["group.cz.kolbi.wqfiles"],
+            expectedSignatures: ["container_query_create"],
+            description: "Sample test rule for WQFiles",
+            isEnabled: true,
+            isBuiltIn: false
+        ),
+        WhitelistedTool(
+            name: "WQFiles-CN",
+            allowedBundleIds: ["cz.kolbi.wqfiles-*", "cz.kolbi.wqfiles.*", "cz.kolbi.wqfilesCN*", "cz.kolbi.wqfiles-cn*"],
+            allowedAppGroups: ["group.cz.kolbi.wqfiles*", "group.*.cz.kolbi.wqfiles*"],
+            expectedSignatures: ["container_query_create"],
+            description: "Sample test rule for WQFiles-CN",
+            isEnabled: true,
+            isBuiltIn: false
+        )
+    ]
+
+    public static var allSampleRulesIncludingDefault: [WhitelistedTool] {
+        WhitelistEngine.defaultTools + sampleResearchTools
+    }
+
+    public static func installSampleRulesIntoShared() {
+        WhitelistEngine.shared.resetToDefaults()
+        for rule in sampleResearchTools {
+            WhitelistEngine.shared.registerCustomTool(rule)
+        }
     }
 }

@@ -130,93 +130,9 @@ public final class WhitelistEngine: @unchecked Sendable {
     private let lock = NSLock()
     private var tools: [WhitelistedTool]
 
-    /// The 6 built-in transparent known tools.
+    /// Built-in default whitelist containing only WQGuard's own self-identity rule.
+    /// Third-party research utilities exploiting `containermanagerd` are intentionally NOT built-in.
     public static let defaultTools: [WhitelistedTool] = [
-        WhitelistedTool(
-            name: "Erosion",
-            allowedBundleIds: ["com.jbdotparty.Erosion"],
-            allowedAppGroups: ["group.com.jbdotparty.Erosion.WQ"],
-            expectedSignatures: [
-                "libsystem_containermanager.dylib",
-                "container_query_create",
-                "container_query_set_group_identifiers",
-                "container_query_operation_set_part",
-                "container_query_operation_set_flags",
-                "container_copy_sandbox_token",
-                "sandbox_extension_consume",
-                "container_query_get_single_result"
-            ],
-            description: "Known open-source containermanagerd research utility by jbdotparty",
-            isEnabled: true,
-            isBuiltIn: true
-        ),
-        WhitelistedTool(
-            name: "Erosion-CN",
-            allowedBundleIds: ["com.jbdotparty.Erosion-*", "com.jbdotparty.Erosion.*", "com.jbdotparty.ErosionCN*"],
-            allowedAppGroups: ["group.com.jbdotparty.Erosion*", "group.*.com.jbdotparty.Erosion*"],
-            expectedSignatures: [
-                "libsystem_containermanager.dylib",
-                "container_query_create",
-                "container_query_set_group_identifiers",
-                "container_query_operation_set_part",
-                "container_query_operation_set_flags",
-                "container_copy_sandbox_token",
-                "sandbox_extension_consume",
-                "container_query_get_single_result"
-            ],
-            description: "Localized Erosion open-source utility distribution",
-            isEnabled: true,
-            isBuiltIn: true
-        ),
-        WhitelistedTool(
-            name: "GestaltX",
-            allowedBundleIds: ["com.*.gestaltx", "com.*gestaltx", "*.gestaltx", "com.straight-tamago.gestaltx"],
-            allowedAppGroups: ["group.*.gestaltx", "group.*gestaltx", "*.gestaltx"],
-            expectedSignatures: [
-                "libsystem_containermanager.dylib",
-                "container_query_create",
-                "container_query_set_group_identifiers"
-            ],
-            description: "Known open-source MobileGestalt property inspection tool",
-            isEnabled: true,
-            isBuiltIn: true
-        ),
-        WhitelistedTool(
-            name: "WQFiles",
-            allowedBundleIds: ["cz.kolbi.wqfiles"],
-            allowedAppGroups: ["group.cz.kolbi.wqfiles"],
-            expectedSignatures: [
-                "libsystem_containermanager.dylib",
-                "container_query_create",
-                "container_query_set_group_identifiers",
-                "container_query_operation_set_part",
-                "container_query_operation_set_flags",
-                "container_copy_sandbox_token",
-                "sandbox_extension_consume",
-                "container_query_get_single_result"
-            ],
-            description: "Known open-source file manager utility by Kolbi using App Group container access",
-            isEnabled: true,
-            isBuiltIn: true
-        ),
-        WhitelistedTool(
-            name: "WQFiles-CN",
-            allowedBundleIds: ["cz.kolbi.wqfiles-*", "cz.kolbi.wqfiles.*", "cz.kolbi.wqfilesCN*", "cz.kolbi.wqfiles-cn*"],
-            allowedAppGroups: ["group.cz.kolbi.wqfiles*", "group.*.cz.kolbi.wqfiles*"],
-            expectedSignatures: [
-                "libsystem_containermanager.dylib",
-                "container_query_create",
-                "container_query_set_group_identifiers",
-                "container_query_operation_set_part",
-                "container_query_operation_set_flags",
-                "container_copy_sandbox_token",
-                "sandbox_extension_consume",
-                "container_query_get_single_result"
-            ],
-            description: "Localized WQFiles open-source utility distribution",
-            isEnabled: true,
-            isBuiltIn: true
-        ),
         WhitelistedTool(
             name: "WQGuard",
             allowedBundleIds: [
@@ -240,7 +156,7 @@ public final class WhitelistEngine: @unchecked Sendable {
         )
     ]
 
-    /// Initializes a WhitelistEngine instance with specified initial rules (defaults to the 6 built-ins).
+    /// Initializes a WhitelistEngine instance with specified initial rules (defaults to built-in WQGuard rule).
     public init(tools: [WhitelistedTool] = WhitelistEngine.defaultTools) {
         self.tools = tools
     }

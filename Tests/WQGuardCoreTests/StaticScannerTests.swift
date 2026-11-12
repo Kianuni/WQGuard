@@ -316,6 +316,14 @@ final class StaticScannerTests: XCTestCase {
             bundleId: "com.jbdotparty.Erosion",
             appGroups: ["group.com.jbdotparty.Erosion.WQ"]
         )
+        // By default, Erosion is NOT built-in whitelisted -> High Risk
+        let defaultFinding = MachOScanner.shared.scan(details: details, context: ctx)
+        XCTAssertEqual(defaultFinding.riskTier, .highRisk)
+        XCTAssertFalse(defaultFinding.isWhitelisted)
+
+        // When user adds a custom rule, MachOScanner downgrades to Known Tool
+        TestWhitelistFixtures.installSampleRulesIntoShared()
+        defer { WhitelistEngine.shared.resetToDefaults() }
         let finding = MachOScanner.shared.scan(details: details, context: ctx)
         
         XCTAssertEqual(finding.riskTier, .knownTool)

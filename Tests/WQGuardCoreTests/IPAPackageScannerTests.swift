@@ -64,9 +64,8 @@ final class IPAPackageScannerTests: XCTestCase {
 
         let finding = try IPAPackageScanner.shared.scan(ipaURL: URL(fileURLWithPath: wqfilesPath))
         XCTAssertEqual(finding.bundleId, "cz.kolbi.wqfiles")
-        XCTAssertTrue(finding.isWhitelisted)
-        XCTAssertEqual(finding.riskTier, .knownTool)
-        XCTAssertEqual(finding.whitelistedToolName, "WQFiles")
+        XCTAssertFalse(finding.isWhitelisted, "WQFiles is no longer built-in whitelisted by default")
+        XCTAssertEqual(finding.riskTier, .highRisk)
     }
 
     func test_IPA_realWorld_ErosionIPA() throws {
@@ -76,9 +75,8 @@ final class IPAPackageScannerTests: XCTestCase {
 
         let finding = try IPAPackageScanner.shared.scan(ipaURL: URL(fileURLWithPath: erosionPath))
         XCTAssertEqual(finding.bundleId, "com.jbdotparty.Erosion")
-        XCTAssertTrue(finding.isWhitelisted)
-        XCTAssertEqual(finding.riskTier, .knownTool)
-        XCTAssertEqual(finding.whitelistedToolName, "Erosion")
+        XCTAssertFalse(finding.isWhitelisted, "Erosion is no longer built-in whitelisted by default")
+        XCTAssertEqual(finding.riskTier, .highRisk)
     }
 
     // MARK: - 3. Synthetic Exploit Signature Detection (High Risk)

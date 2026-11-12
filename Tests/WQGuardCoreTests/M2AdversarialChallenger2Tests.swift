@@ -298,8 +298,11 @@ final class M2AdversarialChallenger2Tests: XCTestCase {
         XCTAssertTrue(finding.indicators.contains { $0.category == "Heuristic / Behavioral Tuple" })
     }
 
-    /// 1.9 Whitelisted Tools (Erosion, WQFiles) vs Bundle ID Spoofing
+    /// 1.9 Custom Whitelisted Tools (Erosion, WQFiles) vs Bundle ID Spoofing
     func test_C1_whitelistKnownTools_Erosion_and_WQFiles() throws {
+        TestWhitelistFixtures.installSampleRulesIntoShared()
+        defer { WhitelistEngine.shared.resetToDefaults() }
+
         // Case A: Authentic Erosion with App Group
         let dataErosion = SyntheticMachOGenerator.shared.generateThin(config: .init(
             cryptid: 0,

@@ -384,7 +384,7 @@ final class AdversarialM1ChallengerTests: XCTestCase {
     // MARK: - Challenge 4: Whitelist Engine Adversarial Stress & Evasion Resistance
 
     func test_C4_whitelistEvasionPrefixAndSuffixAttacks() {
-        let engine = WhitelistEngine.shared
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
 
         // Exact rule: "com.jbdotparty.Erosion"
         // Attack 1: Malicious app naming itself "com.jbdotparty.Erosion.trojan" (Erosion-CN pattern com.jbdotparty.Erosion.* will match if appGroup matches)
@@ -411,7 +411,7 @@ final class AdversarialM1ChallengerTests: XCTestCase {
     }
 
     func test_C4_whitelistAppGroupEnforcementPreventsBundleSpoofing() {
-        let engine = WhitelistEngine.shared
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
 
         // Attack: Attacker compiles an app with bundle ID "com.jbdotparty.Erosion"
         // but since they do not possess jbdotparty's provisioning profile, their App Group is "group.com.evil.trojan"
@@ -424,7 +424,7 @@ final class AdversarialM1ChallengerTests: XCTestCase {
     }
 
     func test_C4_toggleRuleDisablingErosionRejection() {
-        let engine = WhitelistEngine(tools: WhitelistEngine.defaultTools)
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
         
         // Disable both Erosion and Erosion-CN
         engine.toggleTool(named: "Erosion", isEnabled: false)
@@ -438,7 +438,7 @@ final class AdversarialM1ChallengerTests: XCTestCase {
     }
 
     func test_C4_concurrentQueriesThreadSafetyUnderMutations() {
-        let engine = WhitelistEngine(tools: WhitelistEngine.defaultTools)
+        let engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
         let queue = DispatchQueue(label: "test.concurrent.whitelist", attributes: .concurrent)
         let group = DispatchGroup()
 

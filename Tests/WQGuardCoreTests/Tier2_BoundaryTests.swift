@@ -634,11 +634,12 @@ final class Tier2_BoundaryTests: XCTestCase {
 
     func test_F15_boundary_caseSensitivityCheck() throws {
         let res = WhitelistEngine.shared.isWhitelisted(
-            bundleId: "COM.JBDOTPARTY.EROSION",
-            appGroups: ["GROUP.COM.JBDOTPARTY.EROSION.WQ"],
+            bundleId: "COM.WQGUARD.APP",
+            appGroups: ["GROUP.COM.WQGUARD.APP"],
             matchedSignatures: []
         )
         XCTAssertTrue(res.isWhitelisted) // Whitelist is case-tolerant
+        XCTAssertEqual(res.toolName, "WQGuard")
     }
 
     func test_F15_boundary_concurrentQueriesThreadSafety() throws {

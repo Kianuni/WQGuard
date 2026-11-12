@@ -18,7 +18,7 @@ final class M1AdversarialChallengeTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        engine = WhitelistEngine()
+        engine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
         generator = ReportGenerator.shared
     }
 
@@ -268,14 +268,18 @@ final class M1AdversarialChallengeTests: XCTestCase {
 
         waitForExpectations(timeout: 15.0)
 
-        // After concurrent chaos, reset to clean state and verify functionality
+        // After concurrent chaos, reset to clean state and verify default single WQGuard rule
         engine.resetToDefaults()
-        XCTAssertEqual(engine.allTools.count, 6)
+        XCTAssertEqual(engine.allTools.count, 1)
         let checkRes = engine.isWhitelisted(
-            bundleId: "com.jbdotparty.Erosion",
-            appGroups: ["group.com.jbdotparty.Erosion.WQ"]
+            bundleId: "com.wqguard.app",
+            appGroups: ["group.com.wqguard.app"]
         )
         XCTAssertTrue(checkRes.isWhitelisted)
+        XCTAssertFalse(engine.isWhitelisted(
+            bundleId: "com.jbdotparty.Erosion",
+            appGroups: ["group.com.jbdotparty.Erosion.WQ"]
+        ).isWhitelisted)
     }
 
     // =========================================================================

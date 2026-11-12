@@ -120,7 +120,7 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
         let safePct = String(format: "%.1f%%", Double(safeCount) / Double(total) * 100.0)
 
         md += "| **High Risk (高危告警)** | 🔴 | `\(highCount)` | `\(highPct)` | 包含 containermanagerd 逃逸调用、私有沙盒令牌或异常逃逸符号链接 |\n"
-        md += "| **Known Tool (已知工具)** | 🟡 | `\(knownCount)` | `\(knownPct)` | 匹配白名单已知开源工具（Erosion、GestaltX、WQFiles、WQGuard 等） |\n"
+        md += "| **Known Tool (已知工具)** | 🟡 | `\(knownCount)` | `\(knownPct)` | 匹配受信任白名单规则或侧载签名管理工具（WQGuard、Feather、LocalDevVPN 等） |\n"
         md += "| **Caution (前置留意)** | 🟠 | `\(cautionCount)` | `\(cautionPct)` | 声明 App Group 并具备动态符号解析（dlopen/dlsym）能力的侧载/企业应用 |\n"
         md += "| **Safe (安全合规)** | 🟢 | `\(safeCount)` | `\(safePct)` | 无 App Group 共享权限或经完整静态扫描未发现可疑特征的合规应用 |\n"
         md += "| **Total / 总计扫描** | 🛡️ | `\(session.totalApps)` | `100.0%` | 全部分发渠道扫描应用汇总 |\n\n"
@@ -309,7 +309,7 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
             return """
             > ### 🟡 ADVISORY: KNOWN UTILITIES DETECTED / 发现已知定制工具
             > **Posture / 安全态势**: Authorized Known Tools Identified (检测到已知开源工具)  
-            > **Description / 说明**: Applications matching the transparent whitelist of verified open-source utilities (e.g., Erosion, WQFiles, GestaltX) were detected. These tools utilize sandbox escape techniques for legitimate device customization.
+            > **Description / 说明**: Applications matching the user-configured or self-identity whitelist (e.g., WQGuard, Feather, LocalDevVPN) were detected.
             """
         case .caution:
             return """
@@ -454,8 +454,8 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
         case .knownTool:
             let toolName = finding.whitelistedToolName ?? "Open-Source Utility"
             return (
-                en: "Known Customization Utility (\(toolName)): This application matches the authorized open-source utility whitelist (e.g., Erosion, WQFiles, GestaltX) used for legitimate customization and diagnostics. If you did not intentionally install this tool, remove it from your device.",
-                zh: "已知定制工具提示（\(toolName)）：该应用符合白名单授权开源工具特征（如 Erosion、WQFiles、GestaltX 等），通常用于系统诊断或个性化定制。若非本人主动安装，建议立即从设备中移除。"
+                en: "Known Utility (\(toolName)): This application matches an active trusted whitelist rule or sideload manager profile. If you did not intentionally install or authorize this tool, remove it from your device.",
+                zh: "已知工具提示（\(toolName)）：该应用匹配当前启用的信任白名单规则或侧载签名管理组件。若非本人主动安装或授权，建议立即从设备中移除。"
             )
         case .caution:
             return (

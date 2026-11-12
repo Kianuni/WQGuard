@@ -122,6 +122,10 @@ public enum ChannelClassifier {
             if let beta = plist["BetaReportsActive"] as? Bool, beta {
                 hasBetaReportsActive = true
             }
+            if let entDict = plist["Entitlements"] as? [String: Any],
+               let betaEnt = entDict["beta-reports-active"] as? Bool, betaEnt {
+                hasBetaReportsActive = true
+            }
         }
         
         // FairPlay Encrypted Binaries (App Store or TestFlight)

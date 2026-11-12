@@ -145,8 +145,9 @@ final class Tier4_RealWorldScenariosTests: XCTestCase {
         ))
         tempFiles.append(ipa)
 
-        // Whitelist evaluation
-        let (isWhitelisted, toolName) = WhitelistEngine.shared.isWhitelisted(
+        // Custom rule whitelist evaluation
+        let customEngine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let (isWhitelisted, toolName) = customEngine.isWhitelisted(
             bundleId: "com.jbdotparty.Erosion",
             appGroups: erosionGroups,
             matchedSignatures: ["container_query_create", "libsystem_containermanager.dylib"]
@@ -184,10 +185,11 @@ final class Tier4_RealWorldScenariosTests: XCTestCase {
         XCTAssertEqual(finding.whitelistedToolName, "Erosion")
     }
 
-    // MARK: - Scenario 4: WQFiles Reference IPA Scan (Known Tool with App Group)
+    // MARK: - Scenario 4: WQFiles Reference IPA Scan (Custom Whitelist Rule with App Group)
     func test_S04_wqfilesReferenceScan() throws {
         let wqGroups = ["group.cz.kolbi.wqfiles"]
-        let (isWhitelisted, toolName) = WhitelistEngine.shared.isWhitelisted(
+        let customEngine = WhitelistEngine(tools: TestWhitelistFixtures.allSampleRulesIncludingDefault)
+        let (isWhitelisted, toolName) = customEngine.isWhitelisted(
             bundleId: "cz.kolbi.wqfiles",
             appGroups: wqGroups,
             matchedSignatures: ["worse_query"]
