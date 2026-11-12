@@ -12,8 +12,7 @@ import WQGuardCore
 public struct DashboardView: View {
     @EnvironmentObject var vm: ScanViewModel
     @State private var showExportSheet = false
-    @State private var showFolderPicker = false
-    @State private var showIPAFilePicker = false
+    @State private var activePicker: DocumentPickerKind? = nil
 
     public init() {}
 
@@ -112,7 +111,7 @@ public struct DashboardView: View {
                                 #if os(iOS)
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 #endif
-                                showFolderPicker = true
+                                activePicker = .signingFolder
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "folder.fill.badge.plus")
@@ -135,7 +134,7 @@ public struct DashboardView: View {
                                 #if os(iOS)
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 #endif
-                                showIPAFilePicker = true
+                                activePicker = .ipaFiles
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "doc.zipper")
@@ -253,40 +252,18 @@ public struct DashboardView: View {
         .onChange(of: vm.showSideloadPickerFromDashboard) { newValue in
             if newValue {
                 vm.showSideloadPickerFromDashboard = false
-                showFolderPicker = true
+                activePicker = .signingFolder
             }
         }
-        .background(
-            EmptyView()
-                .fileImporter(
-                    isPresented: $showFolderPicker,
-                    allowedContentTypes: [.folder],
-                    allowsMultipleSelection: false
-                ) { result in
-                    switch result {
-                    case .success(let urls):
-                        vm.scanMultipleIPAPackages(at: urls)
-                    case .failure(let err):
-                        vm.activeAlertMessage = err.localizedDescription
-                        vm.showGlobalAlert = true
-                    }
-                }
-        )
-        .background(
-            EmptyView()
-                .fileImporter(
-                    isPresented: $showIPAFilePicker,
-                    allowedContentTypes: [.data],
-                    allowsMultipleSelection: true
-                ) { result in
-                    switch result {
-                    case .success(let urls):
-                        vm.scanMultipleIPAPackages(at: urls)
-                    case .failure(let err):
-                        vm.activeAlertMessage = err.localizedDescription
-                        vm.showGlobalAlert = true
-                    }
-                }
-        )
+        #if canImport(UIKit)
+        .sheet(item: $activePicker) { kind in
+            SystemDocumentPicker(kind: kind) { urls in
+                activePicker = nil
+                vm.scanMultipleIPAPackages(at: urls)
+            } onCancel: {
+                activePicker = nil
+            }
+        }
+        #endif
     }
 }

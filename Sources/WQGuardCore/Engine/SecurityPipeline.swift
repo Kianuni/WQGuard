@@ -726,11 +726,19 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             }
             while let fileURL = enumerator.nextObject() as? URL {
                 let fExt = fileURL.pathExtension.lowercased()
-                if fExt == "ipa" {
+                if fExt == "ipa" || fExt == "tipa" {
                     appendUnique(fileURL, requireSelfSignedCheck: false)
                 } else if fExt == "app" {
                     appendUnique(fileURL, requireSelfSignedCheck: false)
                     enumerator.skipDescendants()
+                } else if fExt != "framework" && fExt != "appex" && fExt != "bundle" {
+                    var subIsDir: ObjCBool = false
+                    if fm.fileExists(atPath: fileURL.path, isDirectory: &subIsDir),
+                       subIsDir.boolValue,
+                       fm.fileExists(atPath: fileURL.appendingPathComponent("Info.plist").path) {
+                        appendUnique(fileURL, requireSelfSignedCheck: false)
+                        enumerator.skipDescendants()
+                    }
                 }
             }
         }

@@ -309,7 +309,15 @@ public final class ScanViewModel: ObservableObject {
 
     private func refreshBookmarkedFolderNames() {
         let urls = resolveBookmarkedDirectories()
-        self.bookmarkedFolderNames = Array(Set(urls.map { $0.lastPathComponent })).sorted()
+        let labels = urls.map { url -> String in
+            let name = url.lastPathComponent
+            let parent = url.deletingLastPathComponent().lastPathComponent
+            if !parent.isEmpty && parent != "Documents" && parent != "File Provider Storage" && parent != "LocalStorage" && parent != "/" {
+                return "\(parent)/\(name)"
+            }
+            return name
+        }
+        self.bookmarkedFolderNames = Array(Set(labels)).sorted()
     }
 
     // MARK: - Computed Properties
@@ -524,25 +532,50 @@ public final class ScanViewModel: ObservableObject {
 
     public func scanMultipleIPAPackages(at urls: [URL]) {
         guard !urls.isEmpty else { return }
+
+        // Synchronously acquire security scope & persist directory bookmarks on MainActor immediately upon picker callback
+        var preScopedPairs: [(URL, Bool)] = []
+        var anyDirectoryBound = false
+        let fmMain = FileManager.default
+        for u in urls {
+            let accessed = u.startAccessingSecurityScopedResource()
+            preScopedPairs.append((u, accessed))
+            var isDir: ObjCBool = false
+            let ext = u.pathExtension.lowercased()
+            if ext != "ipa" && ext != "tipa" && ext != "app",
+               (u.hasDirectoryPath || (fmMain.fileExists(atPath: u.path, isDirectory: &isDir) && isDir.boolValue)) {
+                if let bData = try? u.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    saveDirectoryBookmarkData(bData)
+                    anyDirectoryBound = true
+                }
+            }
+        }
+
         isInspectingIPA = true
         isScanning = true
         ipaErrorMessage = nil
         scanProgress = ScanProgress(currentTarget: WQStrings.scanEngineInitializing, completedCount: 0, totalCount: urls.count)
 
+        let capturedScopedPairs = preScopedPairs
+        let boundFlag = anyDirectoryBound
+
         activeScanTask = Task { [weak self] in
-            guard let self = self else { return }
+            guard let self = self else {
+                for (u, accessed) in capturedScopedPairs where accessed {
+                    u.stopAccessingSecurityScopedResource()
+                }
+                return
+            }
+            defer {
+                for (u, accessed) in capturedScopedPairs where accessed {
+                    u.stopAccessingSecurityScopedResource()
+                }
+            }
             let startTime = Date()
 
             do {
                 let findings: [ScanFinding] = try await Task.detached(priority: .userInitiated) { [weak self] in
-                    let scopedPairs = urls.map { ($0, $0.startAccessingSecurityScopedResource()) }
-                    defer {
-                        for (u, accessed) in scopedPairs where accessed {
-                            u.stopAccessingSecurityScopedResource()
-                        }
-                    }
-
-                    // Expand directories into .ipa / .app targets
+                    // Expand directories into .ipa / .tipa / .app / unpacked bundle targets
                     var expandedTargets: [URL] = []
                     var seenPaths: Set<String> = []
                     let fm = FileManager.default
@@ -560,12 +593,9 @@ public final class ScanViewModel: ObservableObject {
                         if ext == "ipa" || ext == "tipa" || ext == "app" {
                             addTarget(itemURL)
                         } else if fm.fileExists(atPath: itemURL.path, isDirectory: &isDir), isDir.boolValue {
-                            if let bData = try? itemURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-                                Task { @MainActor [weak self] in
-                                    self?.saveDirectoryBookmarkData(bData)
-                                }
-                            }
-                            if let enumerator = fm.enumerator(at: itemURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                            if fm.fileExists(atPath: itemURL.appendingPathComponent("Info.plist").path) {
+                                addTarget(itemURL)
+                            } else if let enumerator = fm.enumerator(at: itemURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
                                 while let subURL = enumerator.nextObject() as? URL {
                                     let subExt = subURL.pathExtension.lowercased()
                                     if subExt == "ipa" || subExt == "tipa" {
@@ -573,6 +603,14 @@ public final class ScanViewModel: ObservableObject {
                                     } else if subExt == "app" {
                                         addTarget(subURL)
                                         enumerator.skipDescendants()
+                                    } else if subExt != "framework" && subExt != "appex" && subExt != "bundle" {
+                                        var subDir: ObjCBool = false
+                                        if fm.fileExists(atPath: subURL.path, isDirectory: &subDir),
+                                           subDir.boolValue,
+                                           fm.fileExists(atPath: subURL.appendingPathComponent("Info.plist").path) {
+                                            addTarget(subURL)
+                                            enumerator.skipDescendants()
+                                        }
                                     }
                                 }
                             }
@@ -603,7 +641,8 @@ public final class ScanViewModel: ObservableObject {
                         }
                         do {
                             let finding: ScanFinding
-                            if target.pathExtension.lowercased() == "app" {
+                            var targetIsDir: ObjCBool = false
+                            if fm.fileExists(atPath: target.path, isDirectory: &targetIsDir), targetIsDir.boolValue {
                                 finding = try SecurityPipeline.shared.scanBundle(at: target)
                             } else {
                                 finding = try SecurityPipeline.shared.scanIPA(at: target)
@@ -661,7 +700,14 @@ public final class ScanViewModel: ObservableObject {
                     return
                 }
                 let message: String
-                if case IPAPackageScannerError.missingPayload = error, urls.count > 1 || urls.first?.hasDirectoryPath == true {
+                if case IPAPackageScannerError.missingPayload = error, boundFlag {
+                    // Folder was successfully bound even if currently empty; run unified scan (probes + registry + bound dirs)
+                    self.isInspectingIPA = false
+                    self.isScanning = false
+                    self.scanProgress = nil
+                    self.startSystemScan()
+                    return
+                } else if case IPAPackageScannerError.missingPayload = error, urls.count > 1 || urls.first?.hasDirectoryPath == true {
                     message = WQStrings.batchIPANoValidTargets
                 } else {
                     message = error.localizedDescription

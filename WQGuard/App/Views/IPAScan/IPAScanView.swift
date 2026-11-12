@@ -11,8 +11,7 @@ import WQGuardCore
 
 public struct IPAScanView: View {
     @EnvironmentObject var vm: ScanViewModel
-    @State private var showFilePicker = false
-    @State private var showFolderPicker = false
+    @State private var activePicker: DocumentPickerKind? = nil
 
     public init() {}
 
@@ -42,7 +41,7 @@ public struct IPAScanView: View {
                     }
 
                     HStack(spacing: 12) {
-                        Button(action: { showFilePicker = true }) {
+                        Button(action: { activePicker = .ipaFiles }) {
                             Label(WQStrings.selectIPAFileButton, systemImage: "doc.zipper")
                                 .font(.subheadline.bold())
                                 .padding(.horizontal, 18)
@@ -52,7 +51,7 @@ public struct IPAScanView: View {
                                 .clipShape(Capsule())
                         }
 
-                        Button(action: { showFolderPicker = true }) {
+                        Button(action: { activePicker = .signingFolder }) {
                             Label(WQStrings.bindSigningFolderButton, systemImage: "folder.fill.badge.plus")
                                 .font(.subheadline.bold())
                                 .padding(.horizontal, 18)
@@ -62,6 +61,12 @@ public struct IPAScanView: View {
                                 .clipShape(Capsule())
                         }
                     }
+
+                    Text("💡 绑定 Feather / 全能签时，请点进里面的 Signed 或 Unsigned 子目录后再点右上角「打开」")
+                        .font(.caption2)
+                        .foregroundColor(.orange.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 32)
@@ -125,39 +130,15 @@ public struct IPAScanView: View {
             .padding(.top, 16)
         }
         .navigationTitle(WQStrings.tabIPAScan)
-        .background(
-            EmptyView()
-                .fileImporter(
-                    isPresented: $showFilePicker,
-                    allowedContentTypes: [.data],
-                    allowsMultipleSelection: true
-                ) { result in
-                    switch result {
-                    case .success(let urls):
-                        if !urls.isEmpty {
-                            vm.scanMultipleIPAPackages(at: urls)
-                        }
-                    case .failure(let err):
-                        vm.ipaErrorMessage = err.localizedDescription
-                    }
-                }
-        )
-        .background(
-            EmptyView()
-                .fileImporter(
-                    isPresented: $showFolderPicker,
-                    allowedContentTypes: [.folder],
-                    allowsMultipleSelection: false
-                ) { result in
-                    switch result {
-                    case .success(let urls):
-                        if !urls.isEmpty {
-                            vm.scanMultipleIPAPackages(at: urls)
-                        }
-                    case .failure(let err):
-                        vm.ipaErrorMessage = err.localizedDescription
-                    }
-                }
-        )
+        #if canImport(UIKit)
+        .sheet(item: $activePicker) { kind in
+            SystemDocumentPicker(kind: kind) { urls in
+                activePicker = nil
+                vm.scanMultipleIPAPackages(at: urls)
+            } onCancel: {
+                activePicker = nil
+            }
+        }
+        #endif
     }
 }

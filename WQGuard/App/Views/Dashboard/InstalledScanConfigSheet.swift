@@ -2,7 +2,7 @@
 //  InstalledScanConfigSheet.swift
 //  WQGuard
 //
-//  Configuration center for WQGuard v1.1.0's 3-engine Installed App Security Scanner:
+//  Configuration center for WQGuard's 3-engine Installed App Security Scanner:
 //  1) `installation_proxy` System Registry (LocalDevVPN Pairing Direct or Snapshot Import)
 //  2) Bound Signer Folder Correlation (Mach-O Binary + Embedded Dylibs)
 //  3) On-Device URL Scheme Presence Probe
@@ -16,10 +16,9 @@ public struct InstalledScanConfigSheet: View {
     @EnvironmentObject var vm: ScanViewModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var showPairingPicker = false
-    @State private var showSnapshotPicker = false
-    @State private var showSignerFolderPicker = false
+    @State private var activePicker: DocumentPickerKind? = nil
     @State private var copiedCommandToast = false
+    @State private var showTutorial = true
 
     private let cliExportCommand = "pymobiledevice3 apps list > installed_apps.json"
 
@@ -28,6 +27,77 @@ public struct InstalledScanConfigSheet: View {
     public var body: some View {
         NavigationStack {
             List {
+                // Built-in Quick Setup Guide
+                Section {
+                    DisclosureGroup("📖 开启教程：方式 A / 方式 B / Feather 怎么操作？", isExpanded: $showTutorial) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("① 绑定 Feather / 全能签为什么点「打开」没反应？")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.orange)
+                                Text("iOS 系统禁止直接授权其他 App 的最外层根目录（如『我的 iPhone → Feather』）。请点进里面的 **Signed**（已签名）或 **Unsigned** 子文件夹后，再点右上角「打开」即可立即成功绑定！")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Divider()
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("② 方式 A（推荐：以后在手机上随时无线扫全机 App）")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.cyan)
+                                Text("1. 电脑下载开源工具 **idevice_pair**（Mac/Win 通用），手机插线点信任，点 Generate 生成 `.mobiledevicepairing` 配对文件发到手机导入下方（只需做一次）；\n2. 在手机 App Store 免费搜并安装 **LocalDevVPN**，打开开关；\n3. 回到 WQGuard 点击「一键扫描已安装应用」即可直连系统注册表！")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Divider()
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("③ 方式 B（无需装 VPN：电脑一行命令导出快照）")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.teal)
+                                Text("手机连电脑执行 `pip3 install pymobiledevice3` 后运行下方复制的命令生成 `installed_apps.json`，隔空投送到手机选择「用 WQGuard 打开」即可秒扫全机所有已安装应用。")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .font(.subheadline.bold())
+                }
+
+                // Engine 2 First if user came to bind Feather / Signer Directory!
+                Section {
+                    if vm.bookmarkedFolderNames.isEmpty {
+                        Text("尚未绑定子目录（请进入 Feather 或全能签 → 点进 Signed 文件夹 → 点右上角打开）")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    } else {
+                        HStack {
+                            Image(systemName: "folder.fill.badge.gearshape")
+                                .foregroundColor(.teal)
+                            Text("已绑定: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
+                                .font(.subheadline)
+                        }
+                    }
+
+                    Button(action: { activePicker = .signingFolder }) {
+                        Label("绑定签名器 Signed / Unsigned 子目录", systemImage: "folder.fill.badge.plus")
+                            .foregroundColor(.teal)
+                    }
+
+                    if !vm.bookmarkedFolderNames.isEmpty {
+                        Button(role: .destructive, action: { vm.clearBoundSigningFolders() }) {
+                            Label("解除已绑定的签名目录", systemImage: "folder.badge.minus")
+                        }
+                    }
+                } header: {
+                    Text("引擎 2 · 签名器源包二进制深扫（Feather / 全能签）")
+                } footer: {
+                    Text("自动扫描 Signed / Unsigned 目录下的 .ipa 与解包后的 .app 二进制及 Frameworks/*.dylib 注入插件。")
+                }
+
                 // Engine 1A: LocalDevVPN + Pairing File Direct Connection
                 Section {
                     HStack {
@@ -36,7 +106,7 @@ public struct InstalledScanConfigSheet: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("方式 A：LocalDevVPN 配对直连本机注册表")
                                 .font(.subheadline.bold())
-                            Text(vm.pairingHostIDSummary ?? "未导入配对文件（支持复用 StikDebug / SideStore 配对文件）")
+                            Text(vm.pairingHostIDSummary ?? "未导入配对文件（支持 idevice_pair / StikDebug / SideStore 配对文件）")
                                 .font(.caption)
                                 .foregroundColor(vm.hasPairingFile ? .green : .gray)
                         }
@@ -52,7 +122,7 @@ public struct InstalledScanConfigSheet: View {
                             .foregroundColor(.teal)
                     }
 
-                    Button(action: { showPairingPicker = true }) {
+                    Button(action: { activePicker = .pairingFile }) {
                         Label(
                             vm.hasPairingFile ? "更换配对文件 (.mobiledevicepairing)" : "导入配对文件 (.mobiledevicepairing / .plist)",
                             systemImage: "key.radiowaves.forward.fill"
@@ -74,7 +144,7 @@ public struct InstalledScanConfigSheet: View {
                 } header: {
                     Text("引擎 1A · 本机配对直连（方案一）")
                 } footer: {
-                    Text("开启 StikDebug 或 SideStore 的 LocalDevVPN（10.7.0.1）后，WQGuard 可直接向 iOS 官方 installation_proxy 读取全机所有已安装应用的完整 Entitlements 权限表与签名身份，无需任何漏洞。")
+                    Text("开启 App Store 免费应用 LocalDevVPN（10.7.0.1）后，WQGuard 可直接向 iOS 官方 installation_proxy 读取全机所有已安装应用的完整 Entitlements 权限表与签名身份。")
                 }
 
                 // Engine 1B: Offline Snapshot Import
@@ -90,14 +160,14 @@ public struct InstalledScanConfigSheet: View {
                                     .font(.caption)
                                     .foregroundColor(.green)
                             } else {
-                                Text("支持 ideviceinstaller (.plist/.xml) 或 pymobiledevice3 (.json)")
+                                Text("支持 pymobiledevice3 (.json) 或 ideviceinstaller (.plist/.xml)")
                                     .font(.caption)
                                     .foregroundColor(.gray)
                             }
                         }
                     }
 
-                    Button(action: { showSnapshotPicker = true }) {
+                    Button(action: { activePicker = .registrySnapshot }) {
                         Label("选择注册表快照文件 (.plist / .xml / .json)", systemImage: "arrow.down.doc.fill")
                             .foregroundColor(.orange)
                     }
@@ -130,38 +200,7 @@ public struct InstalledScanConfigSheet: View {
                 } header: {
                     Text("引擎 1B · 离线注册表快照（无需 VPN）")
                 } footer: {
-                    Text("电脑连接手机执行 `\(cliExportCommand)` 或 `ideviceinstaller -l -o xml > apps.plist`，隔空投送至手机用 WQGuard 打开即可秒扫全机已安装应用。")
-                }
-
-                // Engine 2: Signer Directory Correlation
-                Section {
-                    if vm.bookmarkedFolderNames.isEmpty {
-                        Text("尚未绑定签名器目录（建议绑定「全能签」或「Feather」目录）")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                    } else {
-                        HStack {
-                            Image(systemName: "folder.fill.badge.gearshape")
-                                .foregroundColor(.teal)
-                            Text("已绑定: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
-                                .font(.subheadline)
-                        }
-                    }
-
-                    Button(action: { showSignerFolderPicker = true }) {
-                        Label("绑定签名工具目录（自动关联二进制深扫）", systemImage: "folder.fill.badge.plus")
-                            .foregroundColor(.teal)
-                    }
-
-                    if !vm.bookmarkedFolderNames.isEmpty {
-                        Button(role: .destructive, action: { vm.clearBoundSigningFolders() }) {
-                            Label("解除已绑定的签名目录", systemImage: "folder.badge.minus")
-                        }
-                    }
-                } header: {
-                    Text("引擎 2 · 签名器源包二进制联动（方案二）")
-                } footer: {
-                    Text("当注册表检出已安装自签应用时，WQGuard 会按 Bundle ID 自动匹配签名目录中的源 .ipa 包，补齐 Mach-O 私有符号与 Frameworks/*.dylib 注入插件深扫。")
+                    Text("电脑连接手机执行 `\(cliExportCommand)`，隔空投送至手机用 WQGuard 打开即可秒扫全机已安装应用。")
                 }
 
                 // Engine 3: On-Device URL Scheme Probe
@@ -185,43 +224,28 @@ public struct InstalledScanConfigSheet: View {
                     }
                 }
             }
-            .background(
-                EmptyView()
-                    .fileImporter(
-                        isPresented: $showPairingPicker,
-                        allowedContentTypes: [.data],
-                        allowsMultipleSelection: false
-                    ) { result in
-                        if case .success(let urls) = result, let first = urls.first {
+            #if canImport(UIKit)
+            .sheet(item: $activePicker) { kind in
+                SystemDocumentPicker(kind: kind) { urls in
+                    activePicker = nil
+                    switch kind {
+                    case .pairingFile:
+                        if let first = urls.first {
                             vm.importPairingFile(from: first)
                         }
-                    }
-            )
-            .background(
-                EmptyView()
-                    .fileImporter(
-                        isPresented: $showSnapshotPicker,
-                        allowedContentTypes: [.data],
-                        allowsMultipleSelection: false
-                    ) { result in
-                        if case .success(let urls) = result, let first = urls.first {
+                    case .registrySnapshot:
+                        if let first = urls.first {
                             vm.importRegistrySnapshot(from: first, autoScan: true)
                         }
+                    case .signingFolder, .ipaFiles:
+                        dismiss()
+                        vm.scanMultipleIPAPackages(at: urls)
                     }
-            )
-            .background(
-                EmptyView()
-                    .fileImporter(
-                        isPresented: $showSignerFolderPicker,
-                        allowedContentTypes: [.folder],
-                        allowsMultipleSelection: false
-                    ) { result in
-                        if case .success(let urls) = result {
-                            dismiss()
-                            vm.scanMultipleIPAPackages(at: urls)
-                        }
-                    }
-            )
+                } onCancel: {
+                    activePicker = nil
+                }
+            }
+            #endif
         }
     }
 }
