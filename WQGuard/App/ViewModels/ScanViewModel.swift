@@ -208,6 +208,108 @@ public final class ScanViewModel: ObservableObject {
         refreshRegistrySourceState()
     }
 
+    /// Reads a `.plist` / `.mobiledevicepairing` file or XML text directly from `UIPasteboard.general`
+    /// (supports copying the `.plist` file in iOS Files App OR copying XML text via Universal Clipboard).
+    public func importPairingFromClipboardWithResult() -> Result<String, Error> {
+        #if canImport(UIKit)
+        let pb = UIPasteboard.general
+
+        // 1. Plain XML / Base64 string on clipboard
+        if let str = pb.string?.trimmingCharacters(in: .whitespacesAndNewlines), !str.isEmpty {
+            let utf8Data = Data(str.utf8)
+            if case .success(let msg) = importPairingDataWithResult(utf8Data, fallbackUDID: nil) {
+                return .success(msg)
+            }
+            if let b64Data = Data(base64Encoded: str, options: .ignoreUnknownCharacters),
+               case .success(let msg) = importPairingDataWithResult(b64Data, fallbackUDID: nil) {
+                return .success(msg)
+            }
+        }
+
+        // 2. Copied `.plist` / `.mobiledevicepairing` file item from iOS Files App
+        var lastParseError: Error?
+        for itemDict in pb.items {
+            for (_, rawVal) in itemDict {
+                if let d = rawVal as? Data {
+                    switch importPairingDataWithResult(d, fallbackUDID: nil) {
+                    case .success(let msg): return .success(msg)
+                    case .failure(let err): lastParseError = err
+                    }
+                } else if let s = rawVal as? String {
+                    if let fileURL = URL(string: s), fileURL.isFileURL,
+                       let fileData = try? Data(contentsOf: fileURL) {
+                        switch importPairingDataWithResult(fileData, fallbackUDID: fileURL.deletingPathExtension().lastPathComponent) {
+                        case .success(let msg): return .success(msg)
+                        case .failure(let err): lastParseError = err
+                        }
+                    } else if let strData = s.data(using: .utf8) {
+                        switch importPairingDataWithResult(strData, fallbackUDID: nil) {
+                        case .success(let msg): return .success(msg)
+                        case .failure(let err): lastParseError = err
+                        }
+                    }
+                } else if let fileURL = rawVal as? URL,
+                          let fileData = try? Data(contentsOf: fileURL) {
+                    switch importPairingDataWithResult(fileData, fallbackUDID: fileURL.deletingPathExtension().lastPathComponent) {
+                    case .success(let msg): return .success(msg)
+                    case .failure(let err): lastParseError = err
+                    }
+                } else if PropertyListSerialization.propertyList(rawVal, isValidFor: .xml),
+                          let plistData = try? PropertyListSerialization.data(fromPropertyList: rawVal, format: .xml, options: 0) {
+                    switch importPairingDataWithResult(plistData, fallbackUDID: nil) {
+                    case .success(let msg): return .success(msg)
+                    case .failure(let err): lastParseError = err
+                    }
+                }
+            }
+        }
+
+        return .failure(lastParseError ?? LockdownClientError.invalidPairingFile("剪贴板中未检测到有效的配对文件。请在系统『文件』App 中长按你的配对 .plist 文件点击「拷贝」，再回来点此按钮。"))
+        #else
+        return .failure(LockdownClientError.invalidPairingFile("当前平台不支持剪贴板导入"))
+        #endif
+    }
+
+    /// Automatically imports any `.mobiledevicepairing` / `.plist` / `.json` placed into
+    /// `我的 iPhone → WQGuard` (`Documents/` or `Documents/Inbox/`).
+    @discardableResult
+    public func autoImportFromDocumentsFolderIfNeeded() -> String? {
+        let fm = FileManager.default
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let scanDirs = [docsURL, docsURL.appendingPathComponent("Inbox", isDirectory: true)]
+        let currentHostID = loadActivePairingFile()?.hostID
+
+        for dir in scanDirs {
+            guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+                continue
+            }
+            for item in items {
+                let ext = item.pathExtension.lowercased()
+                guard ext == "mobiledevicepairing" || ext == "plist" || ext == "xml" || ext == "json" else {
+                    continue
+                }
+                guard let data = try? Data(contentsOf: item, options: .mappedIfSafe), !data.isEmpty else {
+                    continue
+                }
+                let stem = item.deletingPathExtension().lastPathComponent
+                if let parsedPairing = try? LockdownPairingFile.parse(data: data, fallbackUDID: stem) {
+                    if currentHostID != parsedPairing.hostID {
+                        if case .success(let msg) = importPairingDataWithResult(data, fallbackUDID: stem) {
+                            return "已自动从「我的 iPhone → WQGuard」目录加载配对文件：\(msg)"
+                        }
+                    }
+                } else if !hasSavedSnapshot,
+                          case .success(let msg) = importRegistrySnapshotDataWithResult(data, filename: item.lastPathComponent, autoScan: false) {
+                    return "已自动从「我的 iPhone → WQGuard」目录加载快照：\(msg)"
+                }
+            }
+        }
+        return nil
+    }
+
     public func importRegistrySnapshot(from url: URL, autoScan: Bool = true) {
         if case .failure(let error) = importRegistrySnapshotWithResult(from: url, autoScan: autoScan) {
             activeAlertMessage = error.localizedDescription

@@ -107,10 +107,19 @@ public struct InstalledScanConfigSheet: View {
 
                     Button(action: { pickPairingFile() }) {
                         Label(
-                            vm.hasPairingFile ? "更换配对文件 (.plist / .mobiledevicepairing)" : "导入配对文件 (.plist / .mobiledevicepairing)",
-                            systemImage: "key.radiowaves.forward.fill"
+                            vm.hasPairingFile ? "从文件选择更换配对文件 (.plist)" : "方式 1：从「文件」选择配对文件 (.plist / .mobiledevicepairing)",
+                            systemImage: "folder.badge.plus"
                         )
                         .foregroundColor(.cyan)
+                    }
+
+                    Button(action: { pastePairingFromClipboard() }) {
+                        Label(
+                            "方式 2：从剪贴板一键粘贴配对文件（在系统文件长按 .plist 点拷贝）",
+                            systemImage: "doc.on.clipboard.fill"
+                        )
+                        .font(.footnote.bold())
+                        .foregroundColor(.mint)
                     }
 
                     if vm.hasPairingFile {
@@ -134,7 +143,7 @@ public struct InstalledScanConfigSheet: View {
                 } header: {
                     Text("引擎 1A · 本机配对直连（与 1B 二选一）")
                 } footer: {
-                    Text("导入配对文件并开启 LocalDevVPN（10.7.0.1）后，WQGuard 可直接向 iOS 官方 installation_proxy 读取全机所有已安装应用的完整权限表与签名身份。")
+                    Text("💡 除了点选或剪贴板导入外，你也可以在系统『文件』App 中直接把配对 .plist 移入『我的 iPhone → WQGuard』文件夹，返回本页即会自动识别！")
                 }
 
                 // Engine 1B: Offline Snapshot Import
@@ -254,6 +263,24 @@ public struct InstalledScanConfigSheet: View {
                     }
                 }
             }
+            .onAppear {
+                if let autoMsg = vm.autoImportFromDocumentsFolderIfNeeded() {
+                    localBannerIsError = false
+                    localBannerText = autoMsg
+                }
+            }
+        }
+    }
+
+    private func pastePairingFromClipboard() {
+        switch vm.importPairingFromClipboardWithResult() {
+        case .success(let summary):
+            localBannerIsError = false
+            localBannerText = "✅ 剪贴板导入成功：\(summary) — 正在直连扫描..."
+            vm.testLiveLockdownConnectionAndScan()
+        case .failure(let err):
+            localBannerIsError = true
+            localBannerText = err.localizedDescription
         }
     }
 

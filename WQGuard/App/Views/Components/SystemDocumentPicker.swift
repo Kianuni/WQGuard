@@ -3,10 +3,11 @@
 //  WQGuard
 //
 //  Direct UIKit topmost-controller presenter for `UIDocumentPickerViewController`.
-//  Eliminates SwiftUI `.fileImporter` / `.sheet` lifecycle & double-dismissal bugs
-//  on iOS 26/27, enforces `allowsMultipleSelection = false` for `.folder` mode so
-//  the top-right "打开" (Open) button activates immediately, and strongly retains
-//  both picker and delegate until completion.
+//  - Uses `asCopy: true` with `[.item, .data, .content]` for file imports (.plist,
+//    .mobiledevicepairing, .json, .xml, .ipa) so iOS NEVER greys out files due to
+//    Open-In-Place provider or CFBundleTypeRole restrictions.
+//  - Uses `UIDocumentPickerViewController(forOpeningContentTypes: [.folder])` with
+//    `allowsMultipleSelection = false` for signing folder binding.
 //
 
 import SwiftUI
@@ -23,28 +24,12 @@ public enum DocumentPickerKind: String, Identifiable {
 
     public var id: String { rawValue }
 
-    public var contentTypes: [UTType] {
-        switch self {
-        case .signingFolder:
-            // Must be strictly [.folder] with allowsMultipleSelection = false
-            // so iOS Files activates the top-right "打开" button for the current directory.
-            return [.folder]
-        case .pairingFile:
-            return [.propertyList, .xml, .data, .content, .item]
-        case .registrySnapshot:
-            return [.propertyList, .xml, .json, .plainText, .data, .content, .item]
-        case .ipaFiles:
-            return [.data, .archive, .zip, .content, .item]
-        }
+    public var isFolderSelection: Bool {
+        self == .signingFolder
     }
 
     public var allowsMultipleSelection: Bool {
-        switch self {
-        case .ipaFiles:
-            return true
-        case .signingFolder, .pairingFile, .registrySnapshot:
-            return false
-        }
+        self == .ipaFiles
     }
 }
 
@@ -54,6 +39,7 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
     public static let shared = NativeDocumentPickerPresenter()
 
     private var retainedPicker: UIDocumentPickerViewController?
+    private var activeKind: DocumentPickerKind = .pairingFile
     private var onPickHandler: (([URL]) -> Void)?
     private var onCancelHandler: (() -> Void)?
 
@@ -71,15 +57,24 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
             return
         }
 
-        let picker = UIDocumentPickerViewController(
-            forOpeningContentTypes: kind.contentTypes,
-            asCopy: false
-        )
+        let picker: UIDocumentPickerViewController
+        if kind.isFolderSelection {
+            // Standard 1-arg initializer configures directory open-in-place mode cleanly
+            picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        } else {
+            // CRITICAL: `asCopy: true` + `[.item, .data, .content]` enables ALL files (.plist,
+            // .mobiledevicepairing, .json, .xml, .ipa) across every FileProvider without greying out!
+            picker = UIDocumentPickerViewController(
+                forOpeningContentTypes: [.item, .data, .content],
+                asCopy: true
+            )
+        }
         picker.allowsMultipleSelection = kind.allowsMultipleSelection
         picker.shouldShowFileExtensions = true
         picker.delegate = self
         picker.presentationController?.delegate = self
 
+        self.activeKind = kind
         self.retainedPicker = picker
         self.onPickHandler = onPick
         self.onCancelHandler = onCancel
@@ -91,12 +86,20 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
         MainActor.assumeIsolated {
             let pick = self.onPickHandler
             let cancel = self.onCancelHandler
+            let isFolder = self.activeKind.isFolderSelection
             self.clearRetainedState()
             guard !urls.isEmpty else {
                 cancel?()
                 return
             }
-            pick?(urls)
+
+            if isFolder {
+                pick?(urls)
+            } else {
+                // Persist `asCopy: true` temp inbox files synchronously before UIKit cleans up `-Inbox`
+                let safeURLs = Self.stageCopiedFilesIfNeeded(urls)
+                pick?(safeURLs)
+            }
         }
     }
 
@@ -120,6 +123,24 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
         self.retainedPicker = nil
         self.onPickHandler = nil
         self.onCancelHandler = nil
+    }
+
+    private static func stageCopiedFilesIfNeeded(_ urls: [URL]) -> [URL] {
+        let fm = FileManager.default
+        let stageDir = fm.temporaryDirectory.appendingPathComponent("WQGuardPicked", isDirectory: true)
+        try? fm.createDirectory(at: stageDir, withIntermediateDirectories: true)
+
+        return urls.map { src in
+            let dst = stageDir.appendingPathComponent("\(UUID().uuidString.prefix(8))_\(src.lastPathComponent)")
+            try? fm.removeItem(at: dst)
+            if (try? fm.moveItem(at: src, to: dst)) != nil {
+                return dst
+            }
+            if (try? fm.copyItem(at: src, to: dst)) != nil {
+                return dst
+            }
+            return src
+        }
     }
 
     private func topMostViewController() -> UIViewController? {
