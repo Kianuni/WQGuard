@@ -10,7 +10,7 @@
 [![Unit Tests](https://img.shields.io/badge/Tests-664%20Passing-brightgreen.svg)]()
 [![Read-Only Guaranteed](https://img.shields.io/badge/Security-100%25%20Read--Only%20(O__RDONLY)-success.svg)](SECURITY.md)
 
-**[🇨🇳 简体中文](#简体中文) · [🇺🇸 English](#english) · [📥 下载最新安装包 / Download Latest IPA](https://github.com/Kianuni/WQGuard/releases/latest) · [📖 技术白皮书 / Technical Reference](USAGE_GUIDE.md) · [🔒 安全策略 / Security Policy](SECURITY.md)**
+**[🇨🇳 简体中文](#简体中文) · [🇺🇸 English](#english) · [📥 下载最新安装包 / Download Latest IPA](https://github.com/Kianuni/WQGuard/releases/latest) · [🔒 安全策略 / Security Policy](SECURITY.md) · [📖 技术白皮书 / Technical Reference](USAGE_GUIDE.md)**
 
 ---
 
@@ -27,58 +27,87 @@
 
 WQGuard 专注于在**绝对不调用任何私有越权漏洞（Zero-Exploit）**的前提下，精准检出跨容器沙盒逃逸攻击（`worse_query` / `bad_query` / `containermanagerd` 混淆替身漏洞）、二次打包盗币钱包木马（Web3 Drainer）、相册 TCC 隐私绕过（`CVE-2026-112676`）、注入外挂动态库（`Frameworks/*.dylib`）以及常驻后台剪贴板助记词窃取行为。
 
-> **🔒 核心安全承诺：100% 物理只读不变量**  
-> WQGuard 在任何情况下**绝不修改、创建、覆写或触碰**任何被检应用二进制、系统文件或容器元数据。全链路强制使用 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 只读不跟随描述符、`lstat`/`readlink` 非递归软链接检查与 `.mappedIfSafe` 只读内存映射，并通过 **664 项自动化单元测试**与 SHA-256 前后一致性校验。
+---
+
+### 2. 🔒 安全与隐私策略（三大底层铁律）
+
+作为一款需要接触本机已安装应用列表、配对证书与可疑第三方安装包的审计工具，WQGuard 从架构底层严格执行**零信任安全策略**（详见 [SECURITY.md](SECURITY.md)）：
+
+1. **100% 本机离线运行 · 零遥测零上传（Zero Telemetry & On-Device Only）**
+   - **零外部依赖、零统计 SDK**：工程纯原生 Swift / Darwin 构建，不集成任何第三方分析、崩溃上报或广告库，**没有任何后台公网请求逻辑**。
+   - **敏感凭证沙盒闭环**：导入的 `.mobiledevicepairing` 配对文件、`installed_apps.json` 快照与本地 `.ipa` 扫描队列仅存储在 WQGuard 自身沙盒私有目录内，支持随时在界面内一键彻底清除；引擎 1A 连接 `LocalDevVPN` 时仅与本机 `lockdownd` 服务建立本地虚拟环回 TLS 通道，流量绝不离开手机、绝不经过任何外部服务器。
+2. **零漏洞利用原则（Zero-Exploit Guarantee）**
+   - 市面上部分检测工具会内嵌 `worse_query` / `fsgetpath` 越权漏洞去强行枚举其他容器，极易造成 APFS 缓存抖动触发 iOS 看门狗强杀（`0x8badf00d`）、遗留危险软链接甚至导致系统 `containermanagerd` 守护进程崩溃。
+   - WQGuard **坚决不内嵌、不调用任何沙盒逃逸攻击载荷**，100% 依托苹果官方 `com.apple.mobile.installation_proxy` 协议与用户显式授权的文件导入机制完成合规盘点。
+3. **100% 物理只读不变量（Strict Physical Read-Only Invariant）**
+   - **系统调用级只读锁死**：底层文件读取强制使用 `open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)`，内核级拒绝任何写操作，遇到符号链接立即返回 `ELOOP` 绝不跟随越界。
+   - **非递归软链接取证与零残留拆包**：使用 `lstat()` + `readlink()` 在不解引用的前提下识别逃逸软链接并立即终止递归；通过 `.mappedIfSafe` (`PROT_READ`) 只读内存映射解析二进制；本地 `.ipa` 在随机隔离临时目录拆包审计后通过 `defer` 块强制销毁，零文件残留。
+   - **664 项自动化回归验证**：每次测试均对被扫目录执行扫描前后 **SHA-256 逐字节一致性比对**、**纳秒级 `mtime` 时间戳零变动校验**以及 `0444/0555` 纯只读权限文件系统压力测试。
 
 ---
 
-### 2. 核心功能亮点
+### 3. 🎯 扫描策略与四级风险裁决机制
 
-#### 🛡️ 三引擎「全机已安装应用」合规审计架构
-普通 iOS 侧载应用受限于 Apple Seatbelt 沙盒，无法直接枚举其他已安装应用目录。WQGuard 通过独创的**三引擎协同架构**，在不依赖越狱或内核漏洞的前提下实现全机安全盘点：
+#### 3.1 三引擎互补采集与自动升维联动
+普通 iOS 侧载应用受限于 Apple Seatbelt 沙盒，无法直接读取 `/var/containers/Bundle/Application`。WQGuard 采用**三源互补 + 自动融合**策略：
 
-- **引擎 1A · 本机无线配对直连（`LocalDevVPN` + 配对文件）**：
-  - 导入一次由 Mac `jitterbugpair`（或复用 SideStore / StikDebug）生成的 `.mobiledevicepairing` / `.plist` 配对文件（支持系统文件点选、剪贴板一键粘贴、或放入 `我的 iPhone → WQGuard` 自动加载）。
-  - 配合 `LocalDevVPN` 在手机本地直连 iOS 官方 `installation_proxy` 服务，1 秒读取全机应用的完整 `Entitlements` 权限表、App Groups 共享容器与签名团队身份。
-  - **iOS 26.4+ / iOS 27 子网对齐助手**：自动检测当前 Wi-Fi IP 并生成同网段 `Tunnel IP` 与 `Device IP` 一键复制按钮，完美解决新系统 `lockdownd` 拦截 `10.7.0.x` 隧道导致连接关闭的问题。
-- **引擎 1B · 离线注册表快照导入（免 VPN · 100% 兼容 iOS 27）**：
-  - 连接 Mac 执行一行 `pymobiledevice3` 或苹果官方 Xcode `xcrun devicectl` 命令导出 `installed_apps.json`，隔空投送至手机即可完成全盘审计。
-  - **零系统误报 & 精准渠道识别**：内置双层系统路径（`/System/Library/`、`/Applications/`）与 Apple 平台二进制过滤，彻底排除苹果原生系统服务干扰；结合 `BetaReportsActive` / `get-task-allow` / `ProvisioningProfile` 精准区分 **`🛠️ 个人侧载`**、**`🏢 企业签`**、**`✈️ TestFlight`**（如 Surge、APTV 等 TestFlight 应用绝不误判为企业签）与 **`🍏 App Store`**。
-- **引擎 2 · 多选本地 `.ipa` 扫描列表与二进制自动联动**：
-  - 支持在系统「文件」App 中**一次勾选任意多个 `.ipa` / `.tipa` 文件**批量加入扫描列表（亦可从 Feather「库 → 已签名 → 导出 IPA」直接发送到 WQGuard），支持单个移除、侧滑删除、全部重扫与一键清空。
-  - 全机扫描时自动按 `Bundle ID` 将注册表记录与本地 `.ipa` 主程序合并升级为 **`🔬 注册表 + 二进制全量深扫`**。
-- **引擎 3 · 本机零配置在位探针**：
-  - 基于标准 `UIApplication.canOpenURL` 探针清单，零配置识别本机在位的侧载签名工具（Feather、全能签、SideStore、AltStore、GBox、Scarlet）与高权限环境组件（TrollStore、Filza、Sileo 等）。
-
-#### 🔬 4 层渐进式 Mach-O 静态深度解析引擎
 ```text
-┌────────────────────────────────────────────────────────────────────────┐
-│ 第 1 层：分发渠道识别与代码签名门禁                                    │
-│ • 解析 LC_CODE_SIGNATURE 超块（XML 0xfade7171 + ASN.1 DER 0xfade7172） │
-│ • 未声明 com.apple.security.application-groups 的包 O(1) 快速判定安全  │
-├────────────────────────────────────────────────────────────────────────┤
-│ 第 2 层：Mach-O 符号表、字符串段与抗混淆行为元组扫描                   │
-│ • 扫描主二进制、Frameworks/*.dylib 与 PlugIns/*.appex 全部扩展组件     │
-│ • 检索 libsystem_containermanager.dylib、container_query_*、fsgetpath  │
-│ • 抗混淆行为元组：AppGroups ∧ (dlopen/dlsym) ∧ (symlink/token_consume) │
-├────────────────────────────────────────────────────────────────────────┤
-│ 第 3 层：共享容器逃逸软链接与恶意监管配置排查                          │
-│ • 使用 lstat + readlink (O_NOFOLLOW) 排查 Library/Caches 越界软链接    │
-│ • 检查 CloudConfigurationDetails.plist 防范伪造 MDM 监管锁机           │
-├────────────────────────────────────────────────────────────────────────┤
-│ 第 4 层：4 级风险裁决与极简可信白名单                                  │
-│ • 输出：高危告警 / 已知工具 / 前置留意 / 安全合规                      │
-│ • 默认白名单仅保留 WQGuard 自身，第三方越权工具一律据实检出绝不漏报    │
-└────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ 引擎 1 · 全机注册表权限审计（二选一）                                      │
+│  ├─ 方式 A：LocalDevVPN + 配对文件无线直连 iOS 官方 installation_proxy     │
+│  │         （内置 iOS 26.4+/27 同网段 IP 对齐助手，手机端随时 1 秒直扫）   │
+│  └─ 方式 B：Mac pymobiledevice3 / devicectl 导出 installed_apps.json 快照  │
+│  ▶ 采集能力：全机应用的完整 Entitlements 权限表、App Groups、证书与渠道身份│
+├────────────────────────────────────────────────────────────────────────────┤
+│ 引擎 2 · 本地多选 .ipa / .tipa 二进制深扫队列                              │
+│  ▶ 支持在系统「文件」一次多选任意数量 .ipa 加入持久扫描列表（支持单独移除）│
+│  ▶ 采集能力：拆包反编译主程序、Frameworks/*.dylib 与 PlugIns/*.appex 符号表│
+├────────────────────────────────────────────────────────────────────────────┤
+│ 引擎 3 · 本机零配置在位探针（UIApplication.canOpenURL）                    │
+│  ▶ 采集能力：零配置识别 Feather / 全能签 / SideStore / TrollStore / Filza  │
+└────────────────────────────────────┬───────────────────────────────────────┘
+                                     ▼
+       【 按 Bundle ID 自动融合升级为 🔬 注册表 + 二进制全量深扫 】
 ```
 
-#### 🌐 固件 CVE 暴露雷达与多平台防 Brotli 溢出护盾矩阵 (`CVE-2026-111497`)
+#### 3.2 双层防误报门禁（为什么不乱报系统与正常 App？）
+1. **第一道门禁：系统进程剔除与精准分发渠道识别**
+   - **双层过滤系统应用**：自动剥离 `/System/Library/`、`/Applications/` 等系统目录及 Apple 平台内置服务，彻底消除「扫出一百多个系统高危应用」的误报噪音。
+   - **四渠道精准定性**：结合 `ApplicationType`、`SignerIdentity`、`BetaReportsActive`、`get-task-allow` 与内嵌描述文件，精准区分 **`🍏 App Store`**、**`✈️ TestFlight`**（如 Surge、APTV 等测试版绝不误判为企业签）、**`🏢 企业签`** 与 **`🛠️ 个人侧载`**。
+2. **第二道门禁：`App Groups` 密码学物理门禁（$O(1)$ 极速放行）**
+   - **双槽防遮蔽解析**：同时解析 Mach-O `LC_CODE_SIGNATURE` 超块中的 **Slot 5 (XML `0xfade7171`)** 与 **Slot 7 (ASN.1 DER `0xfade7172`)** 权限字典并取并集，防止恶意包通过「空 XML + 隐藏 DER 槽」绕过审查。
+   - **物理不可能定理**：`containermanagerd` 在内核侧强校验签名中的 `com.apple.security.application-groups`。未声明任何 App Group 的应用在物理上无法触发跨容器逃逸（请求会直接报错 `-1`），WQGuard 对此类无其他威胁特征的应用直接 $O(1)$ 判定安全。
+
+#### 3.3 多维威胁检出与抗混淆行为元组
+对于通过门禁进入深度分析的目标，扫描管线依次执行多向量交叉取证：
+- **沙盒逃逸私有 API 与 XPC 特征**：扫描主程序、全部嵌入动态库与扩展组件的符号表及字符串段，捕获 `libsystem_containermanager.dylib`、`container_query_create`、`container_copy_sandbox_token`、`com.apple.containermanagerd` 与 `fsgetpath`（APFS Inode 路径爆破）。
+- **抗 XOR 混淆行为元组启发式**：即便攻击者将私有函数名字符串全部加密隐藏，只要同时满足 **`未加密二进制 (cryptid == 0) ∧ 声明 App Groups ∧ 动态解析能力 (dlopen/dlsym) ∧ 软链接/令牌消费原语 (symlink/sandbox_extension_consume)`**，依然会被行为元组引擎精准锁定。
+- **侧载高频黑产专项审计**：
+  - **盗币假钱包 / 仿冒包识别**：比对主流加密钱包（MetaMask、Trust、Phantom、imToken、OKX、TokenPocket 等）与核心社交/支付软件的特征，拦截非官方证书重签仿冒应用。
+  - **第三方注入动态库审查**：逐一枚举 `Frameworks/*.dylib` 与非系统加载路径（`@executable_path` / `@rpath`），揪出二次打包塞入的外挂或窃密插件。
+  - **相册隐私绕过与伪造监管锁机**：检测非法引用 `PhotoLibraryServices`（`CVE-2026-112676` 静默读相册助记词截图）及容器内异常逃逸软链接、伪造 MDM 监管配置（`CloudConfigurationDetails.plist`）。
+
+#### 3.4 四级风险透明裁决与极简白名单原则
+
+| 风险等级 | 触发判定准则 | 处置建议 |
+|---|---|---|
+| **🔴 高危告警 (`High Risk`)** | 检出 `containermanagerd` 私有逃逸调用 / XPC 通信、`fsgetpath` 路径爆破、共享容器越界软链接、伪造 MDM 监管锁机、私有相册框架越权调用或仿冒知名钱包/金融应用签名 | **切勿启动，立即卸载**，并在系统设置中移除对应描述文件后重启设备回收内核沙盒令牌 |
+| **🟡 已知工具 (`Known Tool`)** | 匹配用户显式启用的可信白名单规则，或引擎 3 识别到的公开侧载签名管理工具（如 WQGuard 自身、Feather、SideStore、LocalDevVPN 等） | 确认来源为本人主动安装的官方渠道包即可正常使用 |
+| **🟠 前置留意 (`Caution`)** | 个人侧载或企业签应用声明了共享 `App Groups`、满足抗混淆动态加载行为元组、嵌入了第三方改版注入 `.dylib`、或开启高敏感常驻后台权限（如后台定位/音频保活伴随剪贴板访问风险） | 点进详情页核查其「注入动态库清单」与「声明权限」，仅保留信任来源的改版包 |
+| **🟢 安全合规 (`Safe`)** | 官方 App Store / TestFlight 合规分发应用，或未声明越权敏感权限、未检出任何可疑私有符号与注入特征的干净侧载应用 | 符合 iOS 沙盒隔离边界，可放心使用 |
+
+> **⚖️ 极简白名单原则**：WQGuard 出厂内置白名单**仅保留 `WQGuard` 自身**，默认不暗中豁免任何第三方越权研究工具（如 Erosion、WQFiles 等均会据实检出），把是否信任的知情权与开关权 100% 交给用户。
+
+---
+
+### 4. 🌐 固件 CVE 暴露雷达与多平台防 Brotli 溢出护盾矩阵 (`CVE-2026-111497`)
+
 针对停留在未修补固件的 iOS 26.x 与 iOS 27.0–27.2 设备，实时评估 **8 项 2026 高危系统漏洞**，并为 iOS 五大主流网络代理客户端提供开箱即用的**防 Brotli 溢出降级护盾**（防御 `CVE-2026-111497` / `HTTP2Shell` `libbrotli` 堆溢出远程代码执行，CVSS 9.2）：
 
 - **双层零解压拦截**：请求层将 `Accept-Encoding` 强制降级为 `gzip, deflate`；响应层采用**零响应体解压**（`requires-body=false` / `script-response-header`）直接阻断恶意服务端强行回传的 `Content-Encoding: br` 畸形流，避免代理进程或系统 `WebKit`/`CFNetwork` 触发漏洞。
 - **零耗电、零断网默认策略**：全部 5 款客户端规则统一内置 `-*.apple.com`、`-guzzoni.apple.com`（普通话 Siri）、`-*.siri.apple.com`、`-apple-relay.*`、`-*.openai.com`、`-*.alipay.com`、`-*.tenpay.com` 等 **16 项严苛负向排除规则**，默认仅针对 `*.xyz`、`*.top`、`*.icu`、`*.click`、`*.zip` 等 **20 类黑产钓鱼高频后缀**开启 MITM，日常挂机零额外耗电、绝不影响银行与主流 App 正常联网（切勿在日常将附加域名设为全局 `*`）。
 
-##### 📥 五大代理客户端一键订阅列表（也可在 WQGuard App「固件雷达」内一键唤起导入）
+#### 📥 五大代理客户端一键订阅列表（也可在 WQGuard App「固件雷达」内一键唤起导入）
 
 | 客户端 | 规则格式 | 仓库文件 | 在线订阅直链（复制填入客户端即可） | 启用要点 |
 |---|---|---|---|---|
@@ -88,7 +117,7 @@ WQGuard 专注于在**绝对不调用任何私有越权漏洞（Zero-Exploit）*
 | **Loon** | `.plugin` | [`WQGuard-Brotli-Shield.plugin`](Shields/Loon/WQGuard-Brotli-Shield.plugin) | `https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/Loon/WQGuard-Brotli-Shield.plugin` | 导入「配置 → 插件」，开启「MITM」与证书信任 |
 | **Stash** | `.stoverride` | [`WQGuard-Brotli-Shield.stoverride`](Shields/Stash/WQGuard-Brotli-Shield.stoverride) | `https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/Stash/WQGuard-Brotli-Shield.stoverride` | 导入「覆写 (Overrides)」，开启「MITM」与根证书信任 |
 
-##### 📊 8 项 2026 固件高危漏洞评估矩阵
+#### 📊 8 项 2026 固件高危漏洞评估矩阵
 
 | 漏洞编号 / 标识 | 受影响子系统 | 风险等级 | 受影响固件范围 | 免升级防护方案 |
 |---|---|---|---|---|
@@ -103,7 +132,7 @@ WQGuard 专注于在**绝对不调用任何私有越权漏洞（Zero-Exploit）*
 
 ---
 
-### 3. 快速上手指南
+### 5. 🚀 快速上手指南
 
 #### 第一步：下载与安装 iOS 应用
 1. 前往 **[GitHub Releases](https://github.com/Kianuni/WQGuard/releases/latest)** 下载最新的 `WQGuard_v1.2.0.ipa`。
@@ -131,7 +160,7 @@ WQGuard 专注于在**绝对不调用任何私有越权漏洞（Zero-Exploit）*
 
 ---
 
-### 4. macOS 命令行工具 (`wqguard-cli`) 与源码构建
+### 6. 💻 macOS 命令行工具 (`wqguard-cli`) 与源码构建
 
 #### 环境要求
 - macOS 14.0+ / Xcode 16.0+ / Swift 6.0 工具链
@@ -178,35 +207,51 @@ swift build -c release --product wqguard-cli
 
 WQGuard detects unauthorized cross-container sandbox escapes (`worse_query` / `bad_query` / `containermanagerd` confused-deputy exploits), repackaged Web3 crypto wallet drainers, private Photos TCC bypasses (`CVE-2026-112676`), injected tweak dylibs (`Frameworks/*.dylib`), and persistent background clipboard snooping — **without embedding or invoking any sandbox exploit itself**.
 
-> **🔒 Core Security Guarantee: 100% Read-Only Physical Invariant**  
-> Under no circumstances does WQGuard modify, create, rewrite, truncate, or touch any inspected binary, container metadata, or system file. Every inspection pass strictly uses `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` descriptors, non-traversing `lstat` / `readlink` symlink checks, and read-only `.mappedIfSafe` memory mapping, continuously verified by **664 automated unit tests**.
+---
+
+### 2. 🔒 Security & Privacy Policy (Three Core Invariants)
+
+Because a security auditor inspects sensitive device metadata and untrusted third-party binaries, WQGuard enforces three non-negotiable engineering guarantees (see [SECURITY.md](SECURITY.md) for full specification):
+
+1. **100% On-Device Execution · Zero Telemetry & Zero External Network Calls**
+   - Built strictly on native Swift and Darwin frameworks with **zero third-party SDKs, zero analytics/crash reporters, and zero outbound internet requests**.
+   - Imported `.mobiledevicepairing` records, `installed_apps.json` snapshots, and queued `.ipa` archives remain strictly inside WQGuard's private app sandbox and can be wiped with one tap at any time. Engine 1A communicates over `LocalDevVPN` exclusively with the device's own `lockdownd` daemon via local virtual loopback — no traffic ever leaves the device.
+2. **Zero-Exploit Architecture**
+   - Unlike utilities that weaponize `worse_query` or `fsgetpath` inode brute-forcing to inspect peer containers — risking `0x8badf00d` watchdog terminations, dangling escaping symlinks, or `containermanagerd` instability — WQGuard **embeds zero exploit primitives** and relies strictly on Apple's official `com.apple.mobile.installation_proxy` protocol and user-selected packages.
+3. **100% Strict Physical Read-Only Invariant**
+   - All direct file accesses enforce `open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)`, `lstat()` + `readlink()` non-recursive symlink inspection, read-only `.mappedIfSafe` (`PROT_READ`) memory mapping, RAII `ScopedSandboxToken` cleanup, and `defer`-guaranteed ephemeral `.ipa` scratch directory removal — continuously verified across **664 automated unit tests** via pre/post SHA-256 checksums, nanosecond `mtime` assertions, and `0444/0555` read-only filesystem stress suites.
 
 ---
 
-### 2. Key Capabilities
+### 3. 🎯 Scanning Strategy & 4-Tier Risk Grading
 
-#### 🛡️ 3-Engine Exploit-Free Installed-App Audit Architecture
-Standard sideloaded iOS apps are blocked by Apple Seatbelt from enumerating `/var/containers/Bundle/Application`. WQGuard overcomes this cleanly via three standard, user-authorized engines:
+#### 3.1 3-Engine Complementary Collection & Automatic Correlation
+- **Engine 1A · Wireless Pairing Direct (`LocalDevVPN` + Pairing Record)**: Queries iOS's official `installation_proxy` on-device for full `Entitlements`, `App Groups`, and signer identities, complete with a built-in **iOS 26.4+ / iOS 27 Same-Subnet IP Helper**.
+- **Engine 1B · Offline Registry Snapshot (`pymobiledevice3` / `xcrun devicectl`)**: Zero-VPN Mac snapshot export (`installed_apps.json`), 100% compatible with iOS 27.
+- **Engine 2 · Multi-Select `.ipa` / `.tipa` Binary Queue**: Batch-import local packages from the iOS Files picker (or exported from Feather) to decompile main Mach-O binaries, `Frameworks/*.dylib`, and `PlugIns/*.appex`.
+- **Engine 3 · On-Device Environment Probe**: Inventory sideload signers and unsandboxed/bootstrap tools via standard `UIApplication.canOpenURL` checks.
+- **Automatic `Bundle ID` Upgrade**: When an installed app in Engine 1 matches a queued `.ipa` in Engine 2, WQGuard automatically merges both into a **`🔬 Full Registry + Binary Audit`**.
 
-- **Engine 1A · On-Device Wireless Pairing Direct (`LocalDevVPN` + Pairing File)**:
-  - Import a `.mobiledevicepairing` / `.plist` pairing record generated once via `jitterbugpair` (or reused from SideStore / StikDebug) via the Files picker, one-tap Clipboard paste, or auto-discovery from `On My iPhone → WQGuard`.
-  - Connects over `LocalDevVPN` directly to iOS's official `com.apple.mobile.installation_proxy` service to audit full `Entitlements`, `App Groups`, TCC bypass keys, and code-signing identities across all installed apps.
-  - **Built-in iOS 26.4+ / iOS 27 Same-Subnet Helper**: Automatically inspects your active Wi-Fi subnet and provides one-tap copy buttons for aligned `Tunnel IP` and `Device IP` to satisfy modern `lockdownd` subnet validation.
-- **Engine 1B · Offline Registry Snapshot Import (Zero VPN · 100% iOS 27 Compatible)**:
-  - Export `installed_apps.json` from a Mac in seconds using `pymobiledevice3` or Apple's built-in `xcrun devicectl` and AirDrop it to WQGuard.
-  - **Zero System-App False Positives & Accurate Channel Classification**: Filters out Apple system daemons/apps (`/System/Library/`, `/Applications/`, platform binaries) and accurately distinguishes **`🛠️ Sideloaded`**, **`🏢 Enterprise`**, **`✈️ TestFlight`** (`BetaReportsActive` / beta provisioning profiles), and **`🍏 App Store`** distributions.
-- **Engine 2 · Multi-Select `.ipa` Scan Queue & Binary Correlation**:
-  - Select multiple `.ipa` / `.tipa` packages at once in the iOS Files picker (or export signed IPAs from Feather via `Export IPA -> Open in WQGuard`) into a persistent local scan list supporting per-item removal, batch rescan, and automatic `Bundle ID` correlation with Engine 1 registry records (`🔬 Full Registry + Binary Audit`).
-- **Engine 3 · Zero-Config On-Device Environment Probe**:
-  - Uses standard `UIApplication.canOpenURL` probes to inventory installed sideload signers (Feather, ESign, SideStore, AltStore, GBox, Scarlet) and unsandboxed/bootstrap utilities (TrollStore, Filza, Sileo, etc.).
+#### 3.2 Two-Stage False-Positive Elimination
+1. **Apple System Filtering & Accurate 4-Channel Attribution**: Dual-layer path (`/System/Library/`, `/Applications/`) and platform-binary filtering eliminates Apple OS daemon noise, while `BetaReportsActive`, `get-task-allow`, and provisioning profile inspection accurately separate **`🍏 App Store`**, **`✈️ TestFlight`**, **`🏢 Enterprise`**, and **`🛠️ Sideloaded`** apps.
+2. **Cryptographic `App Groups` Gate ($O(1)$ Fast-Path)**: Parses both **Slot 5 (XML `0xfade7171`)** and **Slot 7 (ASN.1 DER `0xfade7172`)** in `LC_CODE_SIGNATURE` SuperBlobs (preventing dual-slot shadowing attacks). Because `containermanagerd` physically rejects requests from binaries lacking `com.apple.security.application-groups`, apps without App Groups or other threat indicators are fast-pathed as `Safe` in $O(1)$ time.
 
-#### 🔬 4-Layer Progressive Static Mach-O Pipeline
-1. **Layer 1 — Channel Classification & CSBlob Entitlement Gating**: Parses `LC_CODE_SIGNATURE` SuperBlobs in both XML (`0xfade7171`) and ASN.1 DER (`0xfade7172`) formats; apps without `com.apple.security.application-groups` are fast-pathed as `Safe` against `containermanagerd` escapes.
-2. **Layer 2 — Mach-O Binary, Symbol & Behavioral Tuple Analysis**: Scans main executables, `Frameworks/*.dylib`, and `PlugIns/*.appex` for `libsystem_containermanager.dylib`, `container_query_*`, `com.apple.containermanagerd` XPC strings, `fsgetpath` inode brute-forcing, and XOR-resistant behavioral tuples (`cryptid == 0 ∧ AppGroups ∧ dlopen/dlsym ∧ symlink/sandbox_extension_consume`).
-3. **Layer 3 — Escaping Symlink & Rogue Supervision Inspection**: Uses `lstat` + `readlink` (`O_NOFOLLOW`) to detect `Library/Caches` symlink traversals and unauthorized `CloudConfigurationDetails.plist` (`IsSupervised == true`).
-4. **Layer 4 — 4-Tier Risk Grading & Minimal Whitelist**: Classifies findings into **High Risk**, **Known Tool**, **Caution**, or **Safe**. By default, **only `WQGuard` itself is whitelisted**, ensuring third-party exploit utilities are never silently exempted unless explicitly added by the user.
+#### 3.3 Multi-Vector Detection & 4-Tier Verdict Matrix
+WQGuard combines exact symbol/XPC matching (`libsystem_containermanager.dylib`, `container_query_*`, `fsgetpath`), **XOR-resistant behavioral tuples** (`cryptid == 0 ∧ AppGroups ∧ dlopen/dlsym ∧ symlink/sandbox_extension_consume`), wallet `Bundle ID` impersonation checks, injected `Frameworks/*.dylib` auditing, private Photos TCC bypass detection (`PhotoLibraryServices`), and rogue supervision plist checks:
 
-#### 🌐 Firmware CVE Exposure Radar & 5-Client Brotli Shield Matrix (`CVE-2026-111497`)
+| Risk Tier | Trigger Criteria | Recommended Action |
+|---|---|---|
+| **🔴 High Risk** | `containermanagerd` escape symbols/XPC, `fsgetpath` inode brute-forcing, escaping container symlinks, rogue MDM supervision plist, private Photos TCC bypass, or wallet/app impersonation | **Do NOT launch — delete immediately**, remove provisioning profile, and reboot device to invalidate kernel sandbox tokens |
+| **🟡 Known Tool** | Matches user-enabled whitelist rules or recognized sideload signer utilities (e.g., WQGuard itself, Feather, SideStore, LocalDevVPN) | Verify the package was intentionally installed from its official source |
+| **🟠 Caution** | Sideloaded/enterprise app declaring shared `App Groups`, dynamic-loading behavioral tuples, third-party injected `Frameworks/*.dylib`, or persistent background modes | Inspect the detailed dylib & entitlement evidence card; retain only trusted mods |
+| **🟢 Safe** | Official App Store / TestFlight apps, or clean sideloaded apps free of sensitive entitlements, private symbols, and injected libraries | Complies with iOS sandbox boundaries |
+
+> **⚖️ Minimal Default Whitelist Principle**: Out of the box, **only `WQGuard` itself is whitelisted**. Third-party exploit or container utilities are never silently exempted unless explicitly whitelisted by the user in Settings.
+
+---
+
+### 4. 🌐 Firmware CVE Exposure Radar & 5-Client Brotli Shield Matrix (`CVE-2026-111497`)
+
 Evaluates **8 critical 2026 iOS CVEs** for devices remaining on iOS 26.x or iOS 27.0–27.2 and ships ready-to-import **Brotli Downgrade Shields** across all 5 major iOS MITM proxy clients to mitigate **`CVE-2026-111497` (`HTTP2Shell` `libbrotli` heap out-of-bounds write, CVSS 9.2)**:
 
 - Rewrites outgoing `Accept-Encoding` headers to `gzip, deflate` and enforces a **zero-body-decompression** (`requires-body=false` / `script-response-header`) HTTP response guard that drops unsolicited `Content-Encoding: br` streams with `HTTP 403` before reaching WebKit/`CFNetwork`.
@@ -222,7 +267,7 @@ Evaluates **8 critical 2026 iOS CVEs** for devices remaining on iOS 26.x or iOS 
 
 ---
 
-### 3. Quick Start & Building from Source
+### 5. 🚀 Quick Start & Building from Source
 
 #### Install Pre-Built IPA on iOS
 Download the latest unsigned `WQGuard_v1.2.0.ipa` from **[GitHub Releases](https://github.com/Kianuni/WQGuard/releases/latest)** and install via **Feather**, **SideStore**, **AltStore**, **Sideloadly**, **TrollStore**, or build directly from `WQGuard.xcodeproj` in Xcode.
