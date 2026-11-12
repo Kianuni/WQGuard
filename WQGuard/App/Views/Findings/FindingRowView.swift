@@ -42,6 +42,7 @@ public struct FindingRowView: View {
 
                 HStack(spacing: 6) {
                     InstallChannelBadge(channel: finding.installChannel)
+                    AuditDepthBadge(depth: finding.evidence.auditDepth)
                     if !finding.indicators.isEmpty {
                         Text(WQStrings.indicatorCountBadge(finding.indicators.count))
                             .font(.system(size: 10, weight: .bold))

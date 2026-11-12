@@ -86,13 +86,13 @@ public struct SettingsView: View {
                 HStack {
                     Text(WQStrings.settingsEngineVersion)
                     Spacer()
-                    Text("WQGuardCore v1.0.4").foregroundColor(.gray)
+                    Text("WQGuardCore v1.1.0").foregroundColor(.gray)
                 }
                 HStack {
                     Text(WQStrings.settingsAppBuild)
                     Spacer()
-                    let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
-                    let bld = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "5"
+                    let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1.0"
+                    let bld = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "6"
                     Text("\(ver) (Build \(bld))").foregroundColor(.gray)
                 }
                 HStack {

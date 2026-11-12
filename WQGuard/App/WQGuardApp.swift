@@ -18,11 +18,8 @@ struct WQGuardApp: App {
                 .environmentObject(viewModel)
                 .preferredColorScheme(.dark)
                 .onOpenURL { url in
-                    // Handle Share Sheet / Open-In from 全能签, ESign, Feather, Files, or AirDrop
-                    let ext = url.pathExtension.lowercased()
-                    if ext == "ipa" || ext == "tipa" || ext == "app" {
-                        viewModel.scanIPAPackage(at: url)
-                    }
+                    // Handle Share Sheet / Open-In for .ipa, .tipa, .mobiledevicepairing, .plist, .xml, .json
+                    viewModel.handleIncomingURL(url)
                 }
         }
     }

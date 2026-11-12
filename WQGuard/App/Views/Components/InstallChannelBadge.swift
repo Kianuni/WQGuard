@@ -25,3 +25,32 @@ public struct InstallChannelBadge: View {
             .clipShape(Capsule())
     }
 }
+
+public struct AuditDepthBadge: View {
+    public let depth: AuditDepth
+
+    public init(depth: AuditDepth) {
+        self.depth = depth
+    }
+
+    public var body: some View {
+        Text(WQStrings.auditDepthName(depth))
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(badgeColor.opacity(0.16))
+            .foregroundColor(badgeColor)
+            .clipShape(Capsule())
+    }
+
+    private var badgeColor: Color {
+        switch depth {
+        case .fullBinaryAndRegistry:
+            return .teal
+        case .registryEntitlements:
+            return .cyan
+        case .onDeviceProbe:
+            return .purple
+        }
+    }
+}

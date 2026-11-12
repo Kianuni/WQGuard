@@ -361,10 +361,18 @@ public final class IPAPackageScanner: @unchecked Sendable {
             if entry.isDirectory {
                 try FileManager.default.createDirectory(at: destURL, withIntermediateDirectories: true)
             } else {
-                // Filter: Extract only Mach-O binaries, dylibs, plists, mobileprovision, and receipts (skip bulky assets/images inside Frameworks)
+                // Filter: Skip bulky UI/media/localization assets while preserving all Mach-O executables (even if executable name contains dots), dylibs, plists, mobileprovision, and receipts
                 let ext = destURL.pathExtension.lowercased()
-                let isRelevant = ext == "plist" || ext == "mobileprovision" || ext == "dylib" ||
-                                 ext == "" || entry.path.contains("/_MASReceipt/") ||
+                let skippedAssetExtensions: Set<String> = [
+                    "png", "jpg", "jpeg", "gif", "webp", "heic", "ico", "bmp", "tiff",
+                    "car", "nib", "storyboardc", "strings", "stringsdict", "xcprivacy",
+                    "mp3", "mp4", "m4a", "wav", "caf", "aac", "mov",
+                    "ttf", "otf", "ttc", "woff", "woff2",
+                    "html", "css", "js", "svg", "pdf", "txt", "md",
+                    "mom", "omo", "metallib", "usdz", "scn"
+                ]
+                let isRelevant = !skippedAssetExtensions.contains(ext) ||
+                                 entry.path.contains("/_MASReceipt/") ||
                                  entry.path.contains("/StoreKit/")
                 
                 if isRelevant {

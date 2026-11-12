@@ -32,8 +32,9 @@ public enum WQStrings {
 
     // MARK: - Dashboard Overview
     public static var appTitle: String { localized("app_title", en: "WQGuard", zh: "WQGuard 容器守卫") }
-    public static var startSystemScan: String { localized("start_system_scan", en: "Scan Self-Signed Apps", zh: "一键扫描自签应用") }
-    public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "Scans sideloaded/self-signed apps & bound signing directories", zh: "扫描已绑定的签名工具目录与本机自签包") }
+    public static var startSystemScan: String { localized("start_system_scan", en: "Scan Installed Apps", zh: "一键扫描已安装应用") }
+    public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "installation_proxy Registry + On-Device Probe + Signer IPA Correlation", zh: "系统注册表权限审计 + 本机探针 + 签名目录二进制联动") }
+    public static var configureInstalledScanButton: String { localized("configure_installed_scan_btn", en: "Scan Sources & Pairing", zh: "配置已安装扫描源") }
     public static var bindSigningFolderButton: String { localized("bind_signing_folder_btn", en: "Bind Signer Folder", zh: "绑定签名工具目录") }
     public static var selectIPAFileButton: String { localized("select_ipa_file_btn", en: "Select .ipa Files", zh: "直接选择 .ipa 文件") }
     public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Select Signing Folder / Import IPAs", zh: "绑定自签工具目录 / 导入 IPA") }
@@ -131,6 +132,8 @@ public enum WQStrings {
         return localized("indicator_location_prefix", en: "Location: \(location)", zh: "位置: \(location)")
     }
     public static var staticAuditEvidenceHeader: String { localized("static_audit_evidence_header", en: "🔬 Static Audit Evidence Details", zh: "🔬 静态审计取证详情") }
+    public static var evidenceAuditDepth: String { localized("evidence_audit_depth", en: "Audit Depth", zh: "审计覆盖深度") }
+    public static var evidenceSignerIdentity: String { localized("evidence_signer_identity", en: "Code Signer Identity", zh: "签名证书身份") }
     public static var evidenceVersion: String { localized("evidence_version", en: "Version", zh: "版本号") }
     public static var evidenceTeamId: String { localized("evidence_team_id", en: "Developer Team ID", zh: "开发者团队 ID") }
     public static var evidenceTeamIdUnsigned: String { localized("evidence_team_id_unsigned", en: "None (Ad-hoc / Unsigned)", zh: "无 (Ad-hoc / 未签名)") }
@@ -421,6 +424,21 @@ public enum WQStrings {
         case .appStore:
             return localized("channel_appstore", en: "🍏 App Store", zh: "🍏 App Store")
         }
+    }
+
+    public static func auditDepthName(_ depth: AuditDepth) -> String {
+        switch depth {
+        case .fullBinaryAndRegistry:
+            return localized("depth_full", en: "🔬 Full Binary", zh: "🔬 全量深扫")
+        case .registryEntitlements:
+            return localized("depth_registry", en: "📋 Registry Audit", zh: "📋 系统注册表")
+        case .onDeviceProbe:
+            return localized("depth_probe", en: "📡 On-Device Probe", zh: "📡 本机探针")
+        }
+    }
+
+    public static func auditDepthFullDesc(_ depth: AuditDepth) -> String {
+        return isEnglish ? depth.localizedNameEn : depth.localizedNameZh
     }
 
     // Threat Indicators

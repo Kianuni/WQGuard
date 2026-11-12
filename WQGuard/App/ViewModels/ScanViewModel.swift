@@ -55,8 +55,31 @@ public final class ScanViewModel: ObservableObject {
 
     // Persistent Bookmarks for Self-Signed App Directories (Feather / SideStore / AltStore / Downloads)
     private static let bookmarkedDirsKey = "wqguard.bookmarked_sideload_dirs.v1"
+    private static let lockdownHostKey = "wqguard.lockdown_host.v1"
+    private static let includeAppStoreKey = "wqguard.include_appstore_registry.v1"
+    private static let enableProbeKey = "wqguard.enable_ondevice_probe.v1"
+    private static let snapshotNameKey = "wqguard.saved_snapshot_name.v1"
+
     @Published public var showSideloadPickerFromDashboard: Bool = false
+    @Published public var showInstalledScanConfigSheet: Bool = false
     @Published public var bookmarkedFolderNames: [String] = []
+
+    // Installed App Registry (Option 1) & On-Device Probe (Option 3) State
+    @Published public var hasPairingFile: Bool = false
+    @Published public var pairingHostIDSummary: String? = nil
+    @Published public var lockdownHost: String = "10.7.0.1" {
+        didSet { UserDefaults.standard.set(lockdownHost, forKey: Self.lockdownHostKey) }
+    }
+    @Published public var hasSavedSnapshot: Bool = false
+    @Published public var savedSnapshotAppCount: Int = 0
+    @Published public var savedSnapshotFilename: String? = nil
+    @Published public var includeAppStoreAppsInRegistry: Bool = false {
+        didSet { UserDefaults.standard.set(includeAppStoreAppsInRegistry, forKey: Self.includeAppStoreKey) }
+    }
+    @Published public var enableOnDeviceProbe: Bool = true {
+        didSet { UserDefaults.standard.set(enableOnDeviceProbe, forKey: Self.enableProbeKey) }
+    }
+    @Published public var lastScanEngineSummary: String? = nil
 
     // Alert & Error Handling
     @Published public var activeAlertMessage: String?
@@ -70,8 +93,197 @@ public final class ScanViewModel: ObservableObject {
         self.firmwareReport = FirmwarePostureEngine.shared.evaluate()
         self.whitelistedTools = WhitelistEngine.shared.allTools
         self.surgeModuleContent = SurgeBrotliShieldHelper.shared.generateModuleContent()
+        if let savedHost = UserDefaults.standard.string(forKey: Self.lockdownHostKey), !savedHost.isEmpty {
+            self.lockdownHost = savedHost
+        }
+        self.includeAppStoreAppsInRegistry = UserDefaults.standard.bool(forKey: Self.includeAppStoreKey)
+        if UserDefaults.standard.object(forKey: Self.enableProbeKey) != nil {
+            self.enableOnDeviceProbe = UserDefaults.standard.bool(forKey: Self.enableProbeKey)
+        }
         self.prepareSurgeExportURL()
         self.refreshBookmarkedFolderNames()
+        self.refreshRegistrySourceState()
+    }
+
+    private var appSupportDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let dir = base.appendingPathComponent("WQGuardRegistry", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private var savedPairingURL: URL {
+        appSupportDirectory.appendingPathComponent("active_device.mobiledevicepairing")
+    }
+
+    private var savedSnapshotURL: URL {
+        appSupportDirectory.appendingPathComponent("installed_apps_snapshot.dat")
+    }
+
+    private func loadActivePairingFile() -> LockdownPairingFile? {
+        guard FileManager.default.fileExists(atPath: savedPairingURL.path) else { return nil }
+        return try? LockdownPairingFile.parse(from: savedPairingURL)
+    }
+
+    private func loadSavedSnapshotData() -> Data? {
+        guard FileManager.default.fileExists(atPath: savedSnapshotURL.path) else { return nil }
+        return try? Data(contentsOf: savedSnapshotURL, options: .mappedIfSafe)
+    }
+
+    public func refreshRegistrySourceState() {
+        if let pairing = loadActivePairingFile() {
+            hasPairingFile = true
+            let prefix = String(pairing.hostID.prefix(8))
+            pairingHostIDSummary = pairing.udid.map { "UDID: \($0.prefix(10))… (Host: \(prefix)…)" } ?? "HostID: \(prefix)…"
+        } else {
+            hasPairingFile = false
+            pairingHostIDSummary = nil
+        }
+
+        if let snapData = loadSavedSnapshotData(),
+           let records = try? InstalledAppRegistryScanner.shared.parseSnapshotData(snapData) {
+            hasSavedSnapshot = true
+            savedSnapshotAppCount = records.count
+            savedSnapshotFilename = UserDefaults.standard.string(forKey: Self.snapshotNameKey) ?? "installed_apps.plist"
+        } else {
+            hasSavedSnapshot = false
+            savedSnapshotAppCount = 0
+            savedSnapshotFilename = nil
+        }
+    }
+
+    public var activeEngineCount: Int {
+        var count = 0
+        if hasPairingFile || hasSavedSnapshot { count += 1 }
+        if !bookmarkedFolderNames.isEmpty { count += 1 }
+        if enableOnDeviceProbe { count += 1 }
+        return count
+    }
+
+    public func importPairingFile(from url: URL) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+        do {
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let stem = url.deletingPathExtension().lastPathComponent
+            let pairing = try LockdownPairingFile.parse(data: data, fallbackUDID: stem)
+            try data.write(to: savedPairingURL, options: .atomic)
+            refreshRegistrySourceState()
+            lastScanEngineSummary = "已导入配对文件 (\(pairing.hostID.prefix(8))…)"
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            #endif
+        } catch {
+            activeAlertMessage = error.localizedDescription
+            showGlobalAlert = true
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            #endif
+        }
+    }
+
+    public func clearPairingFile() {
+        try? FileManager.default.removeItem(at: savedPairingURL)
+        refreshRegistrySourceState()
+    }
+
+    public func importRegistrySnapshot(from url: URL, autoScan: Bool = true) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+        do {
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(data)
+            try data.write(to: savedSnapshotURL, options: .atomic)
+            UserDefaults.standard.set(url.lastPathComponent, forKey: Self.snapshotNameKey)
+            refreshRegistrySourceState()
+            lastScanEngineSummary = "已导入注册表快照（共 \(records.count) 款已安装应用）"
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            #endif
+            if autoScan {
+                showInstalledScanConfigSheet = false
+                startSystemScan()
+            }
+        } catch {
+            activeAlertMessage = error.localizedDescription
+            showGlobalAlert = true
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            #endif
+        }
+    }
+
+    public func clearSavedSnapshot() {
+        try? FileManager.default.removeItem(at: savedSnapshotURL)
+        UserDefaults.standard.removeObject(forKey: Self.snapshotNameKey)
+        refreshRegistrySourceState()
+    }
+
+    public func clearBoundSigningFolders() {
+        UserDefaults.standard.removeObject(forKey: Self.bookmarkedDirsKey)
+        refreshBookmarkedFolderNames()
+    }
+
+    public func handleIncomingURL(_ url: URL) {
+        let ext = url.pathExtension.lowercased()
+        if ext == "mobiledevicepairing" {
+            importPairingFile(from: url)
+            startSystemScan()
+        } else if ext == "plist" || ext == "xml" || ext == "json" {
+            let accessed = url.startAccessingSecurityScopedResource()
+            let rawData = try? Data(contentsOf: url, options: .mappedIfSafe)
+            if accessed { url.stopAccessingSecurityScopedResource() }
+
+            if let data = rawData, (try? LockdownPairingFile.parse(data: data)) != nil {
+                importPairingFile(from: url)
+                startSystemScan()
+            } else {
+                importRegistrySnapshot(from: url, autoScan: true)
+            }
+        } else if ext == "ipa" || ext == "tipa" || ext == "app" {
+            scanIPAPackage(at: url)
+        }
+    }
+
+    public func testLiveLockdownConnectionAndScan() {
+        guard let pairing = loadActivePairingFile() else {
+            activeAlertMessage = "请先导入配对文件 (.mobiledevicepairing)。"
+            showGlobalAlert = true
+            return
+        }
+        guard !isScanning else { return }
+        showInstalledScanConfigSheet = false
+        isScanning = true
+        let host = lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "10.7.0.1" : lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        scanProgress = ScanProgress(currentTarget: "正在通过 LocalDevVPN (\(host)) 连接 installation_proxy...", completedCount: 0, totalCount: 1)
+
+        activeScanTask = Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let liveRecords = try await LockdownInstProxyClient.shared.fetchInstalledApps(
+                    pairing: pairing,
+                    preferredHost: host
+                )
+                // Cache live records as latest snapshot so offline re-audits remain instant!
+                if let encoded = try? JSONEncoder().encode(liveRecords) {
+                    _ = encoded // Keep strongly typed evaluation
+                }
+                self.isScanning = false
+                self.scanProgress = nil
+                self.runUnifiedScanWithPreloadedRegistry(liveRecords, liveConnected: true)
+            } catch {
+                self.isScanning = false
+                self.scanProgress = nil
+                self.activeAlertMessage = error.localizedDescription
+                self.showGlobalAlert = true
+                #if os(iOS)
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                #endif
+            }
+        }
     }
 
     private func saveDirectoryBookmarkData(_ data: Data) {
@@ -139,12 +351,17 @@ public final class ScanViewModel: ObservableObject {
     public var safeCount: Int { currentSession?.riskBreakdown[.safe, default: 0] ?? 0 }
     public var totalScannedCount: Int { currentSession?.totalApps ?? 0 }
 
-    // MARK: - Self-Signed Application Scan Actions
+    // MARK: - Unified Installed Application Scan Actions (Registry + Signer Folder + On-Device Probe)
     public func startSystemScan() {
         guard !isScanning else { return }
         isScanning = true
         scanProgress = ScanProgress(currentTarget: WQStrings.scanEngineInitializing, completedCount: 0, totalCount: 0)
         let savedDirs = resolveBookmarkedDirectories()
+        let pairing = loadActivePairingFile()
+        let snapData = loadSavedSnapshotData()
+        let host = lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "10.7.0.1" : lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let includeStore = includeAppStoreAppsInRegistry
+        let probeEnabled = enableOnDeviceProbe
 
         activeScanTask = Task { [weak self] in
             guard let self = self else { return }
@@ -157,7 +374,14 @@ public final class ScanViewModel: ObservableObject {
             }
 
             do {
-                let findings = try await SecurityPipeline.shared.scanInstalledAppsAsync(additionalLocations: savedDirs) { [weak self] progress in
+                let unified = try await SecurityPipeline.shared.scanUnifiedInstalledAppsAsync(
+                    pairingFile: pairing,
+                    preferredLockdownHost: host,
+                    savedSnapshotData: snapData,
+                    additionalLocations: savedDirs,
+                    includeAppStoreApps: includeStore,
+                    enableOnDeviceProbe: probeEnabled
+                ) { [weak self] progress in
                     guard let strongSelf = self else { return }
                     Task { @MainActor in
                         strongSelf.scanProgress = progress
@@ -165,21 +389,23 @@ public final class ScanViewModel: ObservableObject {
                 }
 
                 let duration = Date().timeIntervalSince(startTime)
-                guard !findings.isEmpty else {
+                guard !unified.findings.isEmpty else {
                     self.isScanning = false
                     self.scanProgress = nil
                     try? await Task.sleep(nanoseconds: 150_000_000)
-                    self.showSideloadPickerFromDashboard = true
+                    self.showInstalledScanConfigSheet = true
                     return
                 }
+
                 let session = ScanSession(
-                    findings: findings,
+                    findings: unified.findings,
                     systemVersion: FirmwarePostureEngine.shared.evaluate().osVersion.displayString,
                     scanDuration: duration
                 )
 
                 self.currentSession = session
                 self.installedAppsCount = session.totalApps
+                self.lastScanEngineSummary = Self.formatEngineSummary(unified)
                 self.isScanning = false
                 self.scanProgress = nil
                 self.updateExportedReport()
@@ -187,11 +413,10 @@ public final class ScanViewModel: ObservableObject {
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 #endif
             } catch is SecurityPipelineError {
-                // On standard sandboxed sideload with no bound signing folder yet, cleanly open picker after UI settles
                 self.isScanning = false
                 self.scanProgress = nil
                 try? await Task.sleep(nanoseconds: 150_000_000)
-                self.showSideloadPickerFromDashboard = true
+                self.showInstalledScanConfigSheet = true
             } catch {
                 if Task.isCancelled {
                     self.isScanning = false
@@ -207,6 +432,82 @@ public final class ScanViewModel: ObservableObject {
                 #endif
             }
         }
+    }
+
+    private func runUnifiedScanWithPreloadedRegistry(_ liveRecords: [InstalledAppRegistryRecord], liveConnected: Bool) {
+        guard !isScanning else { return }
+        isScanning = true
+        let savedDirs = resolveBookmarkedDirectories()
+        let includeStore = includeAppStoreAppsInRegistry
+        let probeEnabled = enableOnDeviceProbe
+
+        activeScanTask = Task { [weak self] in
+            guard let self = self else { return }
+            let startTime = Date()
+            let scopedBookmarks = savedDirs.map { ($0, $0.startAccessingSecurityScopedResource()) }
+            defer {
+                for (u, accessed) in scopedBookmarks where accessed {
+                    u.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            let pkgFindings = (try? await SecurityPipeline.shared.scanInstalledAppsAsync(additionalLocations: savedDirs) { [weak self] progress in
+                Task { @MainActor in self?.scanProgress = progress }
+            }) ?? []
+
+            let probeFindings = probeEnabled ? await OnDeviceAppProbeScanner.shared.probeInstalledAppsAsync() : []
+            let merged = SecurityPipeline.shared.correlateAndMergeFindings(
+                registryRecords: liveRecords,
+                packageFindings: pkgFindings,
+                probeFindings: probeFindings,
+                includeAppStoreApps: includeStore
+            )
+
+            let duration = Date().timeIntervalSince(startTime)
+            let session = ScanSession(
+                findings: merged.findings,
+                systemVersion: FirmwarePostureEngine.shared.evaluate().osVersion.displayString,
+                scanDuration: duration
+            )
+
+            let summaryResult = SecurityPipeline.UnifiedInstalledScanResult(
+                findings: merged.findings,
+                liveRegistryConnected: liveConnected,
+                registryEvaluatedCount: merged.registryCount,
+                correlatedBinaryCount: merged.correlatedCount,
+                probeDetectedCount: merged.probeCount,
+                statusNotice: "已直连读取全机 \(liveRecords.count) 款应用注册表"
+            )
+
+            self.currentSession = session
+            self.installedAppsCount = session.totalApps
+            self.lastScanEngineSummary = Self.formatEngineSummary(summaryResult)
+            self.isScanning = false
+            self.scanProgress = nil
+            self.updateExportedReport()
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            #endif
+        }
+    }
+
+    private static func formatEngineSummary(_ res: SecurityPipeline.UnifiedInstalledScanResult) -> String {
+        var parts: [String] = []
+        if res.liveRegistryConnected {
+            parts.append("🟢 配对直连注册表: \(res.registryEvaluatedCount) 款")
+        } else if res.registryEvaluatedCount > 0 {
+            parts.append("📋 注册表快照: \(res.registryEvaluatedCount) 款")
+        }
+        if res.correlatedBinaryCount > 0 {
+            parts.append("🔬 源包二进制深扫联动: \(res.correlatedBinaryCount) 款")
+        }
+        if res.probeDetectedCount > 0 {
+            parts.append("📡 本机探针: \(res.probeDetectedCount) 款")
+        }
+        if parts.isEmpty {
+            return "📦 本地源包深扫: \(res.findings.count) 款"
+        }
+        return parts.joined(separator: " · ")
     }
 
     public func cancelScan() {

@@ -17,9 +17,25 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.4</string>
+	<string>1.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>6</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>esign</string>
+		<string>feather</string>
+		<string>sidestore</string>
+		<string>altstore</string>
+		<string>gbox</string>
+		<string>scarlet</string>
+		<string>stikdebug</string>
+		<string>stikjit</string>
+		<string>trollstore</string>
+		<string>filza</string>
+		<string>santander</string>
+		<string>sileo</string>
+		<string>zbra</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
@@ -60,6 +76,10 @@
 				<string>com.apple.itunes.ipa</string>
 				<string>public.archive</string>
 				<string>com.pkware.zip-archive</string>
+				<string>com.apple.property-list</string>
+				<string>public.json</string>
+				<string>public.xml</string>
+				<string>public.data</string>
 			</array>
 		</dict>
 	</array>

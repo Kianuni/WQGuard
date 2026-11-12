@@ -75,6 +75,38 @@ public struct DashboardView: View {
                             .shadow(color: Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.35), radius: 8, y: 4)
                         }
 
+                        Button(action: {
+                            #if os(iOS)
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            #endif
+                            vm.showInstalledScanConfigSheet = true
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "slider.horizontal.below.square.and.square.filled")
+                                    .font(.subheadline)
+                                Text(WQStrings.configureInstalledScanButton)
+                                    .font(.footnote.bold())
+                                Spacer()
+                                Text("已启用 \(vm.activeEngineCount)/3 引擎")
+                                    .font(.caption2.bold())
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Color.cyan.opacity(0.2))
+                                    .foregroundColor(.cyan)
+                                    .clipShape(Capsule())
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(Color(red: 0.11, green: 0.14, blue: 0.20))
+                            .foregroundColor(.cyan)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color.cyan.opacity(0.35), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                        }
+
                         HStack(spacing: 10) {
                             Button(action: {
                                 #if os(iOS)
@@ -123,7 +155,12 @@ public struct DashboardView: View {
                             }
                         }
 
-                        if !vm.bookmarkedFolderNames.isEmpty {
+                        if let engineSummary = vm.lastScanEngineSummary {
+                            Text(engineSummary)
+                                .font(.caption2)
+                                .foregroundColor(.cyan)
+                                .lineLimit(1)
+                        } else if !vm.bookmarkedFolderNames.isEmpty {
                             Text("已绑定目录: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
                                 .font(.caption2)
                                 .foregroundColor(.gray)
@@ -209,6 +246,9 @@ public struct DashboardView: View {
         .navigationTitle(WQStrings.appTitle)
         .sheet(isPresented: $showExportSheet) {
             ReportExportView()
+        }
+        .sheet(isPresented: $vm.showInstalledScanConfigSheet) {
+            InstalledScanConfigSheet()
         }
         .onChange(of: vm.showSideloadPickerFromDashboard) { newValue in
             if newValue {

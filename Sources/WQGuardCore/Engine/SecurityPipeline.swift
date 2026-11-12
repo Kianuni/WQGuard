@@ -358,6 +358,285 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
     public func scanIPA(at url: URL) throws -> ScanFinding {
         return try ipaScanner.scan(ipaURL: url)
     }
+
+    /// Scans an `installation_proxy` snapshot file (`.plist`, `.xml`, or `.json`).
+    public func scanRegistrySnapshot(at url: URL, includeAppStoreApps: Bool = false) throws -> [ScanFinding] {
+        let records = try InstalledAppRegistryScanner.shared.parseSnapshotFile(at: url)
+        return InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: includeAppStoreApps)
+    }
+
+    /// Summary metadata returned by unified multi-engine installed application scans.
+    public struct UnifiedInstalledScanResult: Sendable, Equatable {
+        public let findings: [ScanFinding]
+        public let liveRegistryConnected: Bool
+        public let registryEvaluatedCount: Int
+        public let correlatedBinaryCount: Int
+        public let probeDetectedCount: Int
+        public let statusNotice: String?
+
+        public init(
+            findings: [ScanFinding],
+            liveRegistryConnected: Bool,
+            registryEvaluatedCount: Int,
+            correlatedBinaryCount: Int,
+            probeDetectedCount: Int,
+            statusNotice: String? = nil
+        ) {
+            self.findings = findings
+            self.liveRegistryConnected = liveRegistryConnected
+            self.registryEvaluatedCount = registryEvaluatedCount
+            self.correlatedBinaryCount = correlatedBinaryCount
+            self.probeDetectedCount = probeDetectedCount
+            self.statusNotice = statusNotice
+        }
+    }
+
+    /// Correlates and deduplicates findings across:
+    /// 1) `installation_proxy` system registry records (Option 1),
+    /// 2) Local `.ipa` / `.app` packages from bound signing directories (Option 2),
+    /// 3) On-device URL-scheme probes (Option 3).
+    public func correlateAndMergeFindings(
+        registryRecords: [InstalledAppRegistryRecord],
+        packageFindings: [ScanFinding],
+        probeFindings: [ScanFinding] = [],
+        includeAppStoreApps: Bool = false
+    ) -> (findings: [ScanFinding], registryCount: Int, correlatedCount: Int, probeCount: Int) {
+        let registryFindings = InstalledAppRegistryScanner.shared.evaluateRecords(
+            registryRecords,
+            includeAppStoreApps: includeAppStoreApps
+        )
+
+        var remainingPackages = packageFindings
+        var mergedResults: [ScanFinding] = []
+        var correlatedCount = 0
+
+        func findMatchingPackageIndex(for reg: ScanFinding) -> Int? {
+            if let exactIdx = remainingPackages.firstIndex(where: { $0.bundleId.caseInsensitiveCompare(reg.bundleId) == .orderedSame }) {
+                return exactIdx
+            }
+            // Handle sideloaders appending personal Team/UDID suffix to original IPA bundleId (e.g. `com.foo.app` -> `com.foo.app.XYZ123`)
+            return remainingPackages.firstIndex { pkg in
+                let regLower = reg.bundleId.lowercased()
+                let pkgLower = pkg.bundleId.lowercased()
+                let prefixMatch = regLower.hasPrefix(pkgLower + ".") || pkgLower.hasPrefix(regLower + ".")
+                let nameMatch = reg.displayName.caseInsensitiveCompare(pkg.displayName) == .orderedSame
+                return prefixMatch && nameMatch
+            }
+        }
+
+        for reg in registryFindings {
+            if let pkgIdx = findMatchingPackageIndex(for: reg) {
+                let pkg = remainingPackages.remove(at: pkgIdx)
+                correlatedCount += 1
+                mergedResults.append(mergeRegistryAndPackageFinding(registry: reg, package: pkg))
+            } else {
+                mergedResults.append(reg)
+            }
+        }
+
+        // Append remaining local signer packages (not yet installed or when registry snapshot was not loaded)
+        mergedResults.append(contentsOf: remainingPackages)
+
+        // Append on-device probe findings if not already covered by Registry or Package findings
+        var addedProbes = 0
+        for probe in probeFindings {
+            let alreadyCovered = mergedResults.contains { existing in
+                let exLower = existing.bundleId.lowercased()
+                let prLower = probe.bundleId.lowercased()
+                return exLower == prLower
+                    || exLower.hasPrefix(prLower + ".")
+                    || existing.displayName.caseInsensitiveCompare(probe.displayName) == .orderedSame
+            }
+            if !alreadyCovered {
+                mergedResults.append(probe)
+                addedProbes += 1
+            }
+        }
+
+        return (mergedResults, registryFindings.count, correlatedCount, addedProbes)
+    }
+
+    private func mergeRegistryAndPackageFinding(registry: ScanFinding, package: ScanFinding) -> ScanFinding {
+        var combinedIndicators = package.indicators
+        var seenIndKeys = Set(combinedIndicators.map { "\($0.category)|\($0.signature)" })
+
+        for ind in registry.indicators {
+            // Skip generic registry App Group caution if binary scan already evaluated full Layer 2 Mach-O
+            if ind.signature == "com.apple.security.application-groups" && ind.severity == .caution {
+                continue
+            }
+            let key = "\(ind.category)|\(ind.signature)"
+            if seenIndKeys.insert(key).inserted {
+                combinedIndicators.append(ind)
+            }
+        }
+
+        let mergedAppGroups = Array(Set(registry.evidence.appGroups).union(package.evidence.appGroups)).sorted()
+        let mergedSymbols = Array(Set(registry.evidence.matchedSymbols).union(package.evidence.matchedSymbols)).sorted()
+        let effectiveTeamId = registry.teamId ?? package.teamId
+
+        var provisionalRisk: RiskTier = .safe
+        if combinedIndicators.contains(where: { $0.severity == .highRisk }) {
+            provisionalRisk = .highRisk
+        } else if combinedIndicators.contains(where: { $0.severity == .caution }) {
+            provisionalRisk = .caution
+        }
+
+        let wl = whitelistEngine.isWhitelisted(
+            bundleId: registry.bundleId,
+            appGroups: mergedAppGroups,
+            matchedSignatures: mergedSymbols,
+            teamId: effectiveTeamId
+        )
+        let finalRisk: RiskTier = wl.isWhitelisted ? .knownTool : provisionalRisk
+
+        let pkgFileName = (package.bundlePath as NSString).lastPathComponent
+        let mergedPath = "\(registry.bundlePath) [已关联源包: \(pkgFileName)]"
+
+        let mergedEvidence = AuditEvidence(
+            matchedSymbols: mergedSymbols,
+            linkedDylibs: package.evidence.linkedDylibs,
+            hasAppGroups: !mergedAppGroups.isEmpty,
+            appGroups: mergedAppGroups,
+            installChannel: registry.installChannel,
+            cryptid: package.evidence.cryptid,
+            isFairPlayEncrypted: package.evidence.isFairPlayEncrypted,
+            escapingSymlinks: package.evidence.escapingSymlinks,
+            dynamicLoadingPresent: package.evidence.dynamicLoadingPresent,
+            pathEnumerationPresent: package.evidence.pathEnumerationPresent,
+            remediationGuidance: package.evidence.remediationGuidance,
+            auditDepth: .fullBinaryAndRegistry,
+            signerIdentity: registry.evidence.signerIdentity ?? package.evidence.signerIdentity
+        )
+
+        return ScanFinding(
+            bundleId: registry.bundleId,
+            displayName: registry.displayName,
+            version: registry.version,
+            teamId: effectiveTeamId,
+            executablePath: package.executablePath,
+            bundlePath: mergedPath,
+            installChannel: registry.installChannel,
+            riskTier: finalRisk,
+            isWhitelisted: wl.isWhitelisted,
+            whitelistedToolName: wl.toolName,
+            indicators: combinedIndicators,
+            evidence: mergedEvidence,
+            scanTimestamp: Date()
+        )
+    }
+
+    /// Unified asynchronous installed-app scan combining:
+    /// - Option 1A: Live `lockdownd` / `installation_proxy` over LocalDevVPN (if `pairingFile` provided)
+    /// - Option 1B: Saved/imported `installation_proxy` snapshot data (fallback or offline mode)
+    /// - Option 2: Bound signing tool directories (`全能签` / `Feather` / `SideStore`) & `Documents`
+    /// - Option 3: On-device URL-scheme probe catalog (`OnDeviceAppProbeScanner`)
+    public func scanUnifiedInstalledAppsAsync(
+        pairingFile: LockdownPairingFile? = nil,
+        preferredLockdownHost: String = "10.7.0.1",
+        savedSnapshotData: Data? = nil,
+        additionalLocations: [URL] = [],
+        includeAppStoreApps: Bool = false,
+        enableOnDeviceProbe: Bool = true,
+        progressHandler: (@Sendable (ScanProgress) -> Void)? = nil
+    ) async throws -> UnifiedInstalledScanResult {
+        var registryRecords: [InstalledAppRegistryRecord] = []
+        var liveConnected = false
+        var notices: [String] = []
+
+        // Engine 1A: Live Lockdown installation_proxy via LocalDevVPN
+        if let pairing = pairingFile {
+            progressHandler?(ScanProgress(
+                currentTarget: "正在连接本机 installation_proxy 系统注册表...",
+                completedCount: 0,
+                totalCount: 1
+            ))
+            do {
+                registryRecords = try await LockdownInstProxyClient.shared.fetchInstalledApps(
+                    pairing: pairing,
+                    preferredHost: preferredLockdownHost
+                )
+                liveConnected = true
+                notices.append("已通过配对直连读取全机 \(registryRecords.count) 款应用注册表")
+            } catch {
+                notices.append("配对直连未就绪（请确认已开启 LocalDevVPN），已自动切换至快照/本地引擎")
+            }
+        }
+
+        // Engine 1B: Fallback to imported/saved snapshot data if live connection wasn't active
+        if registryRecords.isEmpty, let snapData = savedSnapshotData,
+           let parsed = try? InstalledAppRegistryScanner.shared.parseSnapshotData(snapData) {
+            registryRecords = parsed
+            notices.append("已加载已安装应用快照（共 \(parsed.count) 款应用记录）")
+        }
+
+        // Engine 2: Bound Signer Directories & Local Packages
+        let packageFindings: [ScanFinding] = try await Task.detached(priority: .userInitiated) { [self] in
+            let discovery = self.discoverAccessibleTargets(additionalLocations: additionalLocations)
+            let urls = discovery.targets
+            guard !urls.isEmpty else { return [] }
+
+            var items: [ScanFinding] = []
+            let total = urls.count
+            var completed = 0
+            for url in urls {
+                try Task.checkCancellation()
+                progressHandler?(ScanProgress(
+                    currentTarget: url.lastPathComponent,
+                    completedCount: completed,
+                    totalCount: total
+                ))
+                let ext = url.pathExtension.lowercased()
+                let f: ScanFinding?
+                if ext == "ipa" || ext == "tipa" {
+                    f = try? self.scanIPA(at: url)
+                } else {
+                    f = try? self.scanBundle(at: url)
+                }
+                if let valid = f {
+                    items.append(valid)
+                }
+                completed += 1
+                progressHandler?(ScanProgress(
+                    currentTarget: url.lastPathComponent,
+                    completedCount: completed,
+                    totalCount: total,
+                    currentFinding: f
+                ))
+            }
+            return items
+        }.value
+
+        // Engine 3: On-Device URL Scheme Probe
+        let probeFindings: [ScanFinding]
+        if enableOnDeviceProbe {
+            probeFindings = await OnDeviceAppProbeScanner.shared.probeInstalledAppsAsync()
+        } else {
+            probeFindings = []
+        }
+
+        let merged = correlateAndMergeFindings(
+            registryRecords: registryRecords,
+            packageFindings: packageFindings,
+            probeFindings: probeFindings,
+            includeAppStoreApps: includeAppStoreApps
+        )
+
+        #if os(iOS)
+        if merged.findings.isEmpty {
+            throw SecurityPipelineError.sandboxRestrictedNoAccessibleTargets
+        }
+        #endif
+
+        return UnifiedInstalledScanResult(
+            findings: merged.findings,
+            liveRegistryConnected: liveConnected,
+            registryEvaluatedCount: merged.registryCount,
+            correlatedBinaryCount: merged.correlatedCount,
+            probeDetectedCount: merged.probeCount,
+            statusNotice: notices.isEmpty ? nil : notices.joined(separator: " · ")
+        )
+    }
     
     /// Discovers readable self-signed/sideloaded `.app` bundles and `.ipa`/`.app` packages in Documents & bookmarked signing folders.
     private func discoverAccessibleTargets(additionalLocations: [URL] = []) -> (targets: [URL], permissionDeniedCount: Int) {

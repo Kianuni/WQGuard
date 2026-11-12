@@ -42,6 +42,7 @@ public struct FindingDetailView: View {
                     HStack(spacing: 8) {
                         RiskBadge(tier: finding.riskTier)
                         InstallChannelBadge(channel: finding.installChannel)
+                        AuditDepthBadge(depth: finding.evidence.auditDepth)
                         if finding.isWhitelisted {
                             Text(WQStrings.whitelistedBadge)
                                 .font(.caption.bold())
@@ -115,6 +116,10 @@ public struct FindingDetailView: View {
                         .padding(.horizontal)
 
                     VStack(alignment: .leading, spacing: 12) {
+                        EvidenceRow(label: WQStrings.evidenceAuditDepth, value: WQStrings.auditDepthFullDesc(finding.evidence.auditDepth))
+                        if let signer = finding.evidence.signerIdentity, !signer.isEmpty {
+                            EvidenceRow(label: WQStrings.evidenceSignerIdentity, value: signer)
+                        }
                         EvidenceRow(label: WQStrings.evidenceVersion, value: finding.version)
                         EvidenceRow(label: WQStrings.evidenceTeamId, value: finding.teamId ?? WQStrings.evidenceTeamIdUnsigned)
                         EvidenceRow(label: WQStrings.evidenceDrmStatus, value: finding.evidence.isFairPlayEncrypted ? WQStrings.evidenceDrmEncrypted : WQStrings.evidenceDrmUnencrypted)

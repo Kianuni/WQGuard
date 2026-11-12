@@ -334,6 +334,11 @@ WQGuard 采用分层解耦的渐进式检测引擎：
   - **前置留意 (CAUTION)**：侧载应用声明了 App Group 且具备动态调用能力、内嵌未确认版本的 `libbrotli`、或发现内嵌调试挂钩 dylib。
   - **安全合规 (SAFE)**：未声明共享权限或经检测完全合规的应用。
 
+#### v1.1.0 三引擎「已安装应用」无漏洞全面审计架构：
+- **引擎 1（`installation_proxy` 系统注册表审计）**：支持导入 `.mobiledevicepairing` 配对文件配合 LocalDevVPN（`10.7.0.1`）在手机本机直连 `lockdownd` / `com.apple.mobile.installation_proxy`，或离线导入 `.plist` / `.xml` / `.json` 注册表快照，读取全机所有已安装应用的完整 `Entitlements`、共享容器、TCC 隐私绕过权限、签名证书链与钱包/IM 仿冒特征。
+- **引擎 2（签名器源包自动关联深扫）**：绑定全能签、Feather、SideStore 等目录后，按 `Bundle ID` 自动关联本地 `.ipa` 源包，补齐 Mach-O 私有符号与 `Frameworks/*.dylib` 注入库字节级深扫。
+- **引擎 3（本机零配置在位探针）**：基于标准 `canOpenURL` 探针清单盘点本机已安装的侧载签名工具与高权限环境组件（如 Filza、TrollStore、Sileo 等），并在报告中以 `AuditDepth` 徽章透明标注每款应用的审计深度。
+
 ---
 
 ### 3. Surge Brotli 降级护盾 (`Surge/WQGuard-Brotli-Shield.sgmodule`)
