@@ -716,12 +716,18 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         func scanUserDirectory(_ dirURL: URL) {
             var isDir: ObjCBool = false
             let ext = dirURL.pathExtension.lowercased()
-            if ext == "ipa" || ext == "app" {
+            if ext == "ipa" || ext == "tipa" || ext == "app" {
                 appendUnique(dirURL, requireSelfSignedCheck: false)
                 return
             }
-            guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue,
-                  let enumerator = fm.enumerator(at: dirURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else {
+                return
+            }
+            if fm.fileExists(atPath: dirURL.appendingPathComponent("Info.plist").path) {
+                appendUnique(dirURL, requireSelfSignedCheck: false)
+                return
+            }
+            guard let enumerator = fm.enumerator(at: dirURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
                 return
             }
             while let fileURL = enumerator.nextObject() as? URL {

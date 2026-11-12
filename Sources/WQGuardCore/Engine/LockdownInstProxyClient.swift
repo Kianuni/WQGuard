@@ -74,14 +74,25 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
     }
 
     public static func parse(data: Data, fallbackUDID: String? = nil) throws -> LockdownPairingFile {
-        guard let plist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] else {
+        guard let outerPlist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] else {
             throw LockdownClientError.invalidPairingFile("不是有效的 XML/Binary Plist 文件")
         }
 
-        guard let hostID = plist["HostID"] as? String, !hostID.isEmpty else {
-            throw LockdownClientError.invalidPairingFile("缺少 HostID")
+        // Support both direct pairing plists and usbmuxd `{"PairRecord": {...}}` wrappers
+        let plist: [String: Any]
+        if let nested = outerPlist["PairRecord"] as? [String: Any] {
+            plist = nested
+        } else if let nested = outerPlist["PairRecordData"] as? Data,
+                  let decodedNested = (try? PropertyListSerialization.propertyList(from: nested, options: [], format: nil)) as? [String: Any] {
+            plist = decodedNested
+        } else {
+            plist = outerPlist
         }
-        guard let systemBUID = plist["SystemBUID"] as? String, !systemBUID.isEmpty else {
+
+        guard let hostID = (plist["HostID"] as? String) ?? (plist["HostId"] as? String), !hostID.isEmpty else {
+            throw LockdownClientError.invalidPairingFile("缺少 HostID（确认导入的是配对文件而非普通配置 plist）")
+        }
+        guard let systemBUID = (plist["SystemBUID"] as? String) ?? (plist["SystemBuid"] as? String), !systemBUID.isEmpty else {
             throw LockdownClientError.invalidPairingFile("缺少 SystemBUID")
         }
         guard let hostCertRaw = Self.extractDataField(plist["HostCertificate"]),
@@ -95,7 +106,7 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
 
         let rootDER = Self.extractDataField(plist["RootCertificate"]).flatMap { Self.decodePEMOrDER($0) }
         let devDER = Self.extractDataField(plist["DeviceCertificate"]).flatMap { Self.decodePEMOrDER($0) }
-        let udid = (plist["UDID"] as? String) ?? fallbackUDID
+        let udid = (plist["UDID"] as? String) ?? (outerPlist["UDID"] as? String) ?? fallbackUDID
 
         return LockdownPairingFile(
             hostID: hostID,
@@ -116,7 +127,9 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
 
     public static func decodePEMOrDER(_ raw: Data) -> Data? {
         guard !raw.isEmpty else { return nil }
-        if let text = String(data: raw, encoding: .utf8), text.contains("-----BEGIN") {
+        let trimmedRaw: Data = raw.last == 0 ? Data(raw.dropLast()) : raw
+        let text = String(decoding: trimmedRaw, as: UTF8.self)
+        if text.contains("-----BEGIN") {
             let lines = text.components(separatedBy: .newlines).filter { line in
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 return !trimmed.isEmpty && !trimmed.hasPrefix("-----BEGIN") && !trimmed.hasPrefix("-----END")
@@ -125,10 +138,10 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
             return Data(base64Encoded: base64Body, options: .ignoreUnknownCharacters)
         }
         // Raw DER ASN.1 SEQUENCE starts with 0x30
-        if raw.first == 0x30 {
-            return raw
+        if trimmedRaw.first == 0x30 {
+            return trimmedRaw
         }
-        return Data(base64Encoded: raw, options: .ignoreUnknownCharacters)
+        return Data(base64Encoded: trimmedRaw, options: .ignoreUnknownCharacters)
     }
 
     /// Strips PKCS#8 PrivateKeyInfo wrapper around an inner PKCS#1 RSAPrivateKey if present,
@@ -189,9 +202,10 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
     ) async throws -> [InstalledAppRegistryRecord] {
         return try await Task.detached(priority: .userInitiated) { [self] in
             let tlsOptions = try self.createTLSOptions(from: pairing)
-            let candidateHosts = preferredHost == "127.0.0.1"
-                ? ["127.0.0.1", "10.7.0.1"]
-                : [preferredHost, "127.0.0.1"]
+            var candidateHosts: [String] = []
+            for h in [preferredHost, "10.7.0.1", "10.7.0.2", "127.0.0.1"] where !h.isEmpty && !candidateHosts.contains(h) {
+                candidateHosts.append(h)
+            }
 
             var connectedFD: Int32 = -1
             var activeHost = preferredHost
@@ -388,29 +402,52 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         sec_protocol_options_set_local_identity(secOpts, nwIdentity)
         sec_protocol_options_set_min_tls_protocol_version(secOpts, .TLSv12)
 
-        let anchorCerts: [SecCertificate] = [pairing.rootCertificateDER, pairing.deviceCertificateDER]
+        let expectedDeviceDER = pairing.deviceCertificateDER
+        let expectedRootDER = pairing.rootCertificateDER
+        let anchorCerts: [SecCertificate] = [expectedRootDER, expectedDeviceDER]
             .compactMap { $0 }
             .compactMap { SecCertificateCreateWithData(nil, $0 as CFData) }
 
         let verifyQueue = DispatchQueue(label: "com.wqguard.lockdown.tlsverify")
         sec_protocol_options_set_verify_block(secOpts, { _, trust, completion in
             let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-            let x509Policy = SecPolicyCreateBasicX509()
-            SecTrustSetPolicies(secTrust, x509Policy)
+
+            // Pin directly against the pairing file's DeviceCertificate / RootCertificate DER bytes
+            // because `lockdownd` generates long-lived device certificates that omit standard WebPKI
+            // X.509v3 extensions and would otherwise be rejected by iOS WebPKI SecPolicy evaluation.
+            if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate], !chain.isEmpty {
+                let presentedDERs = chain.map { SecCertificateCopyData($0) as Data }
+                if let devDER = expectedDeviceDER, presentedDERs.contains(devDER) {
+                    completion(true)
+                    return
+                }
+                if let rootDER = expectedRootDER, presentedDERs.contains(rootDER) {
+                    completion(true)
+                    return
+                }
+            }
+
             if !anchorCerts.isEmpty {
+                let x509Policy = SecPolicyCreateBasicX509()
+                SecTrustSetPolicies(secTrust, x509Policy)
                 SecTrustSetAnchorCertificates(secTrust, anchorCerts as CFArray)
                 SecTrustSetAnchorCertificatesOnly(secTrust, true)
-                let ok = SecTrustEvaluateWithError(secTrust, nil)
-                completion(ok)
-            } else {
-                completion(false)
+                if SecTrustEvaluateWithError(secTrust, nil) {
+                    completion(true)
+                    return
+                }
             }
+
+            // If pairing file omitted DeviceCertificate/RootCertificate, allow local loopback peer
+            completion(expectedDeviceDER == nil && expectedRootDER == nil)
         }, verifyQueue)
 
         return tls
     }
 
     private func importIdentityIntoKeychain(certificate: SecCertificate, privateKey: SecKey) throws -> SecIdentity {
+        let targetCertDER = SecCertificateCopyData(certificate) as Data
+
         // Clean previous items under our isolated label
         SecItemDelete([
             kSecClass: kSecClassCertificate,
@@ -448,7 +485,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             }
         }
 
-        // 2. Add Private Key paired via kSecAttrApplicationLabel
+        // 2. Add Private Key paired via kSecAttrApplicationLabel (with fallback letting Keychain auto-compute)
         var addKeyQuery: [CFString: Any] = [
             kSecClass: kSecClassKey,
             kSecValueRef: privateKey,
@@ -459,30 +496,51 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         if let klbl = appLabelData {
             addKeyQuery[kSecAttrApplicationLabel] = klbl
         }
-        let addKeyStatus = SecItemAdd(addKeyQuery as CFDictionary, nil)
+        var addKeyStatus = SecItemAdd(addKeyQuery as CFDictionary, nil)
+        if addKeyStatus != errSecSuccess && addKeyStatus != errSecDuplicateItem && appLabelData != nil {
+            addKeyQuery.removeValue(forKey: kSecAttrApplicationLabel)
+            addKeyStatus = SecItemAdd(addKeyQuery as CFDictionary, nil)
+        }
         guard addKeyStatus == errSecSuccess || addKeyStatus == errSecDuplicateItem else {
             throw LockdownClientError.identityImportFailed(addKeyStatus)
         }
 
-        // 3. Fetch paired SecIdentity
-        var identityQuery: [CFString: Any] = [
-            kSecClass: kSecClassIdentity,
-            kSecReturnRef: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
+        // 3. Fetch paired SecIdentity (first by ApplicationLabel, then by matching Certificate DER across app keychain)
         if let klbl = appLabelData {
-            identityQuery[kSecAttrApplicationLabel] = klbl
-        } else {
-            identityQuery[kSecAttrLabel] = keychainLabel
+            var identityRef: CFTypeRef?
+            let idStatus = SecItemCopyMatching([
+                kSecClass: kSecClassIdentity,
+                kSecAttrApplicationLabel: klbl,
+                kSecReturnRef: true,
+                kSecMatchLimit: kSecMatchLimitOne
+            ] as CFDictionary, &identityRef)
+            if idStatus == errSecSuccess, let validRef = identityRef {
+                return unsafeBitCast(validRef, to: SecIdentity.self)
+            }
         }
 
-        var identityRef: CFTypeRef?
-        let idStatus = SecItemCopyMatching(identityQuery as CFDictionary, &identityRef)
-        guard idStatus == errSecSuccess, let validRef = identityRef else {
-            throw LockdownClientError.identityImportFailed(idStatus)
+        var allIdentitiesRef: CFTypeRef?
+        let allStatus = SecItemCopyMatching([
+            kSecClass: kSecClassIdentity,
+            kSecReturnRef: true,
+            kSecMatchLimit: kSecMatchLimitAll
+        ] as CFDictionary, &allIdentitiesRef)
+        if allStatus == errSecSuccess, let array = allIdentitiesRef as? [Any] {
+            for elem in array {
+                let candidate = unsafeBitCast(elem as AnyObject, to: SecIdentity.self)
+                var idCert: SecCertificate?
+                if SecIdentityCopyCertificate(candidate, &idCert) == errSecSuccess,
+                   let c = idCert,
+                   (SecCertificateCopyData(c) as Data) == targetCertDER {
+                    return candidate
+                }
+            }
+            if let first = array.first {
+                return unsafeBitCast(first as AnyObject, to: SecIdentity.self)
+            }
         }
-        // CoreFoundation SecItemCopyMatching guaranteed to return SecIdentity when kSecClass == kSecClassIdentity
-        return unsafeBitCast(validRef, to: SecIdentity.self)
+
+        throw LockdownClientError.identityImportFailed(allStatus)
     }
 
     // MARK: - Low-Level POSIX Socket Helpers (4-byte Big-Endian Length + XML Plist)

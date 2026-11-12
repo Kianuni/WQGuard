@@ -16,9 +16,10 @@ public struct InstalledScanConfigSheet: View {
     @EnvironmentObject var vm: ScanViewModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var activePicker: DocumentPickerKind? = nil
     @State private var copiedCommandToast = false
-    @State private var showTutorial = true
+    @State private var showTutorial = false
+    @State private var localBannerText: String? = nil
+    @State private var localBannerIsError: Bool = false
 
     private let cliExportCommand = "pymobiledevice3 apps list > installed_apps.json"
 
@@ -27,26 +28,28 @@ public struct InstalledScanConfigSheet: View {
     public var body: some View {
         NavigationStack {
             List {
+                if let banner = localBannerText {
+                    Section {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: localBannerIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                                .foregroundColor(localBannerIsError ? .red : .green)
+                            Text(banner)
+                                .font(.caption)
+                                .foregroundColor(localBannerIsError ? .red : .green)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
                 // Built-in Quick Setup Guide
                 Section {
-                    DisclosureGroup("📖 开启教程：方式 A / 方式 B / Feather 怎么操作？", isExpanded: $showTutorial) {
+                    DisclosureGroup("📖 开启教程：方式 A / 方式 B 二选一即可", isExpanded: $showTutorial) {
                         VStack(alignment: .leading, spacing: 10) {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("① 绑定 Feather / 全能签为什么点「打开」没反应？")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.orange)
-                                Text("iOS 系统禁止直接授权其他 App 的最外层根目录（如『我的 iPhone → Feather』）。请点进里面的 **Signed**（已签名）或 **Unsigned** 子文件夹后，再点右上角「打开」即可立即成功绑定！")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Divider()
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("② 方式 A（推荐：以后在手机上随时无线扫全机 App）")
+                                Text("① 方式 A 与 方式 B 需要同时开吗？")
                                     .font(.caption.bold())
                                     .foregroundColor(.cyan)
-                                Text("1. 电脑下载开源工具 **idevice_pair**（Mac/Win 通用），手机插线点信任，点 Generate 生成 `.mobiledevicepairing` 配对文件发到手机导入下方（只需做一次）；\n2. 在手机 App Store 免费搜并安装 **LocalDevVPN**，打开开关；\n3. 回到 WQGuard 点击「一键扫描已安装应用」即可直连系统注册表！")
+                                Text("**不需要，二选一即可！** 两者读取的都是 iOS 官方 `installation_proxy` 全机已安装应用注册表。推荐**方式 A**（导入配对 `.plist` / `.mobiledevicepairing` + 开启 **LocalDevVPN** 后，以后在手机上随时一键无线直连扫描全机）。")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
@@ -54,10 +57,21 @@ public struct InstalledScanConfigSheet: View {
                             Divider()
 
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("③ 方式 B（无需装 VPN：电脑一行命令导出快照）")
+                                Text("② 绑定 Feather / 全能签子目录（联动深扫二进制）")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.orange)
+                                Text("进入『我的 iPhone → Feather → Signed』（或全能签子文件夹），直接点击右上角「打开」即可绑定。")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Divider()
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("③ 方式 B（不想开 VPN 时：电脑导出离线快照）")
                                     .font(.caption.bold())
                                     .foregroundColor(.teal)
-                                Text("手机连电脑执行 `pip3 install pymobiledevice3` 后运行下方复制的命令生成 `installed_apps.json`，隔空投送到手机选择「用 WQGuard 打开」即可秒扫全机所有已安装应用。")
+                                Text("手机连电脑执行 `pip3 install pymobiledevice3` 后运行下方复制的命令生成 `installed_apps.json`，发到手机导入即可。")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
@@ -65,37 +79,6 @@ public struct InstalledScanConfigSheet: View {
                         .padding(.vertical, 4)
                     }
                     .font(.subheadline.bold())
-                }
-
-                // Engine 2 First if user came to bind Feather / Signer Directory!
-                Section {
-                    if vm.bookmarkedFolderNames.isEmpty {
-                        Text("尚未绑定子目录（请进入 Feather 或全能签 → 点进 Signed 文件夹 → 点右上角打开）")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    } else {
-                        HStack {
-                            Image(systemName: "folder.fill.badge.gearshape")
-                                .foregroundColor(.teal)
-                            Text("已绑定: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
-                                .font(.subheadline)
-                        }
-                    }
-
-                    Button(action: { activePicker = .signingFolder }) {
-                        Label("绑定签名器 Signed / Unsigned 子目录", systemImage: "folder.fill.badge.plus")
-                            .foregroundColor(.teal)
-                    }
-
-                    if !vm.bookmarkedFolderNames.isEmpty {
-                        Button(role: .destructive, action: { vm.clearBoundSigningFolders() }) {
-                            Label("解除已绑定的签名目录", systemImage: "folder.badge.minus")
-                        }
-                    }
-                } header: {
-                    Text("引擎 2 · 签名器源包二进制深扫（Feather / 全能签）")
-                } footer: {
-                    Text("自动扫描 Signed / Unsigned 目录下的 .ipa 与解包后的 .app 二进制及 Frameworks/*.dylib 注入插件。")
                 }
 
                 // Engine 1A: LocalDevVPN + Pairing File Direct Connection
@@ -106,7 +89,7 @@ public struct InstalledScanConfigSheet: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("方式 A：LocalDevVPN 配对直连本机注册表")
                                 .font(.subheadline.bold())
-                            Text(vm.pairingHostIDSummary ?? "未导入配对文件（支持 idevice_pair / StikDebug / SideStore 配对文件）")
+                            Text(vm.pairingHostIDSummary ?? "未导入配对文件（支持 .plist / .mobiledevicepairing 配对文件）")
                                 .font(.caption)
                                 .foregroundColor(vm.hasPairingFile ? .green : .gray)
                         }
@@ -122,29 +105,36 @@ public struct InstalledScanConfigSheet: View {
                             .foregroundColor(.teal)
                     }
 
-                    Button(action: { activePicker = .pairingFile }) {
+                    Button(action: { pickPairingFile() }) {
                         Label(
-                            vm.hasPairingFile ? "更换配对文件 (.mobiledevicepairing)" : "导入配对文件 (.mobiledevicepairing / .plist)",
+                            vm.hasPairingFile ? "更换配对文件 (.plist / .mobiledevicepairing)" : "导入配对文件 (.plist / .mobiledevicepairing)",
                             systemImage: "key.radiowaves.forward.fill"
                         )
                         .foregroundColor(.cyan)
                     }
 
                     if vm.hasPairingFile {
-                        Button(action: { vm.testLiveLockdownConnectionAndScan() }) {
+                        Button(action: {
+                            localBannerText = nil
+                            vm.testLiveLockdownConnectionAndScan()
+                        }) {
                             Label("立即直连 installation_proxy 并扫描全机应用", systemImage: "bolt.shield.fill")
                                 .font(.subheadline.bold())
                                 .foregroundColor(.teal)
                         }
 
-                        Button(role: .destructive, action: { vm.clearPairingFile() }) {
+                        Button(role: .destructive, action: {
+                            vm.clearPairingFile()
+                            localBannerText = "已移除配对文件"
+                            localBannerIsError = false
+                        }) {
                             Label("移除已保存的配对文件", systemImage: "trash")
                         }
                     }
                 } header: {
-                    Text("引擎 1A · 本机配对直连（方案一）")
+                    Text("引擎 1A · 本机配对直连（与 1B 二选一）")
                 } footer: {
-                    Text("开启 App Store 免费应用 LocalDevVPN（10.7.0.1）后，WQGuard 可直接向 iOS 官方 installation_proxy 读取全机所有已安装应用的完整 Entitlements 权限表与签名身份。")
+                    Text("导入配对文件并开启 LocalDevVPN（10.7.0.1）后，WQGuard 可直接向 iOS 官方 installation_proxy 读取全机所有已安装应用的完整权限表与签名身份。")
                 }
 
                 // Engine 1B: Offline Snapshot Import
@@ -156,7 +146,7 @@ public struct InstalledScanConfigSheet: View {
                             Text("方式 B：导入已安装应用注册表快照")
                                 .font(.subheadline.bold())
                             if vm.hasSavedSnapshot {
-                                Text("已加载 \(vm.savedSnapshotFilename ?? "snapshot")（共 \(vm.savedSnapshotAppCount) 款已安装应用）")
+                                Text("已缓存快照: \(vm.savedSnapshotFilename ?? "snapshot")（共 \(vm.savedSnapshotAppCount) 款已安装应用）")
                                     .font(.caption)
                                     .foregroundColor(.green)
                             } else {
@@ -167,8 +157,8 @@ public struct InstalledScanConfigSheet: View {
                         }
                     }
 
-                    Button(action: { activePicker = .registrySnapshot }) {
-                        Label("选择注册表快照文件 (.plist / .xml / .json)", systemImage: "arrow.down.doc.fill")
+                    Button(action: { pickSnapshotFile() }) {
+                        Label("选择注册表快照文件 (.json / .plist / .xml)", systemImage: "arrow.down.doc.fill")
                             .foregroundColor(.orange)
                     }
 
@@ -190,7 +180,11 @@ public struct InstalledScanConfigSheet: View {
                     }
 
                     if vm.hasSavedSnapshot {
-                        Button(role: .destructive, action: { vm.clearSavedSnapshot() }) {
+                        Button(role: .destructive, action: {
+                            vm.clearSavedSnapshot()
+                            localBannerText = "已清除快照缓存"
+                            localBannerIsError = false
+                        }) {
                             Label("清除已缓存的快照数据", systemImage: "trash")
                         }
                     }
@@ -198,9 +192,45 @@ public struct InstalledScanConfigSheet: View {
                     Toggle("同时纳入 App Store 官方应用审计", isOn: $vm.includeAppStoreAppsInRegistry)
                         .font(.subheadline)
                 } header: {
-                    Text("引擎 1B · 离线注册表快照（无需 VPN）")
+                    Text("引擎 1B · 离线注册表快照（无需 VPN，与 1A 二选一）")
                 } footer: {
                     Text("电脑连接手机执行 `\(cliExportCommand)`，隔空投送至手机用 WQGuard 打开即可秒扫全机已安装应用。")
+                }
+
+                // Engine 2: Bound Signer Folder Correlation
+                Section {
+                    if vm.bookmarkedFolderNames.isEmpty {
+                        Text("尚未绑定子目录（进入 Feather 或全能签 → 点进 Signed 文件夹 → 点右上角打开）")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    } else {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("已绑定: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
+                                .font(.subheadline.bold())
+                                .foregroundColor(.green)
+                        }
+                    }
+
+                    Button(action: { pickSigningFolder() }) {
+                        Label("绑定签名器 Signed / Unsigned 子目录", systemImage: "folder.fill.badge.plus")
+                            .foregroundColor(.teal)
+                    }
+
+                    if !vm.bookmarkedFolderNames.isEmpty {
+                        Button(role: .destructive, action: {
+                            vm.clearBoundSigningFolders()
+                            localBannerText = "已解除签名器目录绑定"
+                            localBannerIsError = false
+                        }) {
+                            Label("解除已绑定的签名目录", systemImage: "folder.badge.minus")
+                        }
+                    }
+                } header: {
+                    Text("引擎 2 · 签名器源包二进制深扫（Feather / 全能签）")
+                } footer: {
+                    Text("绑定后自动联动扫描 Signed / Unsigned 目录下的 .ipa 与解包后的 .app 二进制及 Frameworks/*.dylib 注入插件。")
                 }
 
                 // Engine 3: On-Device URL Scheme Probe
@@ -224,28 +254,51 @@ public struct InstalledScanConfigSheet: View {
                     }
                 }
             }
-            #if canImport(UIKit)
-            .sheet(item: $activePicker) { kind in
-                SystemDocumentPicker(kind: kind) { urls in
-                    activePicker = nil
-                    switch kind {
-                    case .pairingFile:
-                        if let first = urls.first {
-                            vm.importPairingFile(from: first)
-                        }
-                    case .registrySnapshot:
-                        if let first = urls.first {
-                            vm.importRegistrySnapshot(from: first, autoScan: true)
-                        }
-                    case .signingFolder, .ipaFiles:
-                        dismiss()
-                        vm.scanMultipleIPAPackages(at: urls)
-                    }
-                } onCancel: {
-                    activePicker = nil
-                }
-            }
-            #endif
         }
+    }
+
+    private func pickPairingFile() {
+        #if canImport(UIKit)
+        NativeDocumentPickerPresenter.shared.present(kind: .pairingFile) { urls in
+            guard let first = urls.first else { return }
+            let result = vm.importPairingFileWithResult(from: first)
+            switch result {
+            case .success(let summary):
+                localBannerIsError = false
+                localBannerText = "\(summary) — 正在通过 LocalDevVPN 直连扫描..."
+                vm.testLiveLockdownConnectionAndScan()
+            case .failure(let err):
+                localBannerIsError = true
+                localBannerText = err.localizedDescription
+            }
+        }
+        #endif
+    }
+
+    private func pickSnapshotFile() {
+        #if canImport(UIKit)
+        NativeDocumentPickerPresenter.shared.present(kind: .registrySnapshot) { urls in
+            guard let first = urls.first else { return }
+            let result = vm.importRegistrySnapshotWithResult(from: first, autoScan: true)
+            switch result {
+            case .success(let msg):
+                localBannerIsError = false
+                localBannerText = msg
+            case .failure(let err):
+                localBannerIsError = true
+                localBannerText = err.localizedDescription
+            }
+        }
+        #endif
+    }
+
+    private func pickSigningFolder() {
+        #if canImport(UIKit)
+        NativeDocumentPickerPresenter.shared.present(kind: .signingFolder) { urls in
+            vm.scanMultipleIPAPackages(at: urls)
+            localBannerIsError = false
+            localBannerText = "已成功绑定目录（\(vm.bookmarkedFolderNames.joined(separator: ", "))），正在后台扫描源包..."
+        }
+        #endif
     }
 }

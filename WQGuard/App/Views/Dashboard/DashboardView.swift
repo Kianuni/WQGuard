@@ -12,7 +12,6 @@ import WQGuardCore
 public struct DashboardView: View {
     @EnvironmentObject var vm: ScanViewModel
     @State private var showExportSheet = false
-    @State private var activePicker: DocumentPickerKind? = nil
 
     public init() {}
 
@@ -111,7 +110,7 @@ public struct DashboardView: View {
                                 #if os(iOS)
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 #endif
-                                activePicker = .signingFolder
+                                presentPicker(.signingFolder)
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "folder.fill.badge.plus")
@@ -134,7 +133,7 @@ public struct DashboardView: View {
                                 #if os(iOS)
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 #endif
-                                activePicker = .ipaFiles
+                                presentPicker(.ipaFiles)
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "doc.zipper")
@@ -252,17 +251,15 @@ public struct DashboardView: View {
         .onChange(of: vm.showSideloadPickerFromDashboard) { newValue in
             if newValue {
                 vm.showSideloadPickerFromDashboard = false
-                activePicker = .signingFolder
+                presentPicker(.signingFolder)
             }
         }
+    }
+
+    private func presentPicker(_ kind: DocumentPickerKind) {
         #if canImport(UIKit)
-        .sheet(item: $activePicker) { kind in
-            SystemDocumentPicker(kind: kind) { urls in
-                activePicker = nil
-                vm.scanMultipleIPAPackages(at: urls)
-            } onCancel: {
-                activePicker = nil
-            }
+        NativeDocumentPickerPresenter.shared.present(kind: kind) { urls in
+            vm.scanMultipleIPAPackages(at: urls)
         }
         #endif
     }

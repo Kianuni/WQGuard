@@ -11,7 +11,6 @@ import WQGuardCore
 
 public struct IPAScanView: View {
     @EnvironmentObject var vm: ScanViewModel
-    @State private var activePicker: DocumentPickerKind? = nil
 
     public init() {}
 
@@ -41,7 +40,7 @@ public struct IPAScanView: View {
                     }
 
                     HStack(spacing: 12) {
-                        Button(action: { activePicker = .ipaFiles }) {
+                        Button(action: { presentPicker(.ipaFiles) }) {
                             Label(WQStrings.selectIPAFileButton, systemImage: "doc.zipper")
                                 .font(.subheadline.bold())
                                 .padding(.horizontal, 18)
@@ -51,7 +50,7 @@ public struct IPAScanView: View {
                                 .clipShape(Capsule())
                         }
 
-                        Button(action: { activePicker = .signingFolder }) {
+                        Button(action: { presentPicker(.signingFolder) }) {
                             Label(WQStrings.bindSigningFolderButton, systemImage: "folder.fill.badge.plus")
                                 .font(.subheadline.bold())
                                 .padding(.horizontal, 18)
@@ -130,14 +129,12 @@ public struct IPAScanView: View {
             .padding(.top, 16)
         }
         .navigationTitle(WQStrings.tabIPAScan)
+    }
+
+    private func presentPicker(_ kind: DocumentPickerKind) {
         #if canImport(UIKit)
-        .sheet(item: $activePicker) { kind in
-            SystemDocumentPicker(kind: kind) { urls in
-                activePicker = nil
-                vm.scanMultipleIPAPackages(at: urls)
-            } onCancel: {
-                activePicker = nil
-            }
+        NativeDocumentPickerPresenter.shared.present(kind: kind) { urls in
+            vm.scanMultipleIPAPackages(at: urls)
         }
         #endif
     }

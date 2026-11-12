@@ -162,25 +162,44 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func importPairingFile(from url: URL) {
+        if case .failure(let error) = importPairingFileWithResult(from: url) {
+            activeAlertMessage = error.localizedDescription
+            showGlobalAlert = true
+        }
+    }
+
+    public func importPairingFileWithResult(from url: URL) -> Result<String, Error> {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
         do {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
             let stem = url.deletingPathExtension().lastPathComponent
-            let pairing = try LockdownPairingFile.parse(data: data, fallbackUDID: stem)
-            try data.write(to: savedPairingURL, options: .atomic)
-            refreshRegistrySourceState()
-            lastScanEngineSummary = "已导入配对文件 (\(pairing.hostID.prefix(8))…)"
-            #if os(iOS)
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            #endif
+            return importPairingDataWithResult(data, fallbackUDID: stem)
         } catch {
-            activeAlertMessage = error.localizedDescription
-            showGlobalAlert = true
             #if os(iOS)
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             #endif
+            return .failure(error)
+        }
+    }
+
+    private func importPairingDataWithResult(_ data: Data, fallbackUDID: String?) -> Result<String, Error> {
+        do {
+            let pairing = try LockdownPairingFile.parse(data: data, fallbackUDID: fallbackUDID)
+            try data.write(to: savedPairingURL, options: .atomic)
+            refreshRegistrySourceState()
+            let summary = "已导入配对文件 (HostID: \(pairing.hostID.prefix(8))…)"
+            lastScanEngineSummary = summary
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            #endif
+            return .success(summary)
+        } catch {
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            #endif
+            return .failure(error)
         }
     }
 
@@ -190,16 +209,35 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func importRegistrySnapshot(from url: URL, autoScan: Bool = true) {
+        if case .failure(let error) = importRegistrySnapshotWithResult(from: url, autoScan: autoScan) {
+            activeAlertMessage = error.localizedDescription
+            showGlobalAlert = true
+        }
+    }
+
+    public func importRegistrySnapshotWithResult(from url: URL, autoScan: Bool = true) -> Result<String, Error> {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
         do {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            return importRegistrySnapshotDataWithResult(data, filename: url.lastPathComponent, autoScan: autoScan)
+        } catch {
+            #if os(iOS)
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            #endif
+            return .failure(error)
+        }
+    }
+
+    private func importRegistrySnapshotDataWithResult(_ data: Data, filename: String, autoScan: Bool = true) -> Result<String, Error> {
+        do {
             let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(data)
             try data.write(to: savedSnapshotURL, options: .atomic)
-            UserDefaults.standard.set(url.lastPathComponent, forKey: Self.snapshotNameKey)
+            UserDefaults.standard.set(filename, forKey: Self.snapshotNameKey)
             refreshRegistrySourceState()
-            lastScanEngineSummary = "已导入注册表快照（共 \(records.count) 款已安装应用）"
+            let summary = "已导入注册表快照（共 \(records.count) 款已安装应用）"
+            lastScanEngineSummary = summary
             #if os(iOS)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             #endif
@@ -207,12 +245,12 @@ public final class ScanViewModel: ObservableObject {
                 showInstalledScanConfigSheet = false
                 startSystemScan()
             }
+            return .success(summary)
         } catch {
-            activeAlertMessage = error.localizedDescription
-            showGlobalAlert = true
             #if os(iOS)
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             #endif
+            return .failure(error)
         }
     }
 
@@ -229,28 +267,44 @@ public final class ScanViewModel: ObservableObject {
 
     public func handleIncomingURL(_ url: URL) {
         let ext = url.pathExtension.lowercased()
-        if ext == "mobiledevicepairing" {
-            importPairingFile(from: url)
-            startSystemScan()
-        } else if ext == "plist" || ext == "xml" || ext == "json" {
-            let accessed = url.startAccessingSecurityScopedResource()
-            let rawData = try? Data(contentsOf: url, options: .mappedIfSafe)
-            if accessed { url.stopAccessingSecurityScopedResource() }
-
-            if let data = rawData, (try? LockdownPairingFile.parse(data: data)) != nil {
-                importPairingFile(from: url)
-                startSystemScan()
-            } else {
-                importRegistrySnapshot(from: url, autoScan: true)
-            }
-        } else if ext == "ipa" || ext == "tipa" || ext == "app" {
+        if ext == "ipa" || ext == "tipa" || ext == "app" {
             scanIPAPackage(at: url)
+            return
+        }
+
+        // Read security-scoped data ONCE inside a single start/stop pair so one-shot Open-In grants are never lost!
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+        guard let rawData = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            activeAlertMessage = "无法读取传入文件 (\(url.lastPathComponent))。"
+            showGlobalAlert = true
+            return
+        }
+
+        let stem = url.deletingPathExtension().lastPathComponent
+        if ext == "mobiledevicepairing" || (try? LockdownPairingFile.parse(data: rawData, fallbackUDID: stem)) != nil {
+            switch importPairingDataWithResult(rawData, fallbackUDID: stem) {
+            case .success:
+                testLiveLockdownConnectionAndScan()
+            case .failure(let err):
+                activeAlertMessage = err.localizedDescription
+                showGlobalAlert = true
+            }
+        } else {
+            switch importRegistrySnapshotDataWithResult(rawData, filename: url.lastPathComponent, autoScan: true) {
+            case .success:
+                break
+            case .failure(let err):
+                activeAlertMessage = err.localizedDescription
+                showGlobalAlert = true
+            }
         }
     }
 
     public func testLiveLockdownConnectionAndScan() {
         guard let pairing = loadActivePairingFile() else {
-            activeAlertMessage = "请先导入配对文件 (.mobiledevicepairing)。"
+            activeAlertMessage = "请先导入配对文件 (.plist / .mobiledevicepairing)。"
             showGlobalAlert = true
             return
         }
@@ -267,9 +321,11 @@ public final class ScanViewModel: ObservableObject {
                     pairing: pairing,
                     preferredHost: host
                 )
-                // Cache live records as latest snapshot so offline re-audits remain instant!
+                // Cache live records to local snapshot store so future offline scans remain instant even when VPN is off
                 if let encoded = try? JSONEncoder().encode(liveRecords) {
-                    _ = encoded // Keep strongly typed evaluation
+                    try? encoded.write(to: self.savedSnapshotURL, options: .atomic)
+                    UserDefaults.standard.set("LocalDevVPN 直连缓存", forKey: Self.snapshotNameKey)
+                    self.refreshRegistrySourceState()
                 }
                 self.isScanning = false
                 self.scanProgress = nil
@@ -277,7 +333,7 @@ public final class ScanViewModel: ObservableObject {
             } catch {
                 self.isScanning = false
                 self.scanProgress = nil
-                self.activeAlertMessage = error.localizedDescription
+                self.activeAlertMessage = "配对文件已保存，但直连未成功：\n\(error.localizedDescription)"
                 self.showGlobalAlert = true
                 #if os(iOS)
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -460,7 +516,8 @@ public final class ScanViewModel: ObservableObject {
             }
 
             let pkgFindings = (try? await SecurityPipeline.shared.scanInstalledAppsAsync(additionalLocations: savedDirs) { [weak self] progress in
-                Task { @MainActor in self?.scanProgress = progress }
+                guard let strongSelf = self else { return }
+                Task { @MainActor in strongSelf.scanProgress = progress }
             }) ?? []
 
             let probeFindings = probeEnabled ? await OnDeviceAppProbeScanner.shared.probeInstalledAppsAsync() : []

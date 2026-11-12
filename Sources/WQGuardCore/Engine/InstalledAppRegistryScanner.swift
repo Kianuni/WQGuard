@@ -239,7 +239,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             }
         }
 
-        // 2. Try JSON (`pymobiledevice3 apps list` outputs `{ "bundle.id": { ... } }` or `[ { ... } ]`)
+        // 2. Try strongly-typed cached JSON or `pymobiledevice3 apps list` JSON
+        if let cached = try? JSONDecoder().decode([InstalledAppRegistryRecord].self, from: data), !cached.isEmpty {
+            return cached
+        }
         if let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             let records = extractRecords(from: jsonObj)
             if !records.isEmpty {
