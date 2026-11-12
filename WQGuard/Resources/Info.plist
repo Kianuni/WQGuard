@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.7</string>
+	<string>1.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>13</string>
+	<string>14</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>WQGuard 需要本地网络权限以通过本机 LocalDevVPN 环回隧道连接 iOS 官方 installation_proxy 服务，执行只读已安装应用安全审计。</string>
 	<key>NSBonjourServices</key>
@@ -43,6 +43,11 @@
 		<string>santander</string>
 		<string>sileo</string>
 		<string>zbra</string>
+		<string>surge</string>
+		<string>shadowrocket</string>
+		<string>quantumult-x</string>
+		<string>loon</string>
+		<string>stash</string>
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>

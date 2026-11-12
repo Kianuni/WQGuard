@@ -104,6 +104,18 @@ public struct CLIArgumentParser: Sendable {
                 guard !val.isEmpty else { throw CLIError.missingArgument(option: "--export-surge", expected: "<path>") }
                 config.exportSurgePath = val
                 idx += 1
+            } else if arg == "--export-shield" {
+                idx += 1
+                guard idx < args.count, !args[idx].hasPrefix("-") else {
+                    throw CLIError.missingArgument(option: "--export-shield", expected: "<path>")
+                }
+                config.exportShieldPath = args[idx]
+                idx += 1
+            } else if arg.hasPrefix("--export-shield=") {
+                let val = String(arg.dropFirst("--export-shield=".count))
+                guard !val.isEmpty else { throw CLIError.missingArgument(option: "--export-shield", expected: "<path>") }
+                config.exportShieldPath = val
+                idx += 1
             } else if arg == "--format" {
                 idx += 1
                 guard idx < args.count, !args[idx].hasPrefix("-") else {
@@ -228,6 +240,11 @@ public enum CLIManual: Sendable {
           \(styler.cyan("--export-surge <path>"))
                 Export WQGuard-Brotli-Shield.sgmodule with 16 negative exclusions
                 (protecting Apple Intelligence, Siri, and banking) via SurgeBrotliShieldHelper.
+
+          \(styler.cyan("--export-shield <path>"))
+                Export Brotli shield auto-inferring client format from extension:
+                .sgmodule (Surge), .module (Shadowrocket), .conf (Quantumult X),
+                .plugin (Loon), or .stoverride (Stash).
 
           \(styler.cyan("--format <text|json|markdown>"))
                 Report format output (default: text).

@@ -59,7 +59,7 @@ public enum CLICommandRunner: Sendable {
 
         let startTime = Date()
 
-        // 4. Surge Shield Module Export
+        // 4. Surge & Multi-Client Shield Export
         if let surgePath = config.exportSurgePath {
             do {
                 let content = SurgeBrotliShieldHelper.shared.generateModuleContent()
@@ -77,6 +77,29 @@ public enum CLICommandRunner: Sendable {
                 stderr.write(Data(confirm.utf8))
             } catch {
                 let msg = "wqguard-cli error: failed to export Surge shield: \(error.localizedDescription)\n"
+                stderr.write(Data(msg.utf8))
+                return 2
+            }
+        }
+
+        if let shieldPath = config.exportShieldPath {
+            let platform = ProxyShieldPlatform(identifierOrPath: shieldPath) ?? .surge
+            do {
+                let content = SurgeBrotliShieldHelper.shared.generateShieldContent(for: platform)
+                let validation = SurgeBrotliShieldHelper.shared.validateShield(content: content, for: platform)
+                guard validation.isCompliant else {
+                    let msg = "wqguard-cli error: \(platform.shortTitleEn) shield validation failed: \(validation.errors.joined(separator: ", "))\n"
+                    stderr.write(Data(msg.utf8))
+                    return 2
+                }
+                let destURL = URL(fileURLWithPath: shieldPath)
+                let dir = destURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try content.write(to: destURL, atomically: true, encoding: .utf8)
+                let confirm = "[+] Exported \(platform.shortTitleEn) shield to \(destURL.path)\n"
+                stderr.write(Data(confirm.utf8))
+            } catch {
+                let msg = "wqguard-cli error: failed to export \(platform.shortTitleEn) shield: \(error.localizedDescription)\n"
                 stderr.write(Data(msg.utf8))
                 return 2
             }

@@ -87,6 +87,7 @@ public struct CLIConfig: Equatable, Sendable {
     public var firmwareRadar: Bool = false
     public var firmwareVersion: String? = nil
     public var exportSurgePath: String? = nil
+    public var exportShieldPath: String? = nil
     public var format: OutputFormat = .text
     public var outPath: String? = nil
     public var whitelistedBundleIDs: [String] = []
@@ -100,6 +101,7 @@ public struct CLIConfig: Equatable, Sendable {
         firmwareRadar: Bool = false,
         firmwareVersion: String? = nil,
         exportSurgePath: String? = nil,
+        exportShieldPath: String? = nil,
         format: OutputFormat = .text,
         outPath: String? = nil,
         whitelistedBundleIDs: [String] = [],
@@ -112,6 +114,7 @@ public struct CLIConfig: Equatable, Sendable {
         self.firmwareRadar = firmwareRadar
         self.firmwareVersion = firmwareVersion
         self.exportSurgePath = exportSurgePath
+        self.exportShieldPath = exportShieldPath
         self.format = format
         self.outPath = outPath
         self.whitelistedBundleIDs = whitelistedBundleIDs
@@ -121,6 +124,7 @@ public struct CLIConfig: Equatable, Sendable {
 
     public var hasAction: Bool {
         scanSystem || ipaPath != nil || containerPath != nil ||
-        firmwareRadar || exportSurgePath != nil || showVersion || showHelp
+        firmwareRadar || exportSurgePath != nil || exportShieldPath != nil ||
+        showVersion || showHelp
     }
 }

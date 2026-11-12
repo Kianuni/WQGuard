@@ -19,7 +19,7 @@
 "view_detailed_findings" = "View Detailed Audit Findings";
 "view_detailed_findings_sub" = "Inspect matched signatures, private symbols, and symlinks";
 "firmware_radar_title" = "Firmware CVE Exposure Radar";
-"firmware_radar_sub" = "Unpatched CVEs · Surge Shield export";
+"firmware_radar_sub" = "Unpatched CVEs · Multi-Client Shield Export";
 "export_audit_report" = "Export Audit Report";
 "export_audit_report_sub" = "Generate RFC 8259 JSON / Markdown / PlainText reports";
 
@@ -139,13 +139,13 @@
 /* Firmware Radar & Mitigations */
 "radar_exposed_count" = "%d Vulnerabilities Exposed";
 "radar_patched_count" = "%d Patched";
-"surge_shield_title" = "Surge · Brotli Downgrade Shield";
-"surge_shield_description" = "Enforces stripping br compression at the network layer for unpatched iOS 26/27 libbrotli heap overflow vulnerabilities. Built-in 16 strict exclusion rules ensure Apple Intelligence, Siri, and banking payments are never intercepted.";
-"surge_shield_preview" = "Preview Shield Rules";
-"surge_shield_export" = "Export / Share Module";
+"surge_shield_title" = "Multi-Client · Brotli Downgrade Shield";
+"surge_shield_description" = "Strips br compression at the proxy layer for Surge, Shadowrocket, Quantumult X, Loon, and Stash to mitigate unpatched iOS 26/27 libbrotli heap overflow CVEs. Built-in 16 negative exclusions ensure Apple Intelligence, Siri, and banking are never intercepted.";
+"surge_shield_preview" = "Preview & Import";
+"surge_shield_export" = "Export / Share File";
 "radar_known_vulns_header" = "Firmware Known High-Risk CVE Assessment (%d items)";
 "radar_mitigation_guidance_header" = "🛡️ Non-Upgrade Mitigation Advisories";
-"radar_branch_lts" = "iOS 26.x LTS Branch (Surge Shield Recommended)";
+"radar_branch_lts" = "iOS 26.x LTS Branch (Proxy Shield Recommended)";
 "radar_branch_current" = "iOS 27.x Active Branch";
 "radar_branch_other" = "iOS %d.x Branch";
 "cve_status_exposed" = "⚠️ Exposed";
@@ -154,8 +154,8 @@
 "mitigation_configure_button" = "Configure Now";
 
 /* Surge Module Sheet */
-"surge_sheet_code_title" = "WQGuard · Brotli Shield Module Code";
-"surge_sheet_nav_title" = "Surge Shield Preview";
+"surge_sheet_code_title" = "WQGuard · Brotli Shield Configuration";
+"surge_sheet_nav_title" = "Multi-Client Brotli Shield";
 
 /* Settings Confirmation Dialog & Add Rule Sheet */
 "settings_reset_confirm_title" = "Reset Whitelist to Defaults?";

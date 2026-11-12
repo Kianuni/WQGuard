@@ -19,7 +19,7 @@
 "view_detailed_findings" = "查看详细审计清单";
 "view_detailed_findings_sub" = "检查所有命中特征、私有符号与逃逸链接";
 "firmware_radar_title" = "固件 CVE 暴露雷达";
-"firmware_radar_sub" = "项待防护系统漏洞 · Surge 护盾一键导出";
+"firmware_radar_sub" = "项待防护系统漏洞 · 多平台护盾一键导入";
 "export_audit_report" = "导出审计报告";
 "export_audit_report_sub" = "生成 RFC 8259 JSON / Markdown / 纯文本审计报告";
 
@@ -139,13 +139,13 @@
 /* Firmware Radar & Mitigations */
 "radar_exposed_count" = "%d 项漏洞暴露";
 "radar_patched_count" = "%d 项已打补丁";
-"surge_shield_title" = "Surge · 防 Brotli 溢出降级护盾";
-"surge_shield_description" = "针对未修复 iOS 26/27 系统的 libbrotli 堆溢出高危漏洞，在网络传输层强制剥离 br 压缩声明。内置 16 项严苛负向排除规则，保障 Apple Intelligence、普通话 Siri 与网银支付绝对不被拦截。";
-"surge_shield_preview" = "预览护盾规则";
-"surge_shield_export" = "一键导出 / 分享模块";
+"surge_shield_title" = "多平台代理 · 防 Brotli 溢出降级护盾";
+"surge_shield_description" = "针对未修复 iOS 26/27 系统的 libbrotli 堆溢出高危漏洞，支持 Surge、小火箭、圈 X、Loon、Stash 五大代理工具在传输层剥离 br 压缩声明并阻断强推响应。内置 16 项负向排除，保障 Apple Intelligence、普通话 Siri 与网银支付绝对不被拦截。";
+"surge_shield_preview" = "预览与一键导入";
+"surge_shield_export" = "分享规则文件";
 "radar_known_vulns_header" = "固件已知高危漏洞暴露评估 (%d 项)";
 "radar_mitigation_guidance_header" = "🛡️ 不升级固件下的缓解处置建议";
-"radar_branch_lts" = "iOS 26.x 长期支持分支 (推荐配置 Surge 护盾)";
+"radar_branch_lts" = "iOS 26.x 长期支持分支 (推荐开启代理护盾)";
 "radar_branch_current" = "iOS 27.x 现行分支";
 "radar_branch_other" = "iOS %d.x 分支";
 "cve_status_exposed" = "⚠️ 暴露";
@@ -154,8 +154,8 @@
 "mitigation_configure_button" = "立即前往配置";
 
 /* Surge Module Sheet */
-"surge_sheet_code_title" = "WQGuard · 防 Brotli 溢出降级护盾模块代码";
-"surge_sheet_nav_title" = "Surge 护盾预览";
+"surge_sheet_code_title" = "WQGuard · 防 Brotli 溢出降级护盾配置";
+"surge_sheet_nav_title" = "多平台 Brotli 降级护盾";
 
 /* Settings Confirmation Dialog & Add Rule Sheet */
 "settings_reset_confirm_title" = "确认重置白名单？";

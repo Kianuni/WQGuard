@@ -60,7 +60,7 @@ public struct FirmwareRadarView: View {
                 )
                 .padding(.horizontal)
 
-                // Surge Brotli Shield Action Card
+                // Multi-Client Brotli Shield Action Card
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Image(systemName: "shield.lefthalf.filled")
@@ -83,9 +83,40 @@ public struct FirmwareRadarView: View {
                         .font(.caption)
                         .foregroundColor(.gray)
 
+                    // 5-Client Selector Bar
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(ProxyShieldPlatform.allCases) { platform in
+                                let isSelected = vm.selectedShieldPlatform == platform
+                                Button(action: {
+                                    vm.selectedShieldPlatform = platform
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Text(WQStrings.shieldPlatformShortTitle(platform))
+                                            .font(.caption.bold())
+                                        Text(".\(platform.fileExtension)")
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .opacity(0.8)
+                                    }
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 7)
+                                    .background(isSelected ? Color.teal : Color.white.opacity(0.08))
+                                    .foregroundColor(isSelected ? .black : .white)
+                                    .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+
+                    Text(WQStrings.shieldPlatformUsageHint(vm.selectedShieldPlatform))
+                        .font(.caption2)
+                        .foregroundColor(.teal.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
+
                     HStack(spacing: 12) {
                         Button(action: { showSurgeSheet = true }) {
-                            Label(WQStrings.surgeShieldPreview, systemImage: "eye.fill")
+                            Label(WQStrings.surgeShieldPreview, systemImage: "bolt.shield.fill")
                                 .font(.caption.bold())
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 10)
@@ -96,7 +127,7 @@ public struct FirmwareRadarView: View {
 
                         if let url = vm.surgeModuleExportURL {
                             ShareLink(item: url) {
-                                Label(WQStrings.surgeShieldExport, systemImage: "square.and.arrow.up.fill")
+                                Label(WQStrings.shieldExportButtonLabel(ext: vm.selectedShieldPlatform.fileExtension), systemImage: "square.and.arrow.up.fill")
                                     .font(.caption.bold())
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 10)

@@ -1,0 +1,70 @@
+name: "WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)"
+desc: "针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写漏洞 (HTTP2Shell)，剥离请求头 br 压缩声明并阻断强推响应。内置 16 项负向排除，不破坏 Apple Intelligence、Siri 与移动支付。"
+category: "安全防护"
+
+http:
+  mitm:
+    - "-*.apple.com"
+    - "-*.icloud.com"
+    - "-*.icloud-content.com"
+    - "-*.mzstatic.com"
+    - "-*.cdn-apple.com"
+    - "-guzzoni.apple.com"
+    - "-*.siri.apple.com"
+    - "-gspe1-ssl.ls.apple.com"
+    - "-apple-relay.*"
+    - "-cp4.cloudflare.com"
+    - "-*.openai.com"
+    - "-*.chatgpt.com"
+    - "-*.binance.com"
+    - "-*.okx.com"
+    - "-*.tenpay.com"
+    - "-*.alipay.com"
+    - "*.xyz"
+    - "*.top"
+    - "*.icu"
+    - "*.cyou"
+    - "*.sbs"
+    - "*.cfd"
+    - "*.buzz"
+    - "*.fun"
+    - "*.click"
+    - "*.link"
+    - "*.site"
+    - "*.online"
+    - "*.shop"
+    - "*.vip"
+    - "*.pw"
+    - "*.work"
+    - "*.rest"
+    - "*.monster"
+    - "*.quest"
+    - "*.zip"
+    - "*.mov"
+
+  header-rewrite:
+    - ^https?://.+ request-replace-regex Accept-Encoding "^.*$" "gzip, deflate"
+
+  script:
+    - name: brotli-response-guard
+      match: ^https?://.+
+      type: response
+      require-body: false
+      timeout: 5
+
+script-providers:
+  brotli-response-guard:
+    payload: |
+      const headers = ($response && $response.headers) || {};
+      const ce = String(headers['Content-Encoding'] || headers['content-encoding'] || '');
+      if (/(^|[,\s])br($|[,\s;])/i.test(ce)) {
+        $done({
+          response: {
+            status: 403,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-WQGuard-Shield': 'Blocked-Unsolicited-Brotli' },
+            body: 'WQGuard Brotli Shield: Blocked unsolicited Brotli response stream to mitigate CVE-2026-111497.'
+          }
+        });
+      } else {
+        $done({});
+      }

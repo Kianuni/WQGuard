@@ -1,0 +1,14 @@
+#!name=WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
+#!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写漏洞 (CVE-2026-111497 / HTTP2Shell)，剥离请求头 br 编码并阻断恶意强推响应。内置 16 项负向排除，不破坏 Apple Intelligence、Siri 与移动支付。
+#!category=安全防护
+
+[Header Rewrite]
+# 强制将请求头 Accept-Encoding 降级为安全的 gzip,deflate（无空格防解析歧义）
+^https?://.+ header-replace Accept-Encoding gzip,deflate
+
+[Script]
+# 零解压（requires-body=0）拦截强行返回 Content-Encoding: br 的恶意响应
+brotli-response-guard = type=http-response,pattern=^https?://.+,script-path=https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/scripts/brotli-guard.js,requires-body=0,max-size=0
+
+[MITM]
+hostname = %APPEND% -*.apple.com, -*.icloud.com, -*.icloud-content.com, -*.mzstatic.com, -*.cdn-apple.com, -guzzoni.apple.com, -*.siri.apple.com, -gspe1-ssl.ls.apple.com, -apple-relay.*, -cp4.cloudflare.com, -*.openai.com, -*.chatgpt.com, -*.binance.com, -*.okx.com, -*.tenpay.com, -*.alipay.com, *.xyz, *.top, *.icu, *.cyou, *.sbs, *.cfd, *.buzz, *.fun, *.click, *.link, *.site, *.online, *.shop, *.vip, *.pw, *.work, *.rest, *.monster, *.quest, *.zip, *.mov

@@ -49,7 +49,13 @@ public final class ScanViewModel: ObservableObject {
     @Published public var exportedReportText: String = ""
     @Published public var exportedReportURL: URL?
 
-    // Surge Brotli Shield Export State
+    // Multi-Client Brotli Shield Export State
+    @Published public var selectedShieldPlatform: ProxyShieldPlatform = .surge {
+        didSet {
+            UserDefaults.standard.set(selectedShieldPlatform.rawValue, forKey: Self.shieldPlatformKey)
+            prepareSurgeExportURL()
+        }
+    }
     @Published public var surgeModuleContent: String = ""
     @Published public var surgeModuleExportURL: URL?
     @Published public var showSurgeSheet: Bool = false
@@ -60,6 +66,7 @@ public final class ScanViewModel: ObservableObject {
     private static let includeAppStoreKey = "wqguard.include_appstore_registry.v1"
     private static let enableProbeKey = "wqguard.enable_ondevice_probe.v1"
     private static let snapshotNameKey = "wqguard.saved_snapshot_name.v1"
+    private static let shieldPlatformKey = "wqguard.shield_platform.v1"
 
     @Published public var showInstalledScanConfigSheet: Bool = false
     @Published public var syncedPackageNames: [String] = []
@@ -92,7 +99,11 @@ public final class ScanViewModel: ObservableObject {
     public init() {
         self.firmwareReport = FirmwarePostureEngine.shared.evaluate()
         self.whitelistedTools = WhitelistEngine.shared.allTools
-        self.surgeModuleContent = SurgeBrotliShieldHelper.shared.generateModuleContent()
+        if let savedPlatformRaw = UserDefaults.standard.string(forKey: Self.shieldPlatformKey),
+           let savedPlatform = ProxyShieldPlatform(rawValue: savedPlatformRaw) {
+            self.selectedShieldPlatform = savedPlatform
+        }
+        self.surgeModuleContent = SurgeBrotliShieldHelper.shared.generateShieldContent(for: self.selectedShieldPlatform)
         if let savedHost = UserDefaults.standard.string(forKey: Self.lockdownHostKey), !savedHost.isEmpty {
             self.lockdownHost = savedHost
         }
@@ -1001,12 +1012,18 @@ public final class ScanViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Surge Brotli Shield Exporter
+    // MARK: - Multi-Client Brotli Shield Exporter
     public func prepareSurgeExportURL(extraHosts: [String] = []) {
         do {
-            let url = try SurgeBrotliShieldHelper.shared.exportToTemporaryFile(extraHosts: extraHosts)
+            let url = try SurgeBrotliShieldHelper.shared.exportShieldToTemporaryFile(
+                for: selectedShieldPlatform,
+                extraHosts: extraHosts
+            )
             self.surgeModuleExportURL = url
-            self.surgeModuleContent = SurgeBrotliShieldHelper.shared.generateModuleContent(extraHosts: extraHosts)
+            self.surgeModuleContent = SurgeBrotliShieldHelper.shared.generateShieldContent(
+                for: selectedShieldPlatform,
+                extraHosts: extraHosts
+            )
         } catch {
             self.activeAlertMessage = WQStrings.surgeGenerationFailedMessage(error.localizedDescription)
             self.showGlobalAlert = true

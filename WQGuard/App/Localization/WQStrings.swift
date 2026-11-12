@@ -50,7 +50,7 @@ public enum WQStrings {
     public static var viewDetailedFindings: String { localized("view_detailed_findings", en: "View Detailed Audit Findings", zh: "查看详细审计清单") }
     public static var viewDetailedFindingsSub: String { localized("view_detailed_findings_sub", en: "Inspect matched signatures, private symbols, and symlinks", zh: "检查所有命中特征、私有符号与逃逸链接") }
     public static var firmwareRadarTitle: String { localized("firmware_radar_title", en: "Firmware CVE Exposure Radar", zh: "固件 CVE 暴露雷达") }
-    public static var firmwareRadarSub: String { localized("firmware_radar_sub", en: "Unpatched CVEs · Surge Shield export", zh: "项待防护系统漏洞 · Surge 护盾一键导出") }
+    public static var firmwareRadarSub: String { localized("firmware_radar_sub", en: "Unpatched CVEs · Multi-Client Shield Export", zh: "项待防护系统漏洞 · 多平台护盾一键导入") }
     public static var exportAuditReport: String { localized("export_audit_report", en: "Export Audit Report", zh: "导出审计报告") }
     public static var exportAuditReportSub: String { localized("export_audit_report_sub", en: "Generate RFC 8259 JSON / Markdown / PlainText reports", zh: "生成 RFC 8259 JSON / Markdown / 纯文本审计报告") }
 
@@ -204,21 +204,71 @@ public enum WQStrings {
     }
 
     public static var surgeShieldTitle: String {
-        localized("surge_shield_title", en: "Surge · Brotli Downgrade Shield", zh: "Surge · 防 Brotli 溢出降级护盾")
+        localized("surge_shield_title", en: "Multi-Client · Brotli Downgrade Shield", zh: "多平台代理 · 防 Brotli 溢出降级护盾")
     }
 
     public static var surgeShieldDescription: String {
         localized("surge_shield_description",
-                  en: "Enforces stripping br compression at the network layer for unpatched iOS 26/27 libbrotli heap overflow vulnerabilities. Built-in 16 strict exclusion rules ensure Apple Intelligence, Siri, and banking payments are never intercepted.",
-                  zh: "针对未修复 iOS 26/27 系统的 libbrotli 堆溢出高危漏洞，在网络传输层强制剥离 br 压缩声明。内置 16 项严苛负向排除规则，保障 Apple Intelligence、普通话 Siri 与网银支付绝对不被拦截。")
+                  en: "Strips br compression at the proxy layer for Surge, Shadowrocket, Quantumult X, Loon, and Stash to mitigate unpatched iOS 26/27 libbrotli heap overflow CVEs. Built-in 16 negative exclusions ensure Apple Intelligence, Siri, and banking are never intercepted.",
+                  zh: "针对未修复 iOS 26/27 系统的 libbrotli 堆溢出高危漏洞，支持 Surge、小火箭、圈 X、Loon、Stash 五大代理工具在传输层剥离 br 压缩声明并阻断强推响应。内置 16 项负向排除，保障 Apple Intelligence、普通话 Siri 与网银支付绝对不被拦截。")
     }
 
     public static var surgeShieldPreview: String {
-        localized("surge_shield_preview", en: "Preview Shield Rules", zh: "预览护盾规则")
+        localized("surge_shield_preview", en: "Preview & Import", zh: "预览与一键导入")
     }
 
     public static var surgeShieldExport: String {
-        localized("surge_shield_export", en: "Export / Share Module", zh: "一键导出 / 分享模块")
+        localized("surge_shield_export", en: "Export / Share File", zh: "分享规则文件")
+    }
+
+    public static func shieldExportButtonLabel(ext: String) -> String {
+        isEnglish ? "Share .\(ext)" : "分享 .\(ext) 文件"
+    }
+
+    public static func shieldPlatformShortTitle(_ platform: ProxyShieldPlatform) -> String {
+        isEnglish ? platform.shortTitleEn : platform.shortTitleZh
+    }
+
+    public static func shieldPlatformUsageHint(_ platform: ProxyShieldPlatform) -> String {
+        if !isEnglish {
+            return platform.usageHintZh
+        }
+        switch platform {
+        case .surge:
+            return "Import into Surge Modules and enable MitM + CA certificate trust (keep default high-risk TLDs for zero battery overhead)."
+        case .shadowrocket:
+            return "Import into Shadowrocket Config -> Module, and enable HTTPS Decryption + CA trust."
+        case .quantumultX:
+            return "Add to Quantumult X Rewrite -> Resources, and enable both Rewrite and MitM with CA trust."
+        case .loon:
+            return "Import into Loon Plugins, and enable MITM + system root CA trust."
+        case .stash:
+            return "Import into Stash Overrides, and enable MITM + root CA certificate trust."
+        }
+    }
+
+    public static func shieldOneTapInstallLabel(clientName: String) -> String {
+        isEnglish ? "One-Tap Install in \(clientName)" : "一键唤起 \(clientName) 安装"
+    }
+
+    public static var shieldCopySubURLButton: String {
+        isEnglish ? "Copy Subscription URL" : "复制在线订阅链接"
+    }
+
+    public static var shieldCopySourceButton: String {
+        isEnglish ? "Copy Rule Source" : "复制配置源码"
+    }
+
+    public static var shieldCopiedSubURLToast: String {
+        isEnglish ? "Subscription URL Copied" : "已复制在线订阅链接"
+    }
+
+    public static var shieldCopiedSourceToast: String {
+        isEnglish ? "Rule Source Copied" : "已复制配置源码"
+    }
+
+    public static func shieldSheetCodeTitle(filename: String) -> String {
+        isEnglish ? "Rule Source (\(filename))" : "配置源码预览 (\(filename))"
     }
 
     public static func radarKnownVulnerabilitiesHeader(count: Int) -> String {
@@ -231,7 +281,7 @@ public enum WQStrings {
     }
 
     public static var radarBranchLTS: String {
-        localized("radar_branch_lts", en: "iOS 26.x LTS Branch (Surge Shield Recommended)", zh: "iOS 26.x 长期支持分支 (推荐配置 Surge 护盾)")
+        localized("radar_branch_lts", en: "iOS 26.x LTS Branch (Proxy Shield Recommended)", zh: "iOS 26.x 长期支持分支 (推荐开启代理护盾)")
     }
 
     public static var radarBranchCurrent: String {
@@ -270,13 +320,13 @@ public enum WQStrings {
         localized("mitigation_configure_button", en: "Configure Now", zh: "立即前往配置")
     }
 
-    // MARK: - Surge Module Sheet
+    // MARK: - Multi-Client Shield Sheet
     public static var surgeSheetCodeTitle: String {
-        localized("surge_sheet_code_title", en: "WQGuard · Brotli Shield Module Code", zh: "WQGuard · 防 Brotli 溢出降级护盾模块代码")
+        localized("surge_sheet_code_title", en: "WQGuard · Brotli Shield Configuration", zh: "WQGuard · 防 Brotli 溢出降级护盾配置")
     }
 
     public static var surgeSheetNavTitle: String {
-        localized("surge_sheet_nav_title", en: "Surge Shield Preview", zh: "Surge 护盾预览")
+        localized("surge_sheet_nav_title", en: "Multi-Client Brotli Shield", zh: "多平台 Brotli 降级护盾")
     }
 
     // MARK: - Settings View & Custom Rules

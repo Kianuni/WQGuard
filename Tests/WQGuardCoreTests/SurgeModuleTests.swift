@@ -2,9 +2,9 @@
 //  SurgeModuleTests.swift
 //  WQGuardCoreTests
 //
-//  Unit tests for Surge/WQGuard-Brotli-Shield.sgmodule and SurgeBrotliShieldHelper.
-//  Verifies 16 mandatory negative MITM exclusions, header downgrade rules,
-//  response script guard, and file export capabilities.
+//  Unit tests for the 5-client Brotli Downgrade Shield Matrix (Surge, Shadowrocket,
+//  Quantumult X, Loon, Stash), Shields/scripts/brotli-guard.js, SurgeBrotliShieldHelper,
+//  and wqguard-cli --export-shield.
 //
 
 import XCTest
@@ -12,13 +12,16 @@ import XCTest
 
 final class SurgeModuleTests: XCTestCase {
 
-    // MARK: - 1. Physical .sgmodule File Validation
-
-    func testModuleFileContentCompliance() throws {
-        let repoRoot = URL(fileURLWithPath: #file)
+    private var repoRoot: URL {
+        URL(fileURLWithPath: #file)
             .deletingLastPathComponent() // WQGuardCoreTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // WQGuard
+    }
+
+    // MARK: - 1. Physical Repository Shield Files Compliance
+
+    func testModuleFileContentCompliance() throws {
         let moduleURL = repoRoot.appendingPathComponent("Surge/WQGuard-Brotli-Shield.sgmodule")
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: moduleURL.path), "Surge/WQGuard-Brotli-Shield.sgmodule must exist in repository root")
@@ -31,9 +34,44 @@ final class SurgeModuleTests: XCTestCase {
         XCTAssertTrue(validation.hasHeaderRewrite)
         XCTAssertTrue(validation.hasScriptGuard)
         XCTAssertTrue(validation.missingExclusions.isEmpty)
+
+        // Ensure Shields/Surge/WQGuard-Brotli-Shield.sgmodule stays in sync with Surge/WQGuard-Brotli-Shield.sgmodule
+        let shieldsSurgeURL = repoRoot.appendingPathComponent("Shields/Surge/WQGuard-Brotli-Shield.sgmodule")
+        let shieldsSurgeContent = try String(contentsOf: shieldsSurgeURL, encoding: .utf8)
+        XCTAssertEqual(
+            content.trimmingCharacters(in: .whitespacesAndNewlines),
+            shieldsSurgeContent.trimmingCharacters(in: .whitespacesAndNewlines),
+            "Legacy Surge path and Shields/Surge path must remain identical"
+        )
     }
 
-    // MARK: - 2. All 16 Negative MITM Exclusions Verified
+    func testAllFivePhysicalShieldFilesAndGuardScriptCompliance() throws {
+        let matrix: [(ProxyShieldPlatform, String)] = [
+            (.surge, "Shields/Surge/WQGuard-Brotli-Shield.sgmodule"),
+            (.shadowrocket, "Shields/Shadowrocket/WQGuard-Brotli-Shield.module"),
+            (.quantumultX, "Shields/QuantumultX/WQGuard-Brotli-Shield.conf"),
+            (.loon, "Shields/Loon/WQGuard-Brotli-Shield.plugin"),
+            (.stash, "Shields/Stash/WQGuard-Brotli-Shield.stoverride")
+        ]
+
+        for (platform, relPath) in matrix {
+            let fileURL = repoRoot.appendingPathComponent(relPath)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path), "Missing physical shield file: \(relPath)")
+            let content = try String(contentsOf: fileURL, encoding: .utf8)
+            let validation = SurgeBrotliShieldHelper.shared.validateShield(content: content, for: platform)
+            XCTAssertTrue(validation.isCompliant, "\(platform.shortTitleEn) physical file failed compliance: \(validation.errors)")
+            XCTAssertTrue(validation.missingExclusions.isEmpty)
+        }
+
+        let scriptURL = repoRoot.appendingPathComponent("Shields/scripts/brotli-guard.js")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: scriptURL.path), "Shields/scripts/brotli-guard.js must exist")
+        let scriptContent = try String(contentsOf: scriptURL, encoding: .utf8)
+        XCTAssertTrue(scriptContent.contains("Content-Encoding"))
+        XCTAssertTrue(scriptContent.contains("HTTP/1.1 403 Forbidden"), "Guard script must support Quantumult X $task status format")
+        XCTAssertTrue(scriptContent.contains("status: 403"), "Guard script must support Surge/Shadowrocket/Loon/Stash response status format")
+    }
+
+    // MARK: - 2. All 16 Negative MITM Exclusions Verified Across All 5 Generators
 
     func testAll16NegativeExclusionsPresent() {
         let expectedExclusions = [
@@ -55,9 +93,13 @@ final class SurgeModuleTests: XCTestCase {
             "-*.alipay.com"
         ]
 
-        let template = SurgeBrotliShieldHelper.rawModuleTemplate
-        for exclusion in expectedExclusions {
-            XCTAssertTrue(template.contains(exclusion), "Template must contain negative exclusion: \(exclusion)")
+        for platform in ProxyShieldPlatform.allCases {
+            let generated = SurgeBrotliShieldHelper.shared.generateShieldContent(for: platform)
+            let validation = SurgeBrotliShieldHelper.shared.validateShield(content: generated, for: platform)
+            XCTAssertTrue(validation.isCompliant, "\(platform.shortTitleEn) generated shield must be compliant: \(validation.errors)")
+            for exclusion in expectedExclusions {
+                XCTAssertTrue(generated.contains(exclusion), "\(platform.shortTitleEn) must contain negative exclusion: \(exclusion)")
+            }
         }
     }
 
@@ -75,32 +117,75 @@ final class SurgeModuleTests: XCTestCase {
         XCTAssertTrue(template.contains("Blocked unsolicited Brotli response stream"))
     }
 
-    // MARK: - 4. Argument Substitution & File Export
+    // MARK: - 4. Platform Metadata, URL Schemes, Argument Substitution & File Export
+
+    func testPlatformURLSchemesAndInference() {
+        XCTAssertEqual(ProxyShieldPlatform(identifierOrPath: "/tmp/out.sgmodule"), .surge)
+        XCTAssertEqual(ProxyShieldPlatform(identifierOrPath: "/tmp/out.module"), .shadowrocket)
+        XCTAssertEqual(ProxyShieldPlatform(identifierOrPath: "/tmp/out.conf"), .quantumultX)
+        XCTAssertEqual(ProxyShieldPlatform(identifierOrPath: "/tmp/out.plugin"), .loon)
+        XCTAssertEqual(ProxyShieldPlatform(identifierOrPath: "/tmp/out.stoverride"), .stash)
+
+        XCTAssertEqual(ProxyShieldPlatform.surge.oneTapInstallURL?.scheme, "surge")
+        XCTAssertEqual(ProxyShieldPlatform.shadowrocket.oneTapInstallURL?.scheme, "shadowrocket")
+        XCTAssertEqual(ProxyShieldPlatform.quantumultX.oneTapInstallURL?.scheme, "quantumult-x")
+        XCTAssertEqual(ProxyShieldPlatform.loon.oneTapInstallURL?.scheme, "loon")
+        XCTAssertEqual(ProxyShieldPlatform.stash.oneTapInstallURL?.scheme, "stash")
+    }
 
     func testCustomArgumentSubstitution() {
         let customHosts = ["*.phishing.xyz", "*.bad.top"]
-        let generated = SurgeBrotliShieldHelper.shared.generateModuleContent(extraHosts: customHosts)
-
-        XCTAssertTrue(generated.contains("*.phishing.xyz, *.bad.top"))
-        XCTAssertFalse(generated.contains("{{{EXTRA_MITM_HOSTS}}}"))
+        for platform in ProxyShieldPlatform.allCases {
+            let generated = SurgeBrotliShieldHelper.shared.generateShieldContent(for: platform, extraHosts: customHosts)
+            XCTAssertTrue(generated.contains("*.phishing.xyz"), "\(platform) missing *.phishing.xyz")
+            XCTAssertTrue(generated.contains("*.bad.top"), "\(platform) missing *.bad.top")
+        }
     }
 
-    func testTemporaryFileExport() throws {
-        let exportURL = try SurgeBrotliShieldHelper.shared.exportToTemporaryFile(extraHosts: ["*.custom.tld"])
-        defer { try? FileManager.default.removeItem(at: exportURL) }
+    func testTemporaryFileExportAcrossAllPlatforms() throws {
+        for platform in ProxyShieldPlatform.allCases {
+            let exportURL = try SurgeBrotliShieldHelper.shared.exportShieldToTemporaryFile(
+                for: platform,
+                extraHosts: ["*.custom.tld"]
+            )
+            defer { try? FileManager.default.removeItem(at: exportURL) }
 
-        XCTAssertTrue(FileManager.default.fileExists(atPath: exportURL.path))
-        let content = try String(contentsOf: exportURL, encoding: .utf8)
-        XCTAssertTrue(content.contains("*.custom.tld"))
-        XCTAssertTrue(SurgeBrotliShieldHelper.shared.validateModule(content: content).isCompliant)
+            XCTAssertEqual(exportURL.pathExtension, platform.fileExtension)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: exportURL.path))
+            let content = try String(contentsOf: exportURL, encoding: .utf8)
+            XCTAssertTrue(content.contains("*.custom.tld"))
+            XCTAssertTrue(SurgeBrotliShieldHelper.shared.validateShield(content: content, for: platform).isCompliant)
+        }
     }
 
     func testValidationCatchesMissingExclusion() {
-        // Strip a critical exclusion like -guzzoni.apple.com
         let stripped = SurgeBrotliShieldHelper.rawModuleTemplate.replacingOccurrences(of: "-guzzoni.apple.com,", with: "")
         let result = SurgeBrotliShieldHelper.shared.validateModule(content: stripped)
 
         XCTAssertFalse(result.isCompliant)
         XCTAssertTrue(result.missingExclusions.contains("-guzzoni.apple.com"))
+    }
+
+    func testCLIExportShieldMultiFormat() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("wqguard_cli_shields_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        for platform in ProxyShieldPlatform.allCases {
+            let outURL = tempDir.appendingPathComponent("shield.\(platform.fileExtension)")
+            let pipeOut = Pipe()
+            let pipeErr = Pipe()
+            let code = await CLICommandRunner.run(
+                arguments: ["wqguard-cli", "--export-shield", outURL.path],
+                stdout: pipeOut.fileHandleForWriting,
+                stderr: pipeErr.fileHandleForWriting
+            )
+            pipeOut.fileHandleForWriting.closeFile()
+            pipeErr.fileHandleForWriting.closeFile()
+
+            XCTAssertEqual(code, 0, "CLI --export-shield failed for \(platform)")
+            let written = try String(contentsOf: outURL, encoding: .utf8)
+            XCTAssertTrue(SurgeBrotliShieldHelper.shared.validateShield(content: written, for: platform).isCompliant)
+        }
     }
 }

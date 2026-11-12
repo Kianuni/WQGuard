@@ -369,8 +369,8 @@ public final class FirmwarePostureEngine: Sendable {
             details: "libbrotli 解码器中存在堆缓冲区越界写入缺陷。恶意服务端通过 HTTP/2 下发精心构造的 Content-Encoding: br 压缩流，可诱发 CFNetwork / WebKit 进程内存破坏与任意代码执行。",
             mitigations: [
                 ActionableMitigation(
-                    title: "启用 Surge Brotli 降级护盾",
-                    instructions: "在 Surge 中安装 WQGuard · 防 Brotli 溢出降级护盾模块，强制将 HTTP 请求头 Accept-Encoding 降级为 'gzip, deflate'，阻断网络传输层下发的恶意 Brotli 数据流。",
+                    title: "启用代理工具 Brotli 降级护盾 (Surge / 小火箭 / 圈 X / Loon / Stash)",
+                    instructions: "在 Surge、Shadowrocket、Quantumult X、Loon 或 Stash 中导入 WQGuard · 防 Brotli 溢出降级护盾规则，强制将 HTTP 请求头 Accept-Encoding 降级为 'gzip, deflate'，阻断网络传输层下发的恶意 Brotli 数据流。",
                     category: .networkProxy,
                     actionUrl: "surge:///install-module",
                     relatedCVEs: ["CVE-2026-111497"]
