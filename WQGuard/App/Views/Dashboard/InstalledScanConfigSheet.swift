@@ -17,11 +17,19 @@ public struct InstalledScanConfigSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var copiedCommandToast = false
+    @State private var copiedDeviceCtlToast = false
+    @State private var copiedTunnelToast = false
+    @State private var copiedDeviceToast = false
     @State private var showTutorial = false
     @State private var localBannerText: String? = nil
     @State private var localBannerIsError: Bool = false
 
+    private let cliDeviceCtlCommand = #"ID=$(xcrun devicectl list devices -j - | python3 -c "import sys,json; devs=json.load(sys.stdin).get('result',{}).get('devices',[]); print(next((d['identifier'] for d in devs if 'Simulator' not in str(d)), ''))") && xcrun devicectl device info apps --device "$ID" --include-all-apps --include-app-group-identifiers --include-container-paths --json-output ~/Desktop/installed_apps.json && echo "✅ 已导出 ~/Desktop/installed_apps.json""#
     private let cliExportCommand = "pymobiledevice3 apps list > installed_apps.json"
+
+    private var subnetDiagnosis: LocalNetworkSubnetDiagnosis {
+        LocalNetworkSubnetDiagnosis.inspect(configuredHost: vm.lockdownHost)
+    }
 
     public init() {}
 
@@ -105,6 +113,60 @@ public struct InstalledScanConfigSheet: View {
                             .foregroundColor(.teal)
                     }
 
+                    if let wifiIP = subnetDiagnosis.wifiIP,
+                       let recTunnel = subnetDiagnosis.recommendedTunnelCIDR,
+                       let recDevice = subnetDiagnosis.recommendedDeviceCIDR,
+                       let recHost = subnetDiagnosis.recommendedDeviceIP {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: subnetDiagnosis.hasSubnetMismatch ? "exclamationmark.shield.fill" : "checkmark.shield.fill")
+                                    .foregroundColor(subnetDiagnosis.hasSubnetMismatch ? .orange : .green)
+                                Text(subnetDiagnosis.hasSubnetMismatch
+                                     ? "iOS 26.4+ / 27 子网校验提示（当前 Wi-Fi: \(wifiIP)）"
+                                     : "已对齐当前 Wi-Fi 同网段（\(wifiIP)）")
+                                    .font(.caption.bold())
+                                    .foregroundColor(subnetDiagnosis.hasSubnetMismatch ? .orange : .green)
+                            }
+                            Text("新系统 lockdownd 会拦截不在当前 Wi-Fi 网段内的 10.7.0.x 隧道。若直连报 EOF 关闭，请将 LocalDevVPN 改为下方同网段地址并重连：")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+
+                            HStack(spacing: 8) {
+                                Button(action: {
+                                    #if os(iOS)
+                                    UIPasteboard.general.string = recTunnel
+                                    #endif
+                                    copiedTunnelToast = true
+                                }) {
+                                    Text(copiedTunnelToast ? "✅ 已复制 Tunnel" : "复制 Tunnel: \(recTunnel)")
+                                        .font(.caption2.monospaced().bold())
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(Color.cyan.opacity(0.15))
+                                        .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+
+                                Button(action: {
+                                    #if os(iOS)
+                                    UIPasteboard.general.string = recDevice
+                                    #endif
+                                    vm.lockdownHost = recHost
+                                    copiedDeviceToast = true
+                                }) {
+                                    Text(copiedDeviceToast ? "✅ 已复制并设为网关" : "复制 Device: \(recDevice) 并填入")
+                                        .font(.caption2.monospaced().bold())
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(Color.teal.opacity(0.15))
+                                        .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+
                     Button(action: { pickPairingFile() }) {
                         Label(
                             vm.hasPairingFile ? "从文件选择更换配对文件 (.plist)" : "方式 1：从「文件」选择配对文件 (.plist / .mobiledevicepairing)",
@@ -159,7 +221,7 @@ public struct InstalledScanConfigSheet: View {
                                     .font(.caption)
                                     .foregroundColor(.green)
                             } else {
-                                Text("支持 pymobiledevice3 (.json) 或 ideviceinstaller (.plist/.xml)")
+                                Text("支持 Mac 原生 devicectl (.json)、pymobiledevice3 (.json) 或 .plist")
                                     .font(.caption)
                                     .foregroundColor(.gray)
                             }
@@ -173,12 +235,30 @@ public struct InstalledScanConfigSheet: View {
 
                     Button(action: {
                         #if os(iOS)
+                        UIPasteboard.general.string = cliDeviceCtlCommand
+                        #endif
+                        copiedDeviceCtlToast = true
+                    }) {
+                        HStack {
+                            Label("复制 Mac 免装插件一键导出命令（推荐 iOS 27）", systemImage: "apple.terminal.fill")
+                                .foregroundColor(.teal)
+                            Spacer()
+                            if copiedDeviceCtlToast {
+                                Text("已复制")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.green)
+                            }
+                        }
+                    }
+
+                    Button(action: {
+                        #if os(iOS)
                         UIPasteboard.general.string = cliExportCommand
                         #endif
                         copiedCommandToast = true
                     }) {
                         HStack {
-                            Label("复制电脑端一键导出快照命令", systemImage: "terminal.fill")
+                            Label("复制 pymobiledevice3 导出命令（跨平台）", systemImage: "terminal.fill")
                             Spacer()
                             if copiedCommandToast {
                                 Text("已复制")
@@ -201,9 +281,9 @@ public struct InstalledScanConfigSheet: View {
                     Toggle("同时纳入 App Store 官方应用审计", isOn: $vm.includeAppStoreAppsInRegistry)
                         .font(.subheadline)
                 } header: {
-                    Text("引擎 1B · 离线注册表快照（无需 VPN，与 1A 二选一）")
+                    Text("引擎 1B · 离线注册表快照（无需 VPN，100% 兼容 iOS 27）")
                 } footer: {
-                    Text("电脑连接手机执行 `\(cliExportCommand)`，隔空投送至手机用 WQGuard 打开即可秒扫全机已安装应用。")
+                    Text("Mac 连接手机后直接在「终端」粘贴上方第一条命令（调用苹果 Xcode 原生 CoreDevice 通道，无需安装第三方工具），将桌面生成的 installed_apps.json 隔空投送至手机用 WQGuard 打开即可秒扫全机应用。")
                 }
 
                 // Engine 2: Bound Signer Folder Correlation

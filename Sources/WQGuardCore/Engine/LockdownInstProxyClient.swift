@@ -89,6 +89,12 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
             plist = outerPlist
         }
 
+        if plist["HostID"] == nil && plist["HostId"] == nil {
+            if plist["remote_unlock_host_key"] != nil || (plist["public_key"] != nil && plist["private_key"] != nil) {
+                throw LockdownClientError.invalidPairingFile("检测到 RPPairing (CoreDevice 49152) 格式配对文件。iOS 27 推荐直接使用下方「方式 B：复制 Mac 原生 devicectl 命令一键导出快照」（无需配置 VPN）。")
+            }
+        }
+
         guard let hostID = (plist["HostID"] as? String) ?? (plist["HostId"] as? String), !hostID.isEmpty else {
             throw LockdownClientError.invalidPairingFile("缺少 HostID（确认导入的是配对文件而非普通配置 plist）")
         }
@@ -183,6 +189,209 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
     }
 }
 
+/// Pure-POSIX `getifaddrs()` inspector that detects iOS 26.4+ / iOS 27 `lockdownd` Wi-Fi subnet mismatches
+/// and calculates collision-free `/32` addresses inside the current `en0` Wi-Fi netmask for `LocalDevVPN`.
+public struct LocalNetworkSubnetDiagnosis: Sendable, Equatable {
+    public let wifiInterface: String?
+    public let wifiIP: String?
+    public let wifiNetmask: String?
+    public let wifiPrefixLength: Int?
+    public let utunInterface: String?
+    public let utunLocalIP: String?
+    public let utunPeerIP: String?
+    public let configuredHost: String
+    public let recommendedTunnelIP: String?
+    public let recommendedDeviceIP: String?
+    public let hasSubnetMismatch: Bool
+
+    public var recommendedTunnelCIDR: String? {
+        recommendedTunnelIP.map { "\($0)/32" }
+    }
+
+    public var recommendedDeviceCIDR: String? {
+        recommendedDeviceIP.map { "\($0)/32" }
+    }
+
+    public init(
+        wifiInterface: String?,
+        wifiIP: String?,
+        wifiNetmask: String?,
+        wifiPrefixLength: Int?,
+        utunInterface: String?,
+        utunLocalIP: String?,
+        utunPeerIP: String?,
+        configuredHost: String,
+        recommendedTunnelIP: String?,
+        recommendedDeviceIP: String?,
+        hasSubnetMismatch: Bool
+    ) {
+        self.wifiInterface = wifiInterface
+        self.wifiIP = wifiIP
+        self.wifiNetmask = wifiNetmask
+        self.wifiPrefixLength = wifiPrefixLength
+        self.utunInterface = utunInterface
+        self.utunLocalIP = utunLocalIP
+        self.utunPeerIP = utunPeerIP
+        self.configuredHost = configuredHost
+        self.recommendedTunnelIP = recommendedTunnelIP
+        self.recommendedDeviceIP = recommendedDeviceIP
+        self.hasSubnetMismatch = hasSubnetMismatch
+    }
+
+    public static func inspect(configuredHost: String = "10.7.0.1") -> LocalNetworkSubnetDiagnosis {
+        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else {
+            return LocalNetworkSubnetDiagnosis(
+                wifiInterface: nil, wifiIP: nil, wifiNetmask: nil, wifiPrefixLength: nil,
+                utunInterface: nil, utunLocalIP: nil, utunPeerIP: nil,
+                configuredHost: configuredHost,
+                recommendedTunnelIP: nil, recommendedDeviceIP: nil,
+                hasSubnetMismatch: false
+            )
+        }
+        defer { freeifaddrs(ifaddrPtr) }
+
+        var foundWifiName: String?
+        var foundWifiIP: String?
+        var foundWifiMask: String?
+        var foundUtunName: String?
+        var foundUtunLocal: String?
+        var foundUtunPeer: String?
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entryPtr = cursor {
+            let entry = entryPtr.pointee
+            cursor = entry.ifa_next
+
+            let flags = Int32(entry.ifa_flags)
+            guard (flags & IFF_UP) != 0,
+                  let addr = entry.ifa_addr,
+                  addr.pointee.sa_family == sa_family_t(AF_INET) else {
+                continue
+            }
+
+            let name = String(cString: entry.ifa_name)
+            guard let ipStr = ipv4String(from: addr) else { continue }
+
+            if (name == "en0" || (foundWifiIP == nil && (name == "en1" || name == "bridge100"))),
+               !ipStr.hasPrefix("169.254.") {
+                foundWifiName = name
+                foundWifiIP = ipStr
+                foundWifiMask = entry.ifa_netmask.flatMap { ipv4String(from: $0) } ?? "255.255.255.0"
+            } else if name.hasPrefix("utun") {
+                // Prefer non-Carrier-Grade-NAT / non-system-push utun if multiple exist, especially 10.7.x or LAN-matching utun
+                let isLikelyLocalDevVPN = ipStr.hasPrefix("10.7.") || ipStr.hasPrefix("192.168.") || ipStr.hasPrefix("172.") || foundUtunLocal == nil
+                if isLikelyLocalDevVPN {
+                    foundUtunName = name
+                    foundUtunLocal = ipStr
+                    if let dst = entry.ifa_dstaddr,
+                       dst.pointee.sa_family == sa_family_t(AF_INET),
+                       let peer = ipv4String(from: dst),
+                       peer != ipStr && peer != "0.0.0.0" {
+                        foundUtunPeer = peer
+                    }
+                }
+            }
+        }
+
+        var prefixLen: Int?
+        var recTunnel: String?
+        var recDevice: String?
+        var mismatch = false
+
+        if let wIP = foundWifiIP, let wMask = foundWifiMask,
+           let ipVal = parseIPv4UInt32(wIP), let maskVal = parseIPv4UInt32(wMask) {
+            prefixLen = maskVal.nonzeroBitCount
+            if let pair = computeRecommendedPair(wifiIP: ipVal, netmask: maskVal) {
+                recTunnel = formatIPv4UInt32(pair.tunnel)
+                recDevice = formatIPv4UInt32(pair.device)
+            }
+            let cleanHost = configuredHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            let targetToCheck = cleanHost.isEmpty ? "10.7.0.1" : cleanHost
+            if !isIPv4(targetToCheck, inSameSubnetAs: wIP, netmask: wMask) {
+                mismatch = true
+            } else if let uLocal = foundUtunLocal, !isIPv4(uLocal, inSameSubnetAs: wIP, netmask: wMask) {
+                mismatch = true
+            }
+        }
+
+        return LocalNetworkSubnetDiagnosis(
+            wifiInterface: foundWifiName,
+            wifiIP: foundWifiIP,
+            wifiNetmask: foundWifiMask,
+            wifiPrefixLength: prefixLen,
+            utunInterface: foundUtunName,
+            utunLocalIP: foundUtunLocal,
+            utunPeerIP: foundUtunPeer,
+            configuredHost: configuredHost,
+            recommendedTunnelIP: recTunnel,
+            recommendedDeviceIP: recDevice,
+            hasSubnetMismatch: mismatch
+        )
+    }
+
+    public static func isIPv4(_ candidate: String, inSameSubnetAs baseIP: String, netmask: String) -> Bool {
+        guard let c = parseIPv4UInt32(candidate),
+              let b = parseIPv4UInt32(baseIP),
+              let m = parseIPv4UInt32(netmask) else {
+            return false
+        }
+        return ((c ^ b) & m) == 0
+    }
+
+    public static func computeRecommendedPair(wifiIP: UInt32, netmask: UInt32) -> (tunnel: UInt32, device: UInt32)? {
+        // Need at least a /29 (8 addresses) to safely pick two unused host addresses away from gateway & self
+        guard netmask <= 0xFFFFFFF8 else { return nil }
+
+        if netmask <= 0xFFFFFF00 {
+            // Standard /24, /23, /22, /16: stay in the same /24 block as wifiIP so it always fits `netmask`
+            let block24 = wifiIP & 0xFFFFFF00
+            let candidates: [UInt32] = [251, 252, 249, 250, 247, 248].map { block24 | $0 }.filter { $0 != wifiIP }
+            if candidates.count >= 2 {
+                return (candidates[0], candidates[1])
+            }
+        } else {
+            let network = wifiIP & netmask
+            let broadcast = network | (~netmask)
+            var candidates: [UInt32] = []
+            var host = broadcast - 1
+            while host > network + 1 {
+                if host != wifiIP {
+                    candidates.append(host)
+                    if candidates.count == 2 {
+                        return (candidates[1], candidates[0])
+                    }
+                }
+                host -= 1
+            }
+        }
+        return nil
+    }
+
+    private static func ipv4String(from sa: UnsafePointer<sockaddr>) -> String? {
+        var addrIn = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &addrIn.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else {
+            return nil
+        }
+        return String(cString: buf)
+    }
+
+    public static func parseIPv4UInt32(_ ip: String) -> UInt32? {
+        let clean = ip.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ip
+        var inAddr = in_addr()
+        guard inet_pton(AF_INET, clean, &inAddr) == 1 else { return nil }
+        return UInt32(bigEndian: inAddr.s_addr)
+    }
+
+    public static func formatIPv4UInt32(_ value: UInt32) -> String {
+        var inAddr = in_addr(s_addr: value.bigEndian)
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        _ = inet_ntop(AF_INET, &inAddr, &buf, socklen_t(INET_ADDRSTRLEN))
+        return String(cString: buf)
+    }
+}
+
 /// Pure-Swift client speaking Apple's Lockdown + `com.apple.mobile.installation_proxy` plist protocol.
 public final class LockdownInstProxyClient: @unchecked Sendable {
     public static let shared = LockdownInstProxyClient()
@@ -194,7 +403,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
 
     // MARK: - Public Entry Point
 
-    /// Connects to `lockdownd` over LocalDevVPN (default `10.7.0.1`, fallback `127.0.0.1`),
+    /// Connects to `lockdownd` over LocalDevVPN (default `10.7.0.1`, plus auto-detected Wi-Fi subnet / `utun` peer),
     /// starts `com.apple.mobile.installation_proxy`, and returns all installed app records.
     public func fetchInstalledApps(
         pairing: LockdownPairingFile,
@@ -202,40 +411,129 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
     ) async throws -> [InstalledAppRegistryRecord] {
         return try await Task.detached(priority: .userInitiated) { [self] in
             let tlsOptions = try self.createTLSOptions(from: pairing)
-            var candidateHosts: [String] = []
-            for h in [preferredHost, "10.7.0.1", "10.7.0.2", "127.0.0.1"] where !h.isEmpty && !candidateHosts.contains(h) {
-                candidateHosts.append(h)
-            }
+            let cleanPreferred = preferredHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            let primaryHost = cleanPreferred.isEmpty ? "10.7.0.1" : cleanPreferred
+            let diagnosis = LocalNetworkSubnetDiagnosis.inspect(configuredHost: primaryHost)
 
-            var connectedFD: Int32 = -1
-            var activeHost = preferredHost
-            for host in candidateHosts {
-                if let fd = try? Self.connectPOSIXSocket(host: host, port: Self.lockdownPort, timeoutMs: 2200) {
-                    connectedFD = fd
-                    activeHost = host
-                    break
+            var candidateHosts: [String] = []
+            let rawCandidates: [String?] = [
+                primaryHost,
+                diagnosis.utunPeerIP,
+                diagnosis.recommendedDeviceIP,
+                "10.7.0.1",
+                "10.7.0.2",
+                "127.0.0.1"
+            ]
+            for maybeHost in rawCandidates {
+                if let h = maybeHost?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !h.isEmpty,
+                   !candidateHosts.contains(h) {
+                    candidateHosts.append(h)
                 }
             }
 
-            guard connectedFD >= 0 else {
-                throw LockdownClientError.lockdownUnreachable(preferredHost)
+            // Trigger Network.framework Local Network consent prompt before raw BSD socket connects.
+            // Raw POSIX `Darwin.socket` does not reliably present iOS's NECP Local Network permission dialog!
+            Self.warmUpLocalNetworkPermission(host: primaryHost, port: Self.lockdownPort)
+
+            var connectedAtLeastOnce = false
+            var lastAttemptError: Error?
+            var sawImmediateEOF = false
+
+            for host in candidateHosts {
+                guard let fd = try? Self.connectPOSIXSocket(host: host, port: Self.lockdownPort, timeoutMs: 2500) else {
+                    continue
+                }
+                connectedAtLeastOnce = true
+
+                do {
+                    let (servicePort, enableServiceSSL) = try self.negotiateInstallationProxyPort(
+                        rawSocketFD: fd,
+                        pairing: pairing,
+                        tlsOptions: tlsOptions
+                    )
+                    return try self.browseApplications(
+                        host: host,
+                        port: servicePort,
+                        useTLS: enableServiceSSL,
+                        tlsOptions: tlsOptions
+                    )
+                } catch let err as LockdownClientError {
+                    lastAttemptError = err
+                    if case .protocolError(let msg) = err, msg.contains("EOF") {
+                        sawImmediateEOF = true
+                        // Try next candidate host (e.g. if 10.7.0.1 hit utun subnet filter, try recommendedDeviceIP)
+                        continue
+                    }
+                    throw err
+                } catch {
+                    lastAttemptError = error
+                    throw error
+                }
             }
 
-            // Step 1 & 2: Plaintext `QueryType` and `StartSession` on `connectedFD`
-            let (servicePort, enableServiceSSL) = try self.negotiateInstallationProxyPort(
-                rawSocketFD: connectedFD,
-                pairing: pairing,
-                tlsOptions: tlsOptions
-            )
+            guard connectedAtLeastOnce else {
+                throw LockdownClientError.lockdownUnreachable(primaryHost)
+            }
 
-            // Step 3: Connect to `com.apple.mobile.installation_proxy` on `activeHost:servicePort`
-            return try self.browseApplications(
-                host: activeHost,
-                port: servicePort,
-                useTLS: enableServiceSSL,
-                tlsOptions: tlsOptions
-            )
+            if sawImmediateEOF {
+                throw Self.buildEOFDiagnosticError(diagnosis: diagnosis)
+            }
+
+            throw lastAttemptError ?? LockdownClientError.lockdownUnreachable(primaryHost)
         }.value
+    }
+
+    private static func buildEOFDiagnosticError(diagnosis: LocalNetworkSubnetDiagnosis) -> LockdownClientError {
+        if diagnosis.hasSubnetMismatch,
+           let wifiIP = diagnosis.wifiIP,
+           let recTunnel = diagnosis.recommendedTunnelCIDR,
+           let recDevice = diagnosis.recommendedDeviceCIDR,
+           let recHost = diagnosis.recommendedDeviceIP {
+            return .protocolError(
+                "iOS 26.4+ / iOS 27 系统 lockdownd 新增了 VPN 子网校验，检测到当前 Wi-Fi (\(wifiIP)) 与 LocalDevVPN (\(diagnosis.configuredHost)) 不在同一网段，握手被系统立即断开 (EOF)。\n\n解决方法（二选一）：\n1️⃣ 在 LocalDevVPN 设置中将 Tunnel IP 改为 \(recTunnel)、Device IP 改为 \(recDevice) 后重连 VPN，并在 WQGuard 将网关设为 \(recHost)（已在「已安装应用扫描源」页面提供一键复制）；\n2️⃣ 或者直接使用「方式 B：电脑端免装工具一键导出快照」（Xcode 原生 devicectl 走 iOS 27 CoreDevice 通道，无需 VPN 秒扫全机）。"
+            )
+        }
+        return .protocolError(
+            "连接建立后被本机 lockdownd (62078) 立即主动关闭 (EOF)。当前 iOS 26.4+ / iOS 27 系统限制了旧版 62078 端口本地 VPN 配对会话。\n\n👉 推荐改用「方式 B：电脑端免装工具一键导出快照」：在「已安装应用扫描源」复制 Mac 原生 xcrun devicectl 命令（无需安装第三方工具、无需开启 VPN），导出 installed_apps.json 发到手机即可完整扫描全机应用。"
+        )
+    }
+
+    /// Opens a brief `NWConnection` so iOS NECP triggers the system Local Network permission prompt
+    /// and waits up to 15s ONLY if the connection enters `.waiting` (meaning user consent alert is on screen).
+    private static func warmUpLocalNetworkPermission(host: String, port: UInt16) {
+        guard host != "127.0.0.1", let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        let tcp = NWProtocolTCP.Options()
+        tcp.connectionTimeout = 3
+        let params = NWParameters(tls: nil, tcp: tcp)
+        let queue = DispatchQueue(label: "com.wqguard.localnet.warmup")
+        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
+
+        let readyOrFailSema = DispatchSemaphore(value: 0)
+        let waitingFlag = LockedBox<Bool>(false)
+        let finishedFlag = LockedBox<Bool>(false)
+
+        conn.stateUpdateHandler = { state in
+            switch state {
+            case .waiting:
+                waitingFlag.value = true
+            case .ready, .failed, .cancelled:
+                if !finishedFlag.value {
+                    finishedFlag.value = true
+                    readyOrFailSema.signal()
+                }
+            default:
+                break
+            }
+        }
+        conn.start(queue: queue)
+
+        // Wait briefly (0.6s) to see if connection finishes immediately or enters `.waiting` (Local Network prompt)
+        if readyOrFailSema.wait(timeout: .now() + 0.6) == .timedOut {
+            let extraWait: Double = waitingFlag.value ? 14.0 : 1.5
+            _ = readyOrFailSema.wait(timeout: .now() + extraWait)
+        }
+        conn.cancel()
     }
 
     // MARK: - Step 1 & 2: Lockdown Session & StartService
@@ -253,8 +551,8 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         }
 
         // 1. QueryType
-        try Self.writePlistPacket(["Request": "QueryType", "Label": "WQGuard"], toFD: rawSocketFD)
-        let queryResp = try Self.readPlistPacket(fromFD: rawSocketFD)
+        try Self.writePlistPacket(["Request": "QueryType", "Label": "WQGuard"], toFD: rawSocketFD, step: "QueryType")
+        let queryResp = try Self.readPlistPacket(fromFD: rawSocketFD, step: "QueryType")
         guard (queryResp["Type"] as? String) == "com.apple.mobile.lockdown" else {
             throw LockdownClientError.protocolError("非预期的 QueryType 响应")
         }
@@ -266,8 +564,8 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             "SystemBUID": pairing.systemBUID,
             "Label": "WQGuard"
         ]
-        try Self.writePlistPacket(startSessionReq, toFD: rawSocketFD)
-        let sessionResp = try Self.readPlistPacket(fromFD: rawSocketFD)
+        try Self.writePlistPacket(startSessionReq, toFD: rawSocketFD, step: "StartSession")
+        let sessionResp = try Self.readPlistPacket(fromFD: rawSocketFD, step: "StartSession")
         if let err = sessionResp["Error"] as? String {
             throw LockdownClientError.sessionRejected(err)
         }
@@ -281,7 +579,11 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
 
         let serviceResp: [String: Any]
         if enableSessionSSL {
-            // Upgrade the existing TCP socket to TLS via a local ephemeral loopback bridge
+            // Extend socket timeout before handing over to TLS loopback relay
+            var relayTV = timeval(tv_sec: 30, tv_usec: 0)
+            setsockopt(rawSocketFD, SOL_SOCKET, SO_RCVTIMEO, &relayTV, socklen_t(MemoryLayout<timeval>.size))
+            setsockopt(rawSocketFD, SOL_SOCKET, SO_SNDTIMEO, &relayTV, socklen_t(MemoryLayout<timeval>.size))
+
             let relay = try LocalSocketTLSRelay(upstreamFD: rawSocketFD)
             socketTransferredToRelay = true
             defer { relay.stop() }
@@ -292,8 +594,8 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             try conn.sendPlist(startServiceReq)
             serviceResp = try conn.receivePlist()
         } else {
-            try Self.writePlistPacket(startServiceReq, toFD: rawSocketFD)
-            serviceResp = try Self.readPlistPacket(fromFD: rawSocketFD)
+            try Self.writePlistPacket(startServiceReq, toFD: rawSocketFD, step: "StartService")
+            serviceResp = try Self.readPlistPacket(fromFD: rawSocketFD, step: "StartService")
         }
 
         if let err = serviceResp["Error"] as? String {
@@ -601,7 +903,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         return fd
     }
 
-    fileprivate static func writePlistPacket(_ dict: [String: Any], toFD fd: Int32) throws {
+    fileprivate static func writePlistPacket(_ dict: [String: Any], toFD fd: Int32, step: String = "Lockdown") throws {
         let plistData = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
         var lengthBE = UInt32(plistData.count).bigEndian
         var packet = Data(bytes: &lengthBE, count: 4)
@@ -612,36 +914,53 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             var sent = 0
             while sent < rawBuf.count {
                 let n = Darwin.send(fd, base.advanced(by: sent), rawBuf.count - sent, 0)
+                if n < 0 && errno == EINTR {
+                    continue
+                }
                 if n <= 0 {
-                    throw LockdownClientError.protocolError("Socket 写入中断")
+                    let errCode = errno
+                    if errCode == EPIPE || errCode == ECONNRESET {
+                        throw LockdownClientError.protocolError("\(step) 阶段连接被对端关闭 (EOF/EPIPE)")
+                    }
+                    throw LockdownClientError.protocolError("\(step) 阶段 Socket 写入中断 (errno=\(errCode))")
                 }
                 sent += n
             }
         }
     }
 
-    fileprivate static func readPlistPacket(fromFD fd: Int32) throws -> [String: Any] {
-        let header = try readExactBytes(count: 4, fromFD: fd)
+    fileprivate static func readPlistPacket(fromFD fd: Int32, step: String = "Lockdown") throws -> [String: Any] {
+        let header = try readExactBytes(count: 4, fromFD: fd, step: step)
         let length = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         guard length > 0, length <= 64 * 1024 * 1024 else {
-            throw LockdownClientError.protocolError("非法数据包长度: \(length)")
+            throw LockdownClientError.protocolError("\(step) 非法数据包长度: \(length)")
         }
-        let body = try readExactBytes(count: Int(length), fromFD: fd)
+        let body = try readExactBytes(count: Int(length), fromFD: fd, step: step)
         guard let dict = (try? PropertyListSerialization.propertyList(from: body, options: [], format: nil)) as? [String: Any] else {
-            throw LockdownClientError.protocolError("响应载荷不是有效的字典 Plist")
+            throw LockdownClientError.protocolError("\(step) 响应载荷不是有效的字典 Plist")
         }
         return dict
     }
 
-    private static func readExactBytes(count: Int, fromFD fd: Int32) throws -> Data {
+    private static func readExactBytes(count: Int, fromFD fd: Int32, step: String) throws -> Data {
         var buffer = Data(count: count)
         try buffer.withUnsafeMutableBytes { rawBuf in
             guard let base = rawBuf.baseAddress else { return }
             var offset = 0
             while offset < count {
                 let n = Darwin.recv(fd, base.advanced(by: offset), count - offset, 0)
-                if n <= 0 {
-                    throw LockdownClientError.protocolError("Socket 读取超时或连接关闭")
+                if n < 0 && errno == EINTR {
+                    continue
+                }
+                if n == 0 {
+                    throw LockdownClientError.protocolError("\(step) 阶段对端主动关闭连接 (EOF)")
+                }
+                if n < 0 {
+                    let errCode = errno
+                    if errCode == ECONNRESET {
+                        throw LockdownClientError.protocolError("\(step) 阶段连接被对端重置 (EOF/ECONNRESET)")
+                    }
+                    throw LockdownClientError.protocolError("\(step) 阶段 Socket 读取超时 (errno=\(errCode))")
                 }
                 offset += n
             }
@@ -726,12 +1045,14 @@ private final class LocalSocketTLSRelay: @unchecked Sendable {
         var buf = [UInt8](repeating: 0, count: 16384)
         while true {
             let n = Darwin.recv(src, &buf, buf.count, 0)
+            if n < 0 && errno == EINTR { continue }
             if n <= 0 { break }
             var sent = 0
             while sent < n {
                 let w = buf.withUnsafeBytes { ptr in
                     Darwin.send(dst, ptr.baseAddress!.advanced(by: sent), n - sent, 0)
                 }
+                if w < 0 && errno == EINTR { continue }
                 if w <= 0 { return }
                 sent += w
             }

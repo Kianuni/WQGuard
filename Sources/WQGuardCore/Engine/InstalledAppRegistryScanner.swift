@@ -20,7 +20,7 @@ public enum InstalledAppRegistryError: Error, LocalizedError, Sendable, Equatabl
         case .fileNotFound(let path):
             return "未找到已安装应用快照文件: \(path)"
         case .invalidSnapshotFormat(let detail):
-            return "无法解析已安装应用快照格式 (\(detail))。请导入有效的 installation_proxy .plist/.xml 或 pymobiledevice3 .json 文件。"
+            return "无法解析已安装应用快照格式 (\(detail))。请导入有效的 Xcode devicectl (.json)、pymobiledevice3 (.json) 或 installation_proxy (.plist/.xml) 文件。"
         case .emptyApplicationList:
             return "已安装应用注册表为空，未读取到任何应用记录。"
         }
@@ -182,6 +182,80 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             containerPath: containerPath
         )
     }
+
+    /// Parses a single item from Apple Xcode `xcrun devicectl device info apps --json-output` (`result.apps[]`).
+    public static func fromDeviceCtlDictionary(_ dict: [String: Any]) -> InstalledAppRegistryRecord? {
+        guard let rawBid = dict["bundleIdentifier"] as? String else { return nil }
+        let bundleId = rawBid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundleId.isEmpty else { return nil }
+
+        let displayName = (dict["name"] as? String) ?? bundleId
+        let version = (dict["version"] as? String)
+            ?? (dict["bundleVersion"] as? String)
+            ?? "1.0"
+
+        let isDefaultApp = (dict["defaultApp"] as? Bool) ?? false
+        let isInternalApp = (dict["internalApp"] as? Bool) ?? false
+        let builtByDeveloper = (dict["builtByDeveloper"] as? Bool) ?? false
+
+        let appType = (isDefaultApp || isInternalApp) ? "System" : "User"
+        let profileValidated = builtByDeveloper
+        let hasAppStoreMetadata = !isDefaultApp && !isInternalApp && !builtByDeveloper
+        let signerIdentity: String? = builtByDeveloper
+            ? "Apple Development (CoreDevice)"
+            : (hasAppStoreMetadata ? "Apple iPhone OS Application Signing" : nil)
+
+        var groupSet: Set<String> = []
+        if let arr = dict["appGroupIdentifiers"] as? [String] {
+            for g in arr {
+                let trimmed = g.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { groupSet.insert(trimmed) }
+            }
+        }
+        if let map = dict["groupContainerPaths"] as? [String: Any] {
+            for k in map.keys {
+                let trimmed = k.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { groupSet.insert(trimmed) }
+            }
+        }
+        let sortedGroups = Array(groupSet).sorted()
+
+        let resolvedBundlePath: String = {
+            if let urlStr = dict["url"] as? String, let u = URL(string: urlStr), u.isFileURL {
+                return u.path
+            }
+            if let container = dict["bundleContainerPath"] as? String, !container.isEmpty {
+                return container
+            }
+            return isDefaultApp ? "/Applications/\(bundleId).app" : "/var/containers/Bundle/Application/\(bundleId)"
+        }()
+
+        let containerPath = dict["dataContainerPath"] as? String
+        var allEntKeys: [String] = []
+        if !sortedGroups.isEmpty {
+            allEntKeys.append("com.apple.security.application-groups")
+        }
+
+        return InstalledAppRegistryRecord(
+            bundleId: bundleId,
+            displayName: displayName,
+            version: version,
+            applicationType: appType,
+            signerIdentity: signerIdentity,
+            profileValidated: profileValidated,
+            hasAppStoreMetadata: hasAppStoreMetadata,
+            teamId: nil,
+            appGroups: sortedGroups,
+            keychainAccessGroups: [],
+            tccAllowedServices: [],
+            booleanEntitlements: [:],
+            stringEntitlements: [:],
+            allEntitlementKeys: allEntKeys,
+            backgroundModes: [],
+            bundlePath: resolvedBundlePath,
+            containerPath: containerPath
+        )
+    }
 }
 
 /// Evaluates installed application registry snapshots and live `installation_proxy` records.
@@ -276,19 +350,35 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
         if let array = rootObject as? [[String: Any]] {
             for item in array {
-                // Could either be an app record directly, or a Browse packet containing `CurrentList`
+                // Could either be an app record directly, devicectl record, or a Browse packet containing `CurrentList`
                 if let currentList = item["CurrentList"] as? [[String: Any]] {
                     for sub in currentList {
                         if let rec = InstalledAppRegistryRecord.fromDictionary(sub) {
                             results.append(rec)
                         }
                     }
-                } else if let rec = InstalledAppRegistryRecord.fromDictionary(item) {
+                } else if let rec = InstalledAppRegistryRecord.fromDictionary(item)
+                            ?? InstalledAppRegistryRecord.fromDeviceCtlDictionary(item) {
                     results.append(rec)
                 }
             }
         } else if let dict = rootObject as? [String: Any] {
-            if let currentList = dict["CurrentList"] as? [[String: Any]] {
+            if let resultObj = dict["result"] as? [String: Any],
+               let ctlApps = resultObj["apps"] as? [[String: Any]] {
+                for sub in ctlApps {
+                    if let rec = InstalledAppRegistryRecord.fromDeviceCtlDictionary(sub)
+                        ?? InstalledAppRegistryRecord.fromDictionary(sub) {
+                        results.append(rec)
+                    }
+                }
+            } else if let ctlApps = dict["apps"] as? [[String: Any]] {
+                for sub in ctlApps {
+                    if let rec = InstalledAppRegistryRecord.fromDeviceCtlDictionary(sub)
+                        ?? InstalledAppRegistryRecord.fromDictionary(sub) {
+                        results.append(rec)
+                    }
+                }
+            } else if let currentList = dict["CurrentList"] as? [[String: Any]] {
                 for sub in currentList {
                     if let rec = InstalledAppRegistryRecord.fromDictionary(sub) {
                         results.append(rec)

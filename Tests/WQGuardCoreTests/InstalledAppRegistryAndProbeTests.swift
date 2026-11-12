@@ -236,4 +236,92 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
         XCTAssertEqual(correlated?.evidence.appGroups, ["group.TEAM999.modapp"])
         XCTAssertTrue(correlated?.bundlePath.contains("ModApp.ipa") ?? false)
     }
+
+    func testDeviceCtlJSONSnapshotParsingAndClassification() throws {
+        let jsonString = """
+        {
+          "info": {
+            "commandType": "devicectl.device.info.apps",
+            "jsonVersion": 5,
+            "outcome": "success"
+          },
+          "result": {
+            "apps": [
+              {
+                "bundleIdentifier": "com.apple.Preferences",
+                "name": "Settings",
+                "version": "1.0",
+                "defaultApp": true,
+                "internalApp": false,
+                "builtByDeveloper": false,
+                "url": "file:///Applications/Preferences.app/"
+              },
+              {
+                "bundleIdentifier": "com.official.storeapp",
+                "name": "StoreApp",
+                "version": "4.2.0",
+                "defaultApp": false,
+                "internalApp": false,
+                "builtByDeveloper": false,
+                "url": "file:///private/var/containers/Bundle/Application/1111/StoreApp.app/"
+              },
+              {
+                "bundleIdentifier": "com.tencent.xin.sideload",
+                "name": "微信",
+                "version": "8.0.50",
+                "defaultApp": false,
+                "internalApp": false,
+                "builtByDeveloper": true,
+                "appGroupIdentifiers": ["group.com.apple.PreviewShell"],
+                "groupContainerPaths": {
+                  "group.sideload.extra": "/private/var/mobile/Containers/Shared/AppGroup/2222"
+                },
+                "url": "file:///private/var/containers/Bundle/Application/3333/WeChat.app/"
+              }
+            ]
+          }
+        }
+        """
+
+        let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(Data(jsonString.utf8))
+        XCTAssertEqual(records.count, 3)
+
+        let findings = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: false)
+        // System app and App Store app excluded; sideloaded WeChat impersonator with system App Group flagged as highRisk
+        XCTAssertEqual(findings.count, 1)
+        let flagged = try XCTUnwrap(findings.first)
+        XCTAssertEqual(flagged.bundleId, "com.tencent.xin.sideload")
+        XCTAssertEqual(flagged.riskTier, .highRisk)
+        XCTAssertTrue(flagged.evidence.appGroups.contains("group.com.apple.PreviewShell"))
+        XCTAssertTrue(flagged.evidence.appGroups.contains("group.sideload.extra"))
+    }
+
+    func testLocalNetworkSubnetDiagnosisAndRPPairingDetection() throws {
+        XCTAssertTrue(LocalNetworkSubnetDiagnosis.isIPv4("192.168.31.252", inSameSubnetAs: "192.168.31.88", netmask: "255.255.255.0"))
+        XCTAssertFalse(LocalNetworkSubnetDiagnosis.isIPv4("10.7.0.1", inSameSubnetAs: "192.168.31.88", netmask: "255.255.255.0"))
+
+        let wifiStandard = try XCTUnwrap(LocalNetworkSubnetDiagnosis.parseIPv4UInt32("192.168.31.88"))
+        let mask24 = try XCTUnwrap(LocalNetworkSubnetDiagnosis.parseIPv4UInt32("255.255.255.0"))
+        let pair1 = try XCTUnwrap(LocalNetworkSubnetDiagnosis.computeRecommendedPair(wifiIP: wifiStandard, netmask: mask24))
+        XCTAssertEqual(LocalNetworkSubnetDiagnosis.formatIPv4UInt32(pair1.tunnel), "192.168.31.251")
+        XCTAssertEqual(LocalNetworkSubnetDiagnosis.formatIPv4UInt32(pair1.device), "192.168.31.252")
+
+        // Verify collision avoidance if phone itself already holds .251
+        let wifiCollision = try XCTUnwrap(LocalNetworkSubnetDiagnosis.parseIPv4UInt32("192.168.31.251"))
+        let pair2 = try XCTUnwrap(LocalNetworkSubnetDiagnosis.computeRecommendedPair(wifiIP: wifiCollision, netmask: mask24))
+        XCTAssertNotEqual(LocalNetworkSubnetDiagnosis.formatIPv4UInt32(pair2.tunnel), "192.168.31.251")
+        XCTAssertNotEqual(LocalNetworkSubnetDiagnosis.formatIPv4UInt32(pair2.device), "192.168.31.251")
+
+        // Verify RPPairing plist is explicitly recognized with helpful message
+        let rpPlist: [String: Any] = [
+            "identifier": "12345678-ABCD",
+            "public_key": Data([0x01, 0x02]),
+            "private_key": Data([0x03, 0x04]),
+            "remote_unlock_host_key": Data([0x05, 0x06])
+        ]
+        let rpData = try PropertyListSerialization.data(fromPropertyList: rpPlist, format: .xml, options: 0)
+        XCTAssertThrowsError(try LockdownPairingFile.parse(data: rpData)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("RPPairing"))
+        }
+    }
 }
