@@ -58,12 +58,22 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
         }
 
         let picker: UIDocumentPickerViewController
-        if kind.isFolderSelection {
-            // Standard 1-arg initializer configures directory open-in-place mode cleanly
-            picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
-        } else {
-            // CRITICAL: `asCopy: true` + `[.item, .data, .content]` enables ALL files (.plist,
-            // .mobiledevicepairing, .json, .xml, .ipa) across every FileProvider without greying out!
+        switch kind {
+        case .signingFolder:
+            // Explicit `asCopy: false` directory open-in-place mode (works for On My iPhone user folders,
+            // iCloud Drive, and apps declaring `LSSupportsOpeningDocumentsInPlace = true`).
+            picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+        case .ipaFiles:
+            // `asCopy: true` with `.applicationBundle` + `.package` + `.item` allows selecting BOTH `.ipa`/`.tipa`
+            // archives AND unpacked `.app` bundles inside `Feather -> Signed -> <UUID>/` even when the host signer
+            // app (`Feather`) omits `LSSupportsOpeningDocumentsInPlace`!
+            picker = UIDocumentPickerViewController(
+                forOpeningContentTypes: [.applicationBundle, .package, .bundle, .item, .data, .content],
+                asCopy: true
+            )
+        case .pairingFile, .registrySnapshot:
+            // `asCopy: true` + `[.item, .data, .content]` enables ALL `.plist`, `.mobiledevicepairing`,
+            // `.json`, and `.xml` files across every FileProvider without greying out.
             picker = UIDocumentPickerViewController(
                 forOpeningContentTypes: [.item, .data, .content],
                 asCopy: true

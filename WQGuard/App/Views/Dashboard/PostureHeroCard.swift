@@ -15,6 +15,7 @@ public struct PostureHeroCard: View {
     public let hasScannedApps: Bool
     public let exposedCVECount: Int
     public let isFullScanEnabled: Bool
+    public let onInspectFindings: (() -> Void)?
 
     public init(
         posture: RiskTier,
@@ -22,7 +23,8 @@ public struct PostureHeroCard: View {
         progress: ScanProgress?,
         hasScannedApps: Bool = true,
         exposedCVECount: Int = 0,
-        isFullScanEnabled: Bool = false
+        isFullScanEnabled: Bool = false,
+        onInspectFindings: (() -> Void)? = nil
     ) {
         self.posture = posture
         self.isScanning = isScanning
@@ -30,6 +32,7 @@ public struct PostureHeroCard: View {
         self.hasScannedApps = hasScannedApps
         self.exposedCVECount = exposedCVECount
         self.isFullScanEnabled = isFullScanEnabled
+        self.onInspectFindings = onInspectFindings
     }
 
     public var body: some View {
@@ -73,6 +76,21 @@ public struct PostureHeroCard: View {
                         .font(.caption.bold())
                         .foregroundColor(Color(red: 0.0, green: 0.78, blue: 0.65))
                 }
+            } else if hasScannedApps, let onInspectFindings {
+                Divider().background(Color.white.opacity(0.12))
+                Button(action: onInspectFindings) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "list.bullet.rectangle.portrait.fill")
+                            .font(.caption.bold())
+                        Text("查看本次审计结果详情清单")
+                            .font(.caption.bold())
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(cardColor)
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(20)

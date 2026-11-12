@@ -407,7 +407,8 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
     /// starts `com.apple.mobile.installation_proxy`, and returns all installed app records.
     public func fetchInstalledApps(
         pairing: LockdownPairingFile,
-        preferredHost: String = "10.7.0.1"
+        preferredHost: String = "10.7.0.1",
+        allowInteractiveConsentWait: Bool = true
     ) async throws -> [InstalledAppRegistryRecord] {
         return try await Task.detached(priority: .userInitiated) { [self] in
             let tlsOptions = try self.createTLSOptions(from: pairing)
@@ -415,11 +416,24 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             let primaryHost = cleanPreferred.isEmpty ? "10.7.0.1" : cleanPreferred
             let diagnosis = LocalNetworkSubnetDiagnosis.inspect(configuredHost: primaryHost)
 
+            // Fast-fail in <0.5s when no active `utun` VPN tunnel exists on the device, preventing
+            // 15-25s UI freezes when the user runs an offline snapshot scan while LocalDevVPN is disconnected.
+            if diagnosis.utunInterface == nil && primaryHost != "127.0.0.1" {
+                if let quickFD = try? Self.connectPOSIXSocket(host: primaryHost, port: Self.lockdownPort, timeoutMs: 450) {
+                    Darwin.close(quickFD)
+                } else {
+                    throw LockdownClientError.lockdownUnreachable(primaryHost)
+                }
+            }
+
+            let utunMatchesRecommended = (diagnosis.recommendedTunnelIP != nil && diagnosis.utunLocalIP == diagnosis.recommendedTunnelIP)
+                || (diagnosis.recommendedDeviceIP != nil && diagnosis.utunPeerIP == diagnosis.recommendedDeviceIP)
+
             var candidateHosts: [String] = []
             let rawCandidates: [String?] = [
                 primaryHost,
                 diagnosis.utunPeerIP,
-                diagnosis.recommendedDeviceIP,
+                utunMatchesRecommended ? diagnosis.recommendedDeviceIP : nil,
                 "10.7.0.1",
                 "10.7.0.2",
                 "127.0.0.1"
@@ -432,19 +446,25 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                 }
             }
 
-            // Trigger Network.framework Local Network consent prompt before raw BSD socket connects.
-            // Raw POSIX `Darwin.socket` does not reliably present iOS's NECP Local Network permission dialog!
-            Self.warmUpLocalNetworkPermission(host: primaryHost, port: Self.lockdownPort)
+            // Trigger Network.framework Local Network consent prompt before raw BSD socket connects,
+            // waking immediately (within 350ms) as soon as the user taps "Allow" on the iOS alert.
+            Self.warmUpLocalNetworkPermission(
+                host: primaryHost,
+                port: Self.lockdownPort,
+                allowConsentWait: allowInteractiveConsentWait
+            )
 
             var connectedAtLeastOnce = false
             var lastAttemptError: Error?
             var sawImmediateEOF = false
 
-            for host in candidateHosts {
-                guard let fd = try? Self.connectPOSIXSocket(host: host, port: Self.lockdownPort, timeoutMs: 2500) else {
+            for (idx, host) in candidateHosts.enumerated() {
+                let connectTimeout: Int32 = idx == 0 ? 1500 : 800
+                guard let fd = try? Self.connectPOSIXSocket(host: host, port: Self.lockdownPort, timeoutMs: connectTimeout) else {
                     continue
                 }
                 connectedAtLeastOnce = true
+                UserDefaults.standard.set(true, forKey: Self.localNetworkWarmedKey)
 
                 do {
                     let (servicePort, enableServiceSSL) = try self.negotiateInstallationProxyPort(
@@ -462,7 +482,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                     lastAttemptError = err
                     if case .protocolError(let msg) = err, msg.contains("EOF") {
                         sawImmediateEOF = true
-                        // Try next candidate host (e.g. if 10.7.0.1 hit utun subnet filter, try recommendedDeviceIP)
+                        // Try next candidate host (e.g. if 10.7.0.1 hit utun subnet filter, try active utun peer)
                         continue
                     }
                     throw err
@@ -499,12 +519,18 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         )
     }
 
-    /// Opens a brief `NWConnection` so iOS NECP triggers the system Local Network permission prompt
-    /// and waits up to 15s ONLY if the connection enters `.waiting` (meaning user consent alert is on screen).
-    private static func warmUpLocalNetworkPermission(host: String, port: UInt16) {
-        guard host != "127.0.0.1", let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+    private static let localNetworkWarmedKey = "wqguard_localnet_warmed_v1"
+
+    /// Opens a brief `NWConnection` on first run so iOS NECP triggers the system Local Network permission prompt,
+    /// polling every 350ms so execution resumes immediately the moment the user taps "Allow".
+    private static func warmUpLocalNetworkPermission(host: String, port: UInt16, allowConsentWait: Bool) {
+        guard host != "127.0.0.1",
+              !UserDefaults.standard.bool(forKey: localNetworkWarmedKey),
+              let nwPort = NWEndpoint.Port(rawValue: port) else {
+            return
+        }
         let tcp = NWProtocolTCP.Options()
-        tcp.connectionTimeout = 3
+        tcp.connectionTimeout = 2
         let params = NWParameters(tls: nil, tcp: tcp)
         let queue = DispatchQueue(label: "com.wqguard.localnet.warmup")
         let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
@@ -517,7 +543,13 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             switch state {
             case .waiting:
                 waitingFlag.value = true
-            case .ready, .failed, .cancelled:
+            case .ready:
+                UserDefaults.standard.set(true, forKey: localNetworkWarmedKey)
+                if !finishedFlag.value {
+                    finishedFlag.value = true
+                    readyOrFailSema.signal()
+                }
+            case .failed, .cancelled:
                 if !finishedFlag.value {
                     finishedFlag.value = true
                     readyOrFailSema.signal()
@@ -528,10 +560,18 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         }
         conn.start(queue: queue)
 
-        // Wait briefly (0.6s) to see if connection finishes immediately or enters `.waiting` (Local Network prompt)
-        if readyOrFailSema.wait(timeout: .now() + 0.6) == .timedOut {
-            let extraWait: Double = waitingFlag.value ? 14.0 : 1.5
-            _ = readyOrFailSema.wait(timeout: .now() + extraWait)
+        // Wait 0.4s to detect either instant connection or NECP `.waiting` (Local Network system alert)
+        if readyOrFailSema.wait(timeout: .now() + 0.4) == .timedOut, allowConsentWait, waitingFlag.value {
+            for _ in 0..<28 {
+                if readyOrFailSema.wait(timeout: .now() + 0.35) == .success {
+                    break
+                }
+                if let probeFD = try? connectPOSIXSocket(host: host, port: port, timeoutMs: 220) {
+                    Darwin.close(probeFD)
+                    UserDefaults.standard.set(true, forKey: localNetworkWarmedKey)
+                    break
+                }
+            }
         }
         conn.cancel()
     }
@@ -638,6 +678,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                     "SignerIdentity",
                     "ProfileValidated",
                     "ApplicationDSID",
+                    "IsAppStoreVendable",
                     "Entitlements",
                     "UIBackgroundModes",
                     "Path",

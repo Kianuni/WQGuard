@@ -10,12 +10,11 @@ import WQGuardCore
 
 public struct ContentView: View {
     @EnvironmentObject var vm: ScanViewModel
-    @State private var selectedTab: Int = 0
 
     public init() {}
 
     public var body: some View {
-        TabView(selection: $selectedTab) {
+        TabView(selection: $vm.selectedTab) {
             NavigationStack {
                 DashboardView()
             }

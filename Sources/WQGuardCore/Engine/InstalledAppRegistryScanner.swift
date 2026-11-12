@@ -268,7 +268,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
     private static let extraSideloadImpersonationTargets: [ExpandedThreatCatalog.ImpersonatedBrand] = [
         .init(
             name: "WeChat (微信)",
-            bundleIdPatterns: ["com.tencent.xin"],
+            bundleIdPatterns: ["com.tencent.xin", "com.tencent.wx"],
             displayNames: ["微信", "wechat"],
             description: "国民级社交通讯与支付应用，第三方多开/防撤回重打包版本常见聊天记录与账密窃取插件"
         ),
@@ -419,7 +419,75 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     // MARK: - Channel Classification & Security Audit
 
+    /// Returns `true` when the record represents a genuine Apple OS daemon, CoreServices UI service,
+    /// or Apple first-party system/removable application (never developer-sideloaded or enterprise-resigned).
+    public func isAppleSystemOrFirstPartyApp(_ record: InstalledAppRegistryRecord) -> Bool {
+        // Any bundle signed with a provisioning profile (Developer / Ad-Hoc / Enterprise sideload)
+        // or carrying get-task-allow is NEVER a genuine Apple OS platform binary.
+        if record.profileValidated || record.booleanEntitlements["get-task-allow"] == true {
+            return false
+        }
+        if let signer = record.signerIdentity?.lowercased() {
+            if signer.contains("development") || signer.contains("developer") ||
+               signer.contains("distribution") || signer.contains("enterprise") {
+                return false
+            }
+            if signer == "software signing" {
+                return true
+            }
+        }
+
+        if record.bundlePath.hasPrefix("/Applications/") ||
+           record.bundlePath.hasPrefix("/System/") ||
+           record.bundlePath.hasPrefix("/Library/") ||
+           record.bundlePath.hasPrefix("/private/preboot/") {
+            return true
+        }
+
+        let lowerBid = record.bundleId.lowercased()
+        if lowerBid.hasPrefix("com.apple.") {
+            return true
+        }
+
+        let appType = record.applicationType.lowercased()
+        if (appType == "internal" || appType == "hidden") && record.teamId == nil {
+            return true
+        }
+
+        return false
+    }
+
+    /// Recognizes standard open-source sideload managers & LocalDevVPN companions so their benign
+    /// background server / App Group declarations are categorized as `.knownTool` rather than false-positive Caution.
+    public static func matchKnownSideloadInfrastructure(bundleId: String, displayName: String) -> String? {
+        let lowerBid = bundleId.lowercased()
+        let lowerName = displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        let rules: [(name: String, bidSubstrings: [String], exactNames: [String])] = [
+            ("Feather", ["kh.crysalis.feather", "thewonderofyou.feather"], ["feather"]),
+            ("LocalDevVPN", ["localdevvpn"], ["localdevvpn"]),
+            ("StikDebug", ["stikdebug", "stikjit", "com.stik.sj"], ["stikdebug", "stikjit"]),
+            ("SideStore", ["com.sidestore.sidestore", "sidestore"], ["sidestore"]),
+            ("AltStore", ["com.rileytestut.altstore"], ["altstore"]),
+            ("全能签 / ESign", ["yyyue.esign"], ["全能签", "esign"]),
+            ("GBox", ["com.gbox.pub"], ["gbox"]),
+            ("Scarlet", ["debianarch.scarlet"], ["scarlet"])
+        ]
+
+        for rule in rules {
+            if rule.bidSubstrings.contains(where: { lowerBid.contains($0) }) ||
+               rule.exactNames.contains(lowerName) {
+                return rule.name
+            }
+        }
+        return nil
+    }
+
     public func classifyChannel(for record: InstalledAppRegistryRecord) -> (channel: InstallChannel, isFairPlayEncrypted: Bool) {
+        if isAppleSystemOrFirstPartyApp(record) {
+            return (.appStore, true)
+        }
+
         if record.booleanEntitlements["get-task-allow"] == true {
             return (.developerSideloaded, false)
         }
@@ -453,8 +521,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     /// Evaluates whether an installed app record belongs to the non-App-Store / sideloaded / anomalous inspection scope.
     public func isSideloadedOrAnomalous(_ record: InstalledAppRegistryRecord) -> Bool {
-        // Skip Apple system apps in `/Applications` unless user bundle disguised as System
-        if record.applicationType.lowercased() == "system" && !record.bundlePath.contains("/var/containers/Bundle/Application") {
+        if isAppleSystemOrFirstPartyApp(record) {
             return false
         }
         let (channel, _) = classifyChannel(for: record)
@@ -484,6 +551,11 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         var findings: [ScanFinding] = []
         for rec in records {
             if !selfBid.isEmpty && rec.bundleId == selfBid {
+                continue
+            }
+            // Always exclude genuine Apple OS daemons, CoreServices UI services, and Apple system apps
+            // so `includeAppStoreApps` strictly audits user-installed third-party App Store applications.
+            if isAppleSystemOrFirstPartyApp(rec) {
                 continue
             }
             if !includeAppStoreApps && !isSideloadedOrAnomalous(rec) {
@@ -674,6 +746,11 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if wlResult.isWhitelisted {
             isWhitelisted = true
             whitelistedToolName = wlResult.toolName
+            finalRisk = .knownTool
+        } else if provisionalRisk != .highRisk,
+                  let infraName = Self.matchKnownSideloadInfrastructure(bundleId: record.bundleId, displayName: record.displayName) {
+            isWhitelisted = true
+            whitelistedToolName = infraName
             finalRisk = .knownTool
         }
 

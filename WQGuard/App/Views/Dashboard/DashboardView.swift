@@ -24,7 +24,10 @@ public struct DashboardView: View {
                     isScanning: vm.isScanning,
                     progress: vm.scanProgress,
                     hasScannedApps: vm.hasScannedApps,
-                    exposedCVECount: vm.firmwareReport.exposedCount
+                    exposedCVECount: vm.firmwareReport.exposedCount,
+                    onInspectFindings: vm.hasScannedApps ? {
+                        vm.navigateToFindings(filter: vm.highRiskCount > 0 ? .highRisk : (vm.cautionCount > 0 ? .caution : nil))
+                    } : nil
                 )
 
                 // 2. Self-Signed Application Scan & Signing Folder Binding Actions
@@ -110,12 +113,12 @@ public struct DashboardView: View {
                                 #if os(iOS)
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 #endif
-                                presentPicker(.signingFolder)
+                                presentPicker(.ipaFiles)
                             }) {
                                 HStack(spacing: 6) {
-                                    Image(systemName: "folder.fill.badge.plus")
+                                    Image(systemName: "doc.zipper")
                                         .font(.subheadline)
-                                    Text(WQStrings.bindSigningFolderButton)
+                                    Text(WQStrings.selectIPAFileButton)
                                         .font(.footnote.bold())
                                 }
                                 .frame(maxWidth: .infinity)
@@ -133,12 +136,12 @@ public struct DashboardView: View {
                                 #if os(iOS)
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 #endif
-                                presentPicker(.ipaFiles)
+                                presentPicker(.signingFolder)
                             }) {
                                 HStack(spacing: 6) {
-                                    Image(systemName: "doc.zipper")
+                                    Image(systemName: "folder.fill.badge.plus")
                                         .font(.subheadline)
-                                    Text(WQStrings.selectIPAFileButton)
+                                    Text(WQStrings.bindSigningFolderButton)
                                         .font(.footnote.bold())
                                 }
                                 .frame(maxWidth: .infinity)
@@ -158,8 +161,8 @@ public struct DashboardView: View {
                                 .font(.caption2)
                                 .foregroundColor(.cyan)
                                 .lineLimit(1)
-                        } else if !vm.bookmarkedFolderNames.isEmpty {
-                            Text("已绑定目录: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
+                        } else if !vm.syncedPackageNames.isEmpty || !vm.bookmarkedFolderNames.isEmpty {
+                            Text("已关联源包/目录: \((vm.syncedPackageNames + vm.bookmarkedFolderNames).joined(separator: ", "))")
                                 .font(.caption2)
                                 .foregroundColor(.gray)
                                 .lineLimit(1)
@@ -176,30 +179,45 @@ public struct DashboardView: View {
                         .padding(.horizontal)
 
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
-                        MetricGridCard(
-                            title: WQStrings.scannedApps,
-                            count: vm.totalScannedCount,
-                            icon: "apps.iphone",
-                            color: .blue
-                        )
-                        MetricGridCard(
-                            title: WQStrings.highRiskAlerts,
-                            count: vm.highRiskCount,
-                            icon: "exclamationmark.shield.fill",
-                            color: .red
-                        )
-                        MetricGridCard(
-                            title: WQStrings.knownTools,
-                            count: vm.knownToolCount,
-                            icon: "wrench.and.screwdriver.fill",
-                            color: .yellow
-                        )
-                        MetricGridCard(
-                            title: WQStrings.cautionAlerts,
-                            count: vm.cautionCount,
-                            icon: "exclamationmark.triangle.fill",
-                            color: .orange
-                        )
+                        Button(action: { if vm.hasScannedApps { vm.navigateToFindings(filter: nil) } }) {
+                            MetricGridCard(
+                                title: WQStrings.scannedApps,
+                                count: vm.totalScannedCount,
+                                icon: "apps.iphone",
+                                color: .blue
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(action: { if vm.hasScannedApps { vm.navigateToFindings(filter: .highRisk) } }) {
+                            MetricGridCard(
+                                title: WQStrings.highRiskAlerts,
+                                count: vm.highRiskCount,
+                                icon: "exclamationmark.shield.fill",
+                                color: .red
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(action: { if vm.hasScannedApps { vm.navigateToFindings(filter: .knownTool) } }) {
+                            MetricGridCard(
+                                title: WQStrings.knownTools,
+                                count: vm.knownToolCount,
+                                icon: "wrench.and.screwdriver.fill",
+                                color: .yellow
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(action: { if vm.hasScannedApps { vm.navigateToFindings(filter: .caution) } }) {
+                            MetricGridCard(
+                                title: WQStrings.cautionAlerts,
+                                count: vm.cautionCount,
+                                icon: "exclamationmark.triangle.fill",
+                                color: .orange
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal)
                 }
@@ -259,7 +277,7 @@ public struct DashboardView: View {
     private func presentPicker(_ kind: DocumentPickerKind) {
         #if canImport(UIKit)
         NativeDocumentPickerPresenter.shared.present(kind: kind) { urls in
-            vm.scanMultipleIPAPackages(at: urls)
+            vm.scanMultipleIPAPackages(at: urls, correlateWithInstalled: true)
         }
         #endif
     }

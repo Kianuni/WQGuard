@@ -488,7 +488,12 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             matchedSignatures: mergedSymbols,
             teamId: effectiveTeamId
         )
-        let finalRisk: RiskTier = wl.isWhitelisted ? .knownTool : provisionalRisk
+        let infraName = (provisionalRisk != .highRisk)
+            ? InstalledAppRegistryScanner.matchKnownSideloadInfrastructure(bundleId: registry.bundleId, displayName: registry.displayName)
+            : nil
+        let isKnown = wl.isWhitelisted || (infraName != nil)
+        let resolvedToolName = wl.toolName ?? infraName
+        let finalRisk: RiskTier = isKnown ? .knownTool : provisionalRisk
 
         let pkgFileName = (package.bundlePath as NSString).lastPathComponent
         let mergedPath = "\(registry.bundlePath) [已关联源包: \(pkgFileName)]"
@@ -518,8 +523,8 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             bundlePath: mergedPath,
             installChannel: registry.installChannel,
             riskTier: finalRisk,
-            isWhitelisted: wl.isWhitelisted,
-            whitelistedToolName: wl.toolName,
+            isWhitelisted: isKnown,
+            whitelistedToolName: resolvedToolName,
             indicators: combinedIndicators,
             evidence: mergedEvidence,
             scanTimestamp: Date()
@@ -554,7 +559,8 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             do {
                 registryRecords = try await LockdownInstProxyClient.shared.fetchInstalledApps(
                     pairing: pairing,
-                    preferredHost: preferredLockdownHost
+                    preferredHost: preferredLockdownHost,
+                    allowInteractiveConsentWait: savedSnapshotData == nil
                 )
                 liveConnected = true
                 notices.append("已通过配对直连读取全机 \(registryRecords.count) 款应用注册表")

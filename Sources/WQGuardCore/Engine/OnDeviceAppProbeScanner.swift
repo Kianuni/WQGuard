@@ -95,6 +95,13 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
             summaryZh: "本机已安装 StikDebug 本地环回调试工具。开启其 VPN 后配合配对文件即可在 WQGuard 内直连本机 installation_proxy 读取全机已安装应用！"
         ),
         AppProbeDefinition(
+            displayName: "LocalDevVPN",
+            canonicalBundleId: "com.SideStore.LocalDevVPN",
+            schemes: ["localdevvpn"],
+            role: .localDevDebugger,
+            summaryZh: "本机已安装 LocalDevVPN 本地环回隧道工具。连接 VPN 后配合配对文件即可在 WQGuard 内直连本机 installation_proxy 读取全机已安装应用。"
+        ),
+        AppProbeDefinition(
             displayName: "TrollStore",
             canonicalBundleId: "com.opa334.TrollStore",
             schemes: ["trollstore"],

@@ -61,7 +61,7 @@ public struct IPAScanView: View {
                         }
                     }
 
-                    Text("💡 绑定 Feather / 全能签时，请点进里面的 Signed 或 Unsigned 子目录后再点右上角「打开」")
+                    Text("💡 Feather 用户：点击左侧「导入源包」，进入『我的 iPhone → Feather → Signed → UUID文件夹』直接点选里面的 .app 包即可深扫（或在 Feather 内导出 IPA 用 WQGuard 打开）")
                         .font(.caption2)
                         .foregroundColor(.orange.opacity(0.9))
                         .multilineTextAlignment(.center)

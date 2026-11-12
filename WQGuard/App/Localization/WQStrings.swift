@@ -35,8 +35,8 @@ public enum WQStrings {
     public static var startSystemScan: String { localized("start_system_scan", en: "Scan Installed Apps", zh: "一键扫描已安装应用") }
     public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "installation_proxy Registry + On-Device Probe + Signer IPA Correlation", zh: "系统注册表权限审计 + 本机探针 + 签名目录二进制联动") }
     public static var configureInstalledScanButton: String { localized("configure_installed_scan_btn", en: "Scan Sources & Pairing", zh: "配置已安装扫描源") }
-    public static var bindSigningFolderButton: String { localized("bind_signing_folder_btn", en: "Bind Signer Folder", zh: "绑定签名工具目录") }
-    public static var selectIPAFileButton: String { localized("select_ipa_file_btn", en: "Select .ipa Files", zh: "直接选择 .ipa 文件") }
+    public static var bindSigningFolderButton: String { localized("bind_signing_folder_btn", en: "Bind Folder", zh: "绑定普通目录") }
+    public static var selectIPAFileButton: String { localized("select_ipa_file_btn", en: "Import .ipa / Feather .app", zh: "导入源包 (.ipa / .app)") }
     public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Select Signing Folder / Import IPAs", zh: "绑定自签工具目录 / 导入 IPA") }
     public static var scanningInProgress: String { localized("scanning_in_progress", en: "Deep analysis in progress...", zh: "正在深度分析...") }
     public static var cancelScan: String { localized("cancel_scan", en: "Cancel Scan", zh: "取消全盘扫描") }
@@ -58,16 +58,16 @@ public enum WQStrings {
     // MARK: - Posture Hero Card
     public static var postureDeepAnalyzing: String { localized("posture_deep_analyzing", en: "Analyzing:", zh: "正在深度分析:") }
     public static var postureStatusScanningTitle: String { localized("posture_status_scanning_title", en: "Deep Audit in Progress...", zh: "深度审计进行中...") }
-    public static var postureStatusHighRiskTitle: String { localized("posture_status_high_risk_title", en: "High Risk Warning", zh: "高危越权告警") }
-    public static var postureStatusCautionTitle: String { localized("posture_status_caution_title", en: "Caution Advised", zh: "前置条件留意") }
-    public static var postureStatusKnownToolTitle: String { localized("posture_status_known_tool_title", en: "Known Research Tools Detected", zh: "发现已知定制工具") }
-    public static var postureStatusSafeTitle: String { localized("posture_status_safe_title", en: "System Posture Safe & Compliant", zh: "系统状态安全合规") }
+    public static var postureStatusHighRiskTitle: String { localized("posture_status_high_risk_title", en: "Scan Complete · High Risk Detected", zh: "检测完成 · 发现高危告警") }
+    public static var postureStatusCautionTitle: String { localized("posture_status_caution_title", en: "Scan Complete · Review Advised", zh: "检测完成 · 发现需留意应用") }
+    public static var postureStatusKnownToolTitle: String { localized("posture_status_known_tool_title", en: "Scan Complete · Known Tools", zh: "检测完成 · 检出已知定制工具") }
+    public static var postureStatusSafeTitle: String { localized("posture_status_safe_title", en: "Scan Complete · System Safe", zh: "检测完成 · 系统状态安全合规") }
 
-    public static var postureStatusScanningSub: String { localized("posture_status_scanning_sub", en: "Scanning Mach-O private symbols & shared container symlink traversals...", zh: "正在执行 Mach-O 私有符号检索与共享容器逃逸符号链接排查") }
-    public static var postureStatusHighRiskSub: String { localized("posture_status_high_risk_sub", en: "Detected unauthorized containermanagerd sandbox escape or escaping symlinks!", zh: "检测到未经授权的 containermanagerd 跨沙盒利用或异常逃逸符号链接！") }
-    public static var postureStatusCautionSub: String { localized("posture_status_caution_sub", en: "App declares App Group shared containers with dynamic symbol resolution.", zh: "应用声明了 App Group 容器共享权限并伴随动态符号解析特征。") }
-    public static var postureStatusKnownToolSub: String { localized("posture_status_known_tool_sub", en: "Matched authorized open-source research tools (Erosion, WQFiles, etc.).", zh: "匹配到白名单授权的开源定制工具（Erosion、WQFiles 等）。") }
-    public static var postureStatusSafeSub: String { localized("posture_status_safe_sub", en: "All scanned targets strictly comply with iOS sandbox boundaries.", zh: "所有已扫描目标严格遵守 iOS 沙盒边界，未检出跨容器越权利用。") }
+    public static var postureStatusScanningSub: String { localized("posture_status_scanning_sub", en: "Scanning Mach-O private symbols & shared container symlink traversals...", zh: "正在执行权限注册表核验与二进制特征排查") }
+    public static var postureStatusHighRiskSub: String { localized("posture_status_high_risk_sub", en: "Detected unauthorized sandbox escape entitlements, private symbols, or impersonation!", zh: "检出高危越权特征或仿冒应用，点击卡片立即查看高危应用清单！") }
+    public static var postureStatusCautionSub: String { localized("posture_status_caution_sub", en: "Sideloaded apps declare shared App Groups, persistent background modes, or mod traits. Tap to review.", zh: "部分侧载/企业签应用含共享容器、常驻后台或改版特征，点击查看详情。") }
+    public static var postureStatusKnownToolSub: String { localized("posture_status_known_tool_sub", en: "Matched authorized open-source tools (Feather, LocalDevVPN, Erosion, WQFiles, etc.).", zh: "已识别开源签名器或研究工具（Feather、LocalDevVPN、Erosion 等），点击查看清单。") }
+    public static var postureStatusSafeSub: String { localized("posture_status_safe_sub", en: "All scanned targets strictly comply with iOS sandbox boundaries.", zh: "所有已扫描目标均符合 iOS 沙盒隔离边界，未检出越权风险。") }
 
     public static func posturePendingTitle(exposedCount: Int) -> String {
         if exposedCount > 0 {

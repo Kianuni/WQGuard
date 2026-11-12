@@ -82,15 +82,15 @@
 /* Posture Hero Card */
 "posture_deep_analyzing" = "正在深度分析:";
 "posture_status_scanning_title" = "深度审计进行中...";
-"posture_status_high_risk_title" = "高危越权告警";
-"posture_status_caution_title" = "前置条件留意";
-"posture_status_known_tool_title" = "发现已知定制工具";
-"posture_status_safe_title" = "系统状态安全合规";
-"posture_status_scanning_sub" = "正在执行 Mach-O 私有符号检索与共享容器逃逸符号链接排查";
-"posture_status_high_risk_sub" = "检测到未经授权的 containermanagerd 跨沙盒利用或异常逃逸符号链接！";
-"posture_status_caution_sub" = "应用声明了 App Group 容器共享权限并伴随动态符号解析特征。";
-"posture_status_known_tool_sub" = "匹配到白名单授权的开源定制工具（Erosion、WQFiles 等）。";
-"posture_status_safe_sub" = "所有扫描目标严格遵守 iOS 沙盒边界，未检出跨容器越权利用。";
+"posture_status_high_risk_title" = "检测完成 · 发现高危告警";
+"posture_status_caution_title" = "检测完成 · 发现需留意应用";
+"posture_status_known_tool_title" = "检测完成 · 检出已知定制工具";
+"posture_status_safe_title" = "检测完成 · 系统状态安全合规";
+"posture_status_scanning_sub" = "正在执行权限注册表核验与二进制特征排查";
+"posture_status_high_risk_sub" = "检出高危越权特征或仿冒应用，点击卡片立即查看高危应用清单！";
+"posture_status_caution_sub" = "部分侧载/企业签应用含共享容器、常驻后台或改版特征，点击查看详情。";
+"posture_status_known_tool_sub" = "已识别开源签名器或研究工具（Feather、LocalDevVPN、Erosion 等），点击查看清单。";
+"posture_status_safe_sub" = "所有已扫描目标均符合 iOS 沙盒隔离边界，未检出越权风险。";
 
 /* Metric Grid & Progress */
 "scan_preparing" = "准备中...";

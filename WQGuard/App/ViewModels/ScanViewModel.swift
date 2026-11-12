@@ -16,6 +16,7 @@ public final class ScanViewModel: ObservableObject {
     public static let shared = ScanViewModel()
 
     // MARK: - Published State
+    @Published public var selectedTab: Int = 0
     @Published public var currentSession: ScanSession?
     @Published public var isScanning: Bool = false
     @Published public var scanProgress: ScanProgress?
@@ -63,6 +64,7 @@ public final class ScanViewModel: ObservableObject {
     @Published public var showSideloadPickerFromDashboard: Bool = false
     @Published public var showInstalledScanConfigSheet: Bool = false
     @Published public var bookmarkedFolderNames: [String] = []
+    @Published public var syncedPackageNames: [String] = []
 
     // Installed App Registry (Option 1) & On-Device Probe (Option 3) State
     @Published public var hasPairingFile: Bool = false
@@ -102,13 +104,25 @@ public final class ScanViewModel: ObservableObject {
         }
         self.prepareSurgeExportURL()
         self.refreshBookmarkedFolderNames()
+        self.refreshSyncedPackageNames()
         self.refreshRegistrySourceState()
+    }
+
+    public func navigateToFindings(filter: RiskTier? = nil) {
+        self.selectedRiskFilter = filter
+        self.selectedTab = 1
     }
 
     private var appSupportDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         let dir = base.appendingPathComponent("WQGuardRegistry", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private var syncedPackagesDirectory: URL {
+        let dir = appSupportDirectory.appendingPathComponent("SyncedPackages", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -156,7 +170,7 @@ public final class ScanViewModel: ObservableObject {
     public var activeEngineCount: Int {
         var count = 0
         if hasPairingFile || hasSavedSnapshot { count += 1 }
-        if !bookmarkedFolderNames.isEmpty { count += 1 }
+        if !bookmarkedFolderNames.isEmpty || !syncedPackageNames.isEmpty { count += 1 }
         if enableOnDeviceProbe { count += 1 }
         return count
     }
@@ -367,6 +381,49 @@ public final class ScanViewModel: ObservableObject {
         refreshBookmarkedFolderNames()
     }
 
+    public func clearSyncedPackages() {
+        try? FileManager.default.removeItem(at: syncedPackagesDirectory)
+        _ = syncedPackagesDirectory
+        refreshSyncedPackageNames()
+    }
+
+    private func refreshSyncedPackageNames() {
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: syncedPackagesDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        let names = items.compactMap { url -> String? in
+            let ext = url.pathExtension.lowercased()
+            guard ext == "ipa" || ext == "tipa" || ext == "app" else { return nil }
+            return url.lastPathComponent
+        }
+        self.syncedPackageNames = names.sorted()
+    }
+
+    @discardableResult
+    private func persistPackageToSyncedCacheIfApplicable(_ src: URL) -> URL? {
+        let ext = src.pathExtension.lowercased()
+        guard ext == "ipa" || ext == "tipa" || ext == "app" else { return nil }
+        let rawName = src.lastPathComponent
+        // Strip temporary 8-hex UUID prefix added by `stageCopiedFilesIfNeeded` (`A1B2C3D4_App.app` -> `App.app`)
+        let cleanName: String
+        if rawName.count > 9,
+           let underscoreIdx = rawName.firstIndex(of: "_"),
+           rawName.distance(from: rawName.startIndex, to: underscoreIdx) == 8 {
+            cleanName = String(rawName[rawName.index(after: underscoreIdx)...])
+        } else {
+            cleanName = rawName
+        }
+        let dst = syncedPackagesDirectory.appendingPathComponent(cleanName)
+        guard src.standardizedFileURL != dst.standardizedFileURL else { return dst }
+        try? FileManager.default.removeItem(at: dst)
+        if (try? FileManager.default.copyItem(at: src, to: dst)) != nil {
+            return dst
+        }
+        return nil
+    }
+
     public func handleIncomingURL(_ url: URL) {
         let ext = url.pathExtension.lowercased()
         if ext == "ipa" || ext == "tipa" || ext == "app" {
@@ -523,6 +580,7 @@ public final class ScanViewModel: ObservableObject {
         isScanning = true
         scanProgress = ScanProgress(currentTarget: WQStrings.scanEngineInitializing, completedCount: 0, totalCount: 0)
         let savedDirs = resolveBookmarkedDirectories()
+        let extraScanDirs = savedDirs + [syncedPackagesDirectory]
         let pairing = loadActivePairingFile()
         let snapData = loadSavedSnapshotData()
         let host = lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "10.7.0.1" : lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -544,7 +602,7 @@ public final class ScanViewModel: ObservableObject {
                     pairingFile: pairing,
                     preferredLockdownHost: host,
                     savedSnapshotData: snapData,
-                    additionalLocations: savedDirs,
+                    additionalLocations: extraScanDirs,
                     includeAppStoreApps: includeStore,
                     enableOnDeviceProbe: probeEnabled
                 ) { [weak self] progress in
@@ -604,6 +662,7 @@ public final class ScanViewModel: ObservableObject {
         guard !isScanning else { return }
         isScanning = true
         let savedDirs = resolveBookmarkedDirectories()
+        let extraScanDirs = savedDirs + [syncedPackagesDirectory]
         let includeStore = includeAppStoreAppsInRegistry
         let probeEnabled = enableOnDeviceProbe
 
@@ -617,7 +676,7 @@ public final class ScanViewModel: ObservableObject {
                 }
             }
 
-            let pkgFindings = (try? await SecurityPipeline.shared.scanInstalledAppsAsync(additionalLocations: savedDirs) { [weak self] progress in
+            let pkgFindings = (try? await SecurityPipeline.shared.scanInstalledAppsAsync(additionalLocations: extraScanDirs) { [weak self] progress in
                 guard let strongSelf = self else { return }
                 Task { @MainActor in strongSelf.scanProgress = progress }
             }) ?? []
@@ -686,28 +745,52 @@ public final class ScanViewModel: ObservableObject {
 
     // MARK: - IPA Package Scan Actions (Single & Batch / Folder)
     public func scanIPAPackage(at url: URL) {
-        scanMultipleIPAPackages(at: [url])
+        scanMultipleIPAPackages(at: [url], correlateWithInstalled: false)
     }
 
-    public func scanMultipleIPAPackages(at urls: [URL]) {
+    public func scanMultipleIPAPackages(at urls: [URL], correlateWithInstalled: Bool = false) {
         guard !urls.isEmpty else { return }
 
-        // Synchronously acquire security scope & persist directory bookmarks on MainActor immediately upon picker callback
+        // Synchronously acquire security scope, cache .ipa/.app packages for Engine 2 correlation, & persist directory bookmarks
         var preScopedPairs: [(URL, Bool)] = []
         var anyDirectoryBound = false
+        var anyPackageSynced = false
         let fmMain = FileManager.default
         for u in urls {
             let accessed = u.startAccessingSecurityScopedResource()
             preScopedPairs.append((u, accessed))
             var isDir: ObjCBool = false
             let ext = u.pathExtension.lowercased()
-            if ext != "ipa" && ext != "tipa" && ext != "app",
-               (u.hasDirectoryPath || (fmMain.fileExists(atPath: u.path, isDirectory: &isDir) && isDir.boolValue)) {
-                if let bData = try? u.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            if ext == "ipa" || ext == "tipa" || ext == "app" {
+                if persistPackageToSyncedCacheIfApplicable(u) != nil {
+                    anyPackageSynced = true
+                }
+            } else if u.hasDirectoryPath || (fmMain.fileExists(atPath: u.path, isDirectory: &isDir) && isDir.boolValue) {
+                if fmMain.fileExists(atPath: u.appendingPathComponent("Info.plist").path) {
+                    // User picked an unpacked bundle folder directly
+                    let dst = syncedPackagesDirectory.appendingPathComponent("\(u.lastPathComponent).app")
+                    try? fmMain.removeItem(at: dst)
+                    if (try? fmMain.copyItem(at: u, to: dst)) != nil {
+                        anyPackageSynced = true
+                    }
+                } else if let bData = try? u.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
                     saveDirectoryBookmarkData(bData)
                     anyDirectoryBound = true
                 }
             }
+        }
+        if anyPackageSynced {
+            refreshSyncedPackageNames()
+        }
+
+        // If invoked from Engine 2 (Dashboard / Config Sheet) and registry source is configured, run full unified correlation scan!
+        if correlateWithInstalled && (anyPackageSynced || anyDirectoryBound) && (hasPairingFile || hasSavedSnapshot) {
+            for (u, accessed) in preScopedPairs where accessed {
+                u.stopAccessingSecurityScopedResource()
+            }
+            showInstalledScanConfigSheet = false
+            startSystemScan()
+            return
         }
 
         isInspectingIPA = true

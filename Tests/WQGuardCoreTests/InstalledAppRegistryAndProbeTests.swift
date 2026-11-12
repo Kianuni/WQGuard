@@ -324,4 +324,110 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("RPPairing"))
         }
     }
+
+    func testAppleSystemAppsExcludedWhileSpoofedComAppleAndFeatherAndModdedWeChatHandled() {
+        let records: [InstalledAppRegistryRecord] = [
+            // 1. Apple removable system app in /private/var/containers/Bundle/Application with TCC & no-container
+            InstalledAppRegistryRecord(
+                bundleId: "com.apple.shortcuts",
+                displayName: "快捷指令",
+                version: "7.0",
+                applicationType: "User",
+                signerIdentity: "Apple iPhone OS Application Signing",
+                profileValidated: false,
+                hasAppStoreMetadata: true,
+                tccAllowedServices: ["kTCCServicePhotos"],
+                booleanEntitlements: ["com.apple.private.security.no-container": true],
+                bundlePath: "/private/var/containers/Bundle/Application/UUID-SHORTCUTS/Shortcuts.app"
+            ),
+            // 2. Apple Health app in /private/var/containers/Bundle/Application with nil SignerIdentity (CoreTrust static cache)
+            InstalledAppRegistryRecord(
+                bundleId: "com.apple.Health",
+                displayName: "健康",
+                version: "1.0",
+                applicationType: "System",
+                signerIdentity: nil,
+                profileValidated: false,
+                hasAppStoreMetadata: false,
+                appGroups: ["group.com.apple.Health", "group.com.apple.ip.redirects"],
+                backgroundModes: ["audio"],
+                bundlePath: "/private/var/containers/Bundle/Application/UUID-HEALTH/Health.app"
+            ),
+            // 3. Apple internal WidgetRenderer daemon
+            InstalledAppRegistryRecord(
+                bundleId: "com.apple.chrono.WidgetRenderer-Snapshots",
+                displayName: "WidgetRenderer_Default",
+                version: "1.0",
+                applicationType: "System",
+                signerIdentity: "Software Signing",
+                profileValidated: false,
+                booleanEntitlements: ["com.apple.private.MobileContainerManager.allowed": true],
+                bundlePath: "/System/Library/CoreServices/WidgetRenderer.app"
+            ),
+            // 4. Malicious developer-sideloaded app spoofing `com.apple.Health` -> MUST BE CAUGHT!
+            InstalledAppRegistryRecord(
+                bundleId: "com.apple.Health.spoof",
+                displayName: "健康 Pro",
+                version: "1.0",
+                applicationType: "User",
+                signerIdentity: "Apple Development: attacker@evil.org (EVIL123456)",
+                profileValidated: true,
+                teamId: "EVIL123456",
+                appGroups: ["group.evil.shared"],
+                booleanEntitlements: ["get-task-allow": true],
+                bundlePath: "/private/var/containers/Bundle/Application/UUID-SPOOF/HealthSpoof.app"
+            ),
+            // 5. Legitimate Feather sideload manager -> MUST BE `.knownTool` (not Caution)
+            InstalledAppRegistryRecord(
+                bundleId: "kh.crysalis.feather.CERT999",
+                displayName: "Feather",
+                version: "2.1.0",
+                applicationType: "User",
+                signerIdentity: "iPhone Distribution: Enterprise Co",
+                profileValidated: true,
+                teamId: "ENT9999999",
+                appGroups: ["group.kh.crysalis.feather.CERT999"],
+                backgroundModes: ["audio"],
+                bundlePath: "/private/var/containers/Bundle/Application/UUID-FEATHER/Feather.app"
+            ),
+            // 6. Modded enterprise WeChat (`com.tencent.wx`) -> MUST BE `.caution` with WeChat impersonation warning
+            InstalledAppRegistryRecord(
+                bundleId: "com.tencent.wx",
+                displayName: "微信",
+                version: "8.0.54",
+                applicationType: "User",
+                signerIdentity: "iPhone Distribution: ThirdParty Corp",
+                profileValidated: true,
+                teamId: "CORP888888",
+                appGroups: ["group.com.tencent.wx"],
+                backgroundModes: ["audio", "voip"],
+                bundlePath: "/private/var/containers/Bundle/Application/UUID-WX/WeChat.app"
+            )
+        ]
+
+        // Test BOTH `includeAppStoreApps: false` AND `includeAppStoreApps: true` — Apple OS system apps must NEVER appear!
+        for includeStore in [false, true] {
+            let findings = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: includeStore)
+            XCTAssertEqual(findings.count, 3, "includeStore=\(includeStore) must exclude all 3 genuine Apple OS apps")
+            XCTAssertFalse(findings.contains { $0.bundleId == "com.apple.shortcuts" })
+            XCTAssertFalse(findings.contains { $0.bundleId == "com.apple.Health" })
+            XCTAssertFalse(findings.contains { $0.bundleId == "com.apple.chrono.WidgetRenderer-Snapshots" })
+
+            let spoof = findings.first { $0.bundleId == "com.apple.Health.spoof" }
+            XCTAssertNotNil(spoof)
+            XCTAssertEqual(spoof?.installChannel, .developerSideloaded)
+            XCTAssertEqual(spoof?.riskTier, .caution)
+
+            let feather = findings.first { $0.bundleId == "kh.crysalis.feather.CERT999" }
+            XCTAssertNotNil(feather)
+            XCTAssertEqual(feather?.riskTier, .knownTool)
+            XCTAssertTrue(feather?.isWhitelisted ?? false)
+            XCTAssertEqual(feather?.whitelistedToolName, "Feather")
+
+            let moddedWX = findings.first { $0.bundleId == "com.tencent.wx" }
+            XCTAssertNotNil(moddedWX)
+            XCTAssertEqual(moddedWX?.riskTier, .caution)
+            XCTAssertTrue(moddedWX?.indicators.contains { $0.signature == "IMPERSONATION:WeChat (微信)" } ?? false)
+        }
+    }
 }

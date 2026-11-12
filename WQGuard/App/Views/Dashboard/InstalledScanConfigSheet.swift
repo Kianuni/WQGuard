@@ -278,7 +278,7 @@ public struct InstalledScanConfigSheet: View {
                         }
                     }
 
-                    Toggle("同时纳入 App Store 官方应用审计", isOn: $vm.includeAppStoreAppsInRegistry)
+                    Toggle("同时展示第三方 App Store 官方应用（已自动排除苹果系统服务）", isOn: $vm.includeAppStoreAppsInRegistry)
                         .font(.subheadline)
                 } header: {
                     Text("引擎 1B · 离线注册表快照（无需 VPN，100% 兼容 iOS 27）")
@@ -286,40 +286,67 @@ public struct InstalledScanConfigSheet: View {
                     Text("Mac 连接手机后直接在「终端」粘贴上方第一条命令（调用苹果 Xcode 原生 CoreDevice 通道，无需安装第三方工具），将桌面生成的 installed_apps.json 隔空投送至手机用 WQGuard 打开即可秒扫全机应用。")
                 }
 
-                // Engine 2: Bound Signer Folder Correlation
+                // Engine 2: Signer Source Package & Folder Correlation
                 Section {
-                    if vm.bookmarkedFolderNames.isEmpty {
-                        Text("尚未绑定子目录（进入 Feather 或全能签 → 点进 Signed 文件夹 → 点右上角打开）")
+                    if vm.syncedPackageNames.isEmpty && vm.bookmarkedFolderNames.isEmpty {
+                        Text("💡 Feather 专属提示：Feather 未开启 iOS 原位目录共享，系统『文件』不允许直接对 Signed 文件夹点「打开」。请点击下方第一项「导入签名源包」，点进 Feather → Signed → UUID文件夹，直接点选里面的 .app 或 .ipa（可多选）即可永久关联深扫！")
                             .font(.caption)
                             .foregroundColor(.orange)
                     } else {
-                        HStack {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("已绑定: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
-                                .font(.subheadline.bold())
-                                .foregroundColor(.green)
+                        if !vm.syncedPackageNames.isEmpty {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .foregroundColor(.green)
+                                Text("已永久关联 \(vm.syncedPackageNames.count) 款源包: \(vm.syncedPackageNames.joined(separator: ", "))")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.green)
+                            }
+                        }
+                        if !vm.bookmarkedFolderNames.isEmpty {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("已绑定目录: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.green)
+                            }
                         }
                     }
 
-                    Button(action: { pickSigningFolder() }) {
-                        Label("绑定签名器 Signed / Unsigned 子目录", systemImage: "folder.fill.badge.plus")
+                    Button(action: { pickSourcePackages() }) {
+                        Label("导入 Feather / 签名器源包 (.ipa 或 Signed 内 .app)", systemImage: "doc.zipper")
+                            .font(.subheadline.bold())
                             .foregroundColor(.teal)
+                    }
+
+                    Button(action: { pickSigningFolder() }) {
+                        Label("绑定普通目录（iCloud / 自建文件夹）", systemImage: "folder.fill.badge.plus")
+                            .foregroundColor(.primary)
+                    }
+
+                    if !vm.syncedPackageNames.isEmpty {
+                        Button(role: .destructive, action: {
+                            vm.clearSyncedPackages()
+                            localBannerText = "已清空已关联的源包缓存"
+                            localBannerIsError = false
+                        }) {
+                            Label("清空已关联的源包缓存", systemImage: "trash")
+                        }
                     }
 
                     if !vm.bookmarkedFolderNames.isEmpty {
                         Button(role: .destructive, action: {
                             vm.clearBoundSigningFolders()
-                            localBannerText = "已解除签名器目录绑定"
+                            localBannerText = "已解除普通目录绑定"
                             localBannerIsError = false
                         }) {
-                            Label("解除已绑定的签名目录", systemImage: "folder.badge.minus")
+                            Label("解除已绑定的目录", systemImage: "folder.badge.minus")
                         }
                     }
                 } header: {
-                    Text("引擎 2 · 签名器源包二进制深扫（Feather / 全能签）")
+                    Text("引擎 2 · 签名器源包二进制联动（Feather / 全能签）")
                 } footer: {
-                    Text("绑定后自动联动扫描 Signed / Unsigned 目录下的 .ipa 与解包后的 .app 二进制及 Frameworks/*.dylib 注入插件。")
+                    Text("导入的 .ipa 或 Feather Signed/<UUID>/ 内的 .app 包会自动缓存并与全机注册表按 Bundle ID 永久联动，深度审计 Mach-O 私有符号与注入动态库。也可在 Feather 内点击「导出 IPA -> 用 WQGuard 打开」。")
                 }
 
                 // Engine 3: On-Device URL Scheme Probe
@@ -399,10 +426,20 @@ public struct InstalledScanConfigSheet: View {
         #endif
     }
 
+    private func pickSourcePackages() {
+        #if canImport(UIKit)
+        NativeDocumentPickerPresenter.shared.present(kind: .ipaFiles) { urls in
+            vm.scanMultipleIPAPackages(at: urls, correlateWithInstalled: true)
+            localBannerIsError = false
+            localBannerText = "✅ 已关联源包（\(vm.syncedPackageNames.joined(separator: ", "))），正在联动深扫..."
+        }
+        #endif
+    }
+
     private func pickSigningFolder() {
         #if canImport(UIKit)
         NativeDocumentPickerPresenter.shared.present(kind: .signingFolder) { urls in
-            vm.scanMultipleIPAPackages(at: urls)
+            vm.scanMultipleIPAPackages(at: urls, correlateWithInstalled: true)
             localBannerIsError = false
             localBannerText = "已成功绑定目录（\(vm.bookmarkedFolderNames.joined(separator: ", "))），正在后台扫描源包..."
         }
