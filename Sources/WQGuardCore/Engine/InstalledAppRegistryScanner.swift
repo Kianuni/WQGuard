@@ -706,7 +706,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
                 let gStr = gating.appGroups.joined(separator: ", ")
                 indicators.append(ThreatIndicator(
                     signature: "com.apple.security.application-groups",
-                    description: "已安装侧载应用声明了共享容器权限 (\(gStr))，满足触发 containermanagerd 跨沙盒漏洞的前置条件。建议绑定签名工具目录关联本地 IPA 做进一步二进制符号排查。",
+                    description: "已安装侧载应用声明了共享容器权限 (\(gStr))，满足触发 containermanagerd 跨沙盒漏洞的前置条件。建议手动选择对应 .ipa 文件加入扫描做进一步二进制符号排查。",
                     category: "Shared Container Surface",
                     location: "installation_proxy Entitlements",
                     severity: .caution
@@ -801,7 +801,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         case .knownTool:
             remediation = "已安装应用匹配已知开源研究工具白名单（\(whitelistedToolName ?? "Known Tool")）。当前为系统注册表权限审计结果。"
         case .caution:
-            remediation = "已安装侧载应用包含共享容器权限、常驻后台或改版特征。可绑定签名工具目录（如全能签/Feather）自动关联源 IPA 完成二进制深度复核。"
+            remediation = "已安装侧载应用包含共享容器权限、常驻后台或改版特征。可手动选择对应 .ipa 安装包加入扫描列表自动按 Bundle ID 完成二进制深度复核。"
         case .safe:
             remediation = "系统注册表权限与签名链核验通过：未声明 App Group 共享容器或任何越权私有 Entitlements（当前为注册表级审计，无本地 IPA 二进制）。"
         }

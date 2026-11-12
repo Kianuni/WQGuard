@@ -33,11 +33,10 @@ public enum WQStrings {
     // MARK: - Dashboard Overview
     public static var appTitle: String { localized("app_title", en: "WQGuard", zh: "WQGuard 容器守卫") }
     public static var startSystemScan: String { localized("start_system_scan", en: "Scan Installed Apps", zh: "一键扫描已安装应用") }
-    public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "installation_proxy Registry + On-Device Probe + Signer IPA Correlation", zh: "系统注册表权限审计 + 本机探针 + 签名目录二进制联动") }
+    public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "installation_proxy Registry + On-Device Probe + Queued IPA Correlation", zh: "系统注册表权限审计 + 本机探针 + 本地 IPA 二进制联动") }
     public static var configureInstalledScanButton: String { localized("configure_installed_scan_btn", en: "Scan Sources & Pairing", zh: "配置已安装扫描源") }
-    public static var bindSigningFolderButton: String { localized("bind_signing_folder_btn", en: "Bind Folder", zh: "绑定普通目录") }
-    public static var selectIPAFileButton: String { localized("select_ipa_file_btn", en: "Import .ipa / Feather .app", zh: "导入源包 (.ipa / .app)") }
-    public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Select Signing Folder / Import IPAs", zh: "绑定自签工具目录 / 导入 IPA") }
+    public static var selectIPAFileButton: String { localized("select_ipa_file_btn", en: "Select .ipa Files (Multi-Select)", zh: "选择 .ipa 文件加入扫描（支持多选）") }
+    public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Select .ipa Files (Multi-Select)", zh: "选择 .ipa 文件加入扫描（支持多选）") }
     public static var scanningInProgress: String { localized("scanning_in_progress", en: "Deep analysis in progress...", zh: "正在深度分析...") }
     public static var cancelScan: String { localized("cancel_scan", en: "Cancel Scan", zh: "取消全盘扫描") }
     public static var metricsSummary: String { localized("metrics_summary", en: "Audit Summary", zh: "审计统计概览") }
@@ -78,9 +77,9 @@ public enum WQStrings {
 
     public static func posturePendingSubtitle(exposedCount: Int, isFullScanEnabled: Bool = false) -> String {
         if exposedCount > 0 {
-            return localized("posture_pending_cve_sub", en: "Unpatched firmware CVEs detected. Tap below to scan self-signed apps or import local IPAs.", zh: "当前 iOS 存在未修补系统漏洞。请点击下方扫描自签应用或绑定签名工具目录（Feather / SideStore / AltStore 等）。")
+            return localized("posture_pending_cve_sub", en: "Unpatched firmware CVEs detected. Tap below to scan installed apps or select local .ipa files.", zh: "当前 iOS 存在未修补系统漏洞。请点击下方扫描已安装应用或手动多选 .ipa 文件加入扫描。")
         }
-        return localized("posture_pending_clean_sub", en: "Tap below to scan self-signed apps or import local IPA packages.", zh: "请点击下方按钮扫描自签应用或导入本地 IPA 安装包。")
+        return localized("posture_pending_clean_sub", en: "Tap below to scan installed apps or select local .ipa packages.", zh: "请点击下方按钮扫描已安装应用或手动多选本地 .ipa 安装包。")
     }
 
     public static func postureTitle(for posture: RiskTier, isScanning: Bool) -> String {
@@ -165,8 +164,8 @@ public enum WQStrings {
     // MARK: - IPA Package Card & Injected Dylibs
     public static var ipaImportTitle: String { localized("ipa_import_title", en: "Import Local IPA Package", zh: "导入本地 IPA 安装包") }
     public static var ipaImportSub: String { localized("ipa_import_sub", en: "Pre-installation sandbox analysis for containermanagerd escape, private photos & dylib injection", zh: "安装前在沙盒内深度检测 containermanagerd 越权、私有相册调用与注入动态库") }
-    public static var selectIPAButton: String { localized("select_ipa_button", en: "Select .ipa Files or Folder", zh: "选择 .ipa 文件或文件夹（可多选）") }
-    public static var batchIPANoValidTargets: String { localized("batch_ipa_no_targets", en: "No .ipa or .app packages found in the selected items.", zh: "所选文件或目录中未找到可审计的 .ipa 或 .app 安装包。") }
+    public static var selectIPAButton: String { localized("select_ipa_button", en: "Select .ipa Files (Multi-Select)", zh: "选择 .ipa 文件加入扫描（支持多选）") }
+    public static var batchIPANoValidTargets: String { localized("batch_ipa_no_targets", en: "Please select valid .ipa or .tipa package files (multiple selection supported).", zh: "请选择 .ipa 或 .tipa 格式的安装包文件（支持一次勾选多个文件加入扫描）。") }
     public static func batchIPACompletedBanner(_ count: Int) -> String {
         localized("batch_ipa_completed_\(count)", en: "Batch audit completed: \(count) packages inspected (see Findings tab for full list)", zh: "已完成批量审查：共检测 \(count) 个安装包（完整列表已同步至「仪表盘」与「审计发现」）")
     }

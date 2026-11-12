@@ -19,7 +19,7 @@ public struct InstalledScanConfigSheet: View {
     private enum TutorialTab: String, CaseIterable, Identifiable {
         case modeB = "方式 B · Mac导出"
         case modeA = "方式 A · 无线直连"
-        case engine2 = "引擎 2 · 源包深扫"
+        case engine2 = "引擎 2 · IPA深扫"
         var id: String { rawValue }
     }
 
@@ -293,67 +293,64 @@ public struct InstalledScanConfigSheet: View {
                     Text("推荐优先使用 pymobiledevice3 导出命令（可读取企业签、个人侧载、TestFlight 与官方应用的完整 Entitlements 权限表并直接输出到 Mac 桌面 ~/Desktop/installed_apps.json），隔空投送到手机即可一键完成全盘审计。")
                 }
 
-                // Engine 2: Signer Source Package & Folder Correlation
+                // Engine 2: Multi-Select Local IPA Scan Queue & Registry Correlation
                 Section {
-                    if vm.syncedPackageNames.isEmpty && vm.bookmarkedFolderNames.isEmpty {
-                        Text("💡 Feather 专属提示：Feather 未开启 iOS 原位目录共享，系统『文件』不允许直接对 Signed 文件夹点「打开」。请点击下方第一项「导入签名源包」，点进 Feather → Signed → UUID文件夹，直接点选里面的 .app 或 .ipa（可多选）即可永久关联深扫！")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    } else {
-                        if !vm.syncedPackageNames.isEmpty {
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: "checkmark.seal.fill")
-                                    .foregroundColor(.green)
-                                Text("已永久关联 \(vm.syncedPackageNames.count) 款源包: \(vm.syncedPackageNames.joined(separator: ", "))")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.green)
-                            }
-                        }
-                        if !vm.bookmarkedFolderNames.isEmpty {
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                Text("已绑定目录: \(vm.bookmarkedFolderNames.joined(separator: ", "))")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.green)
-                            }
-                        }
-                    }
-
                     Button(action: { pickSourcePackages() }) {
-                        Label("导入 Feather / 签名器源包 (.ipa 或 Signed 内 .app)", systemImage: "doc.zipper")
+                        Label("选择 .ipa 文件加入扫描列表（支持多选）", systemImage: "doc.badge.plus")
                             .font(.subheadline.bold())
                             .foregroundColor(.teal)
                     }
 
-                    Button(action: { pickSigningFolder() }) {
-                        Label("绑定普通目录（iCloud / 自建文件夹）", systemImage: "folder.fill.badge.plus")
-                            .foregroundColor(.primary)
-                    }
+                    if vm.syncedPackageNames.isEmpty {
+                        Text("尚未加入本地 .ipa 安装包。可点击上方按钮在系统『文件』中一次勾选多个 .ipa / .tipa 文件加入扫描列表。")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    } else {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.seal.fill")
+                                .foregroundColor(.green)
+                            Text("已加入扫描列表（共 \(vm.syncedPackageNames.count) 个 IPA）")
+                                .font(.caption.bold())
+                                .foregroundColor(.green)
+                        }
 
-                    if !vm.syncedPackageNames.isEmpty {
+                        ForEach(vm.syncedPackageNames, id: \.self) { pkgName in
+                            HStack(spacing: 10) {
+                                Image(systemName: "doc.zipper")
+                                    .foregroundColor(.teal)
+                                    .font(.caption)
+                                Text(pkgName)
+                                    .font(.caption.monospaced())
+                                    .lineLimit(1)
+                                Spacer()
+                                Button(action: {
+                                    vm.removeSyncedPackage(named: pkgName)
+                                }) {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red.opacity(0.85))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .onDelete { indexSet in
+                            let currentNames = vm.syncedPackageNames
+                            for idx in indexSet where idx < currentNames.count {
+                                vm.removeSyncedPackage(named: currentNames[idx])
+                            }
+                        }
+
                         Button(role: .destructive, action: {
                             vm.clearSyncedPackages()
-                            localBannerText = "已清空已关联的源包缓存"
+                            localBannerText = "已清空全部已加入的 IPA 扫描文件"
                             localBannerIsError = false
                         }) {
-                            Label("清空已关联的源包缓存", systemImage: "trash")
-                        }
-                    }
-
-                    if !vm.bookmarkedFolderNames.isEmpty {
-                        Button(role: .destructive, action: {
-                            vm.clearBoundSigningFolders()
-                            localBannerText = "已解除普通目录绑定"
-                            localBannerIsError = false
-                        }) {
-                            Label("解除已绑定的目录", systemImage: "folder.badge.minus")
+                            Label("清空全部已加入的 IPA 文件", systemImage: "trash")
                         }
                     }
                 } header: {
-                    Text("引擎 2 · 签名器源包二进制联动（Feather / 全能签）")
+                    Text("引擎 2 · 本地 IPA 扫描列表（支持多选）")
                 } footer: {
-                    Text("导入的 .ipa 或 Feather Signed/<UUID>/ 内的 .app 包会自动缓存并与全机注册表按 Bundle ID 永久联动，深度审计 Mach-O 私有符号与注入动态库。也可在 Feather 内点击「导出 IPA -> 用 WQGuard 打开」。")
+                    Text("加入列表的所有 .ipa / .tipa 文件会自动缓存，并在扫描时按 Bundle ID 与全机注册表联动合并，深度审计 Mach-O 私有符号与注入动态库。Feather 已签应用可在 Feather「库 → 已签名 → 导出 IPA」后导入。")
                 }
 
                 // Engine 3: On-Device URL Scheme Probe
@@ -498,27 +495,27 @@ public struct InstalledScanConfigSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             tutorialStepCard(
                 badge: "作用说明",
-                title: "为什么可以配合引擎 2 联动 Feather / 全能签？",
+                title: "为什么可以配合引擎 2 多选加入 .ipa 文件？",
                 color: .cyan,
-                detail: "方式 A / B 能查出全机所有应用的签名证书、App Groups 与越权权限表，而受 iOS 沙盒隔离限制无法直接拆包其他已安装应用的主程序。通过下方「引擎 2」导入签名器里的源包后，WQGuard 会按 Bundle ID 自动将注册表与二进制合并升级为「🔬 全量深扫」，精准检出 containermanagerd 漏洞符号与注入动态库！"
+                detail: "方式 A / B 能查出全机所有应用的签名证书、App Groups 与越权权限表，而受 iOS 沙盒隔离限制无法直接拆包其他已安装应用的主程序。通过下方「引擎 2」将侧载应用的 .ipa 文件加入扫描列表后，WQGuard 会按 Bundle ID 自动将注册表与二进制合并升级为「🔬 全量深扫」，精准检出 containermanagerd 漏洞符号与注入动态库！"
             )
 
             Divider()
 
             tutorialStepCard(
                 badge: "方法 ①",
-                title: "在 WQGuard 内直接点选 Feather Signed 里的 .app",
+                title: "手动多选本地 .ipa 文件加入扫描列表",
                 color: .teal,
-                detail: "由于 Feather 未开启文件夹级原位共享，系统不允许直接对 Signed 外层目录点打开。请点击本页下方引擎 2 的「导入 Feather / 签名器源包」，依次点进『我的 iPhone → Feather → Signed → 乱码UUID文件夹』，直接点击里面的 .app 应用包即可永久缓存并自动关联！"
+                detail: "点击本页下方引擎 2 的「选择 .ipa 文件加入扫描列表（支持多选）」，进入系统『文件』App（例如「下载项」、『我的 iPhone → Feather → Unsigned』或任意保存安装包的目录），可一次勾选多个 .ipa / .tipa 文件点右上角「打开」批量加入扫描！"
             )
 
             Divider()
 
             tutorialStepCard(
                 badge: "方法 ②",
-                title: "在 Feather 内一键导出 IPA 到 WQGuard",
+                title: "在 Feather / 全能签内导出已签名 IPA",
                 color: .orange,
-                detail: "打开 Feather → 底部切换到「库」→ 在「已签名」列表点击应用 → 选择「导出 IPA」→ 在系统分享菜单点击「WQGuard」即可直接深扫并永久关联。"
+                detail: "如果某个应用在签名时额外注入了插件（dylib），可打开 Feather → 底部「库」→ 在「已签名」列表点击该应用 → 选择「导出 IPA」→ 直接选「WQGuard」（或先「存储到“文件”」再回 WQGuard 多选导入）。"
             )
         }
     }
@@ -611,18 +608,10 @@ public struct InstalledScanConfigSheet: View {
         #if canImport(UIKit)
         NativeDocumentPickerPresenter.shared.present(kind: .ipaFiles) { urls in
             vm.scanMultipleIPAPackages(at: urls, correlateWithInstalled: true)
-            localBannerIsError = false
-            localBannerText = "✅ 已关联源包（\(vm.syncedPackageNames.joined(separator: ", "))），正在联动深扫..."
-        }
-        #endif
-    }
-
-    private func pickSigningFolder() {
-        #if canImport(UIKit)
-        NativeDocumentPickerPresenter.shared.present(kind: .signingFolder) { urls in
-            vm.scanMultipleIPAPackages(at: urls, correlateWithInstalled: true)
-            localBannerIsError = false
-            localBannerText = "已成功绑定目录（\(vm.bookmarkedFolderNames.joined(separator: ", "))），正在后台扫描源包..."
+            if !vm.syncedPackageNames.isEmpty {
+                localBannerIsError = false
+                localBannerText = "✅ 已加入 \(vm.syncedPackageNames.count) 个 IPA 至扫描列表，正在执行扫描..."
+            }
         }
         #endif
     }

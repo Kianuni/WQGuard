@@ -108,52 +108,38 @@ public struct DashboardView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 14))
                         }
 
-                        HStack(spacing: 10) {
-                            Button(action: {
-                                #if os(iOS)
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                #endif
-                                presentPicker(.ipaFiles)
-                            }) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "doc.zipper")
-                                        .font(.subheadline)
-                                    Text(WQStrings.selectIPAFileButton)
-                                        .font(.footnote.bold())
+                        Button(action: {
+                            #if os(iOS)
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            #endif
+                            presentPicker(.ipaFiles)
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.badge.plus")
+                                    .font(.subheadline)
+                                Text(WQStrings.selectIPAFileButton)
+                                    .font(.footnote.bold())
+                                Spacer()
+                                if !vm.syncedPackageNames.isEmpty {
+                                    Text("已加入 \(vm.syncedPackageNames.count) 个")
+                                        .font(.caption2.bold())
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.2))
+                                        .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
+                                        .clipShape(Capsule())
                                 }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 13)
-                                .background(Color(red: 0.13, green: 0.15, blue: 0.20))
-                                .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 14)
-                                        .stroke(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.4), lineWidth: 1)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 14))
                             }
-
-                            Button(action: {
-                                #if os(iOS)
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                #endif
-                                presentPicker(.signingFolder)
-                            }) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "folder.fill.badge.plus")
-                                        .font(.subheadline)
-                                    Text(WQStrings.bindSigningFolderButton)
-                                        .font(.footnote.bold())
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 13)
-                                .background(Color(red: 0.13, green: 0.15, blue: 0.20))
-                                .foregroundColor(.white)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 14)
-                                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 14))
-                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(Color(red: 0.13, green: 0.15, blue: 0.20))
+                            .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.4), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
                         }
 
                         if let engineSummary = vm.lastScanEngineSummary {
@@ -161,8 +147,8 @@ public struct DashboardView: View {
                                 .font(.caption2)
                                 .foregroundColor(.cyan)
                                 .lineLimit(1)
-                        } else if !vm.syncedPackageNames.isEmpty || !vm.bookmarkedFolderNames.isEmpty {
-                            Text("已关联源包/目录: \((vm.syncedPackageNames + vm.bookmarkedFolderNames).joined(separator: ", "))")
+                        } else if !vm.syncedPackageNames.isEmpty {
+                            Text("已加入扫描列表: \(vm.syncedPackageNames.joined(separator: ", "))")
                                 .font(.caption2)
                                 .foregroundColor(.gray)
                                 .lineLimit(1)
@@ -265,12 +251,6 @@ public struct DashboardView: View {
         }
         .sheet(isPresented: $vm.showInstalledScanConfigSheet) {
             InstalledScanConfigSheet()
-        }
-        .onChange(of: vm.showSideloadPickerFromDashboard) { newValue in
-            if newValue {
-                vm.showSideloadPickerFromDashboard = false
-                presentPicker(.signingFolder)
-            }
         }
     }
 

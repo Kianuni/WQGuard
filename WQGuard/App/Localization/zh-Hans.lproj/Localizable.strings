@@ -38,7 +38,7 @@
 /* IPA Scan View */
 "ipa_import_title" = "导入本地 IPA 安装包";
 "ipa_import_sub" = "安装前在沙盒内深度检测 containermanagerd 越权、私有相册调用与注入动态库";
-"select_ipa_button" = "选择本地 .ipa 文件";
+"select_ipa_button" = "选择 .ipa 文件加入扫描（支持多选）";
 "ipa_analyzing" = "正在进行 4 层沙盒解析与 Mach-O 静态反编译...";
 "ipa_analysis_failed" = "IPA 分析失败";
 "preinstall_alert_high_risk" = "安装前预警：检测到越界沙盒逃逸特征，切勿安装！";

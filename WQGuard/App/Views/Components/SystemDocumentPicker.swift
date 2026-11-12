@@ -3,11 +3,9 @@
 //  WQGuard
 //
 //  Direct UIKit topmost-controller presenter for `UIDocumentPickerViewController`.
-//  - Uses `asCopy: true` with `[.item, .data, .content]` for file imports (.plist,
-//    .mobiledevicepairing, .json, .xml, .ipa) so iOS NEVER greys out files due to
-//    Open-In-Place provider or CFBundleTypeRole restrictions.
-//  - Uses `UIDocumentPickerViewController(forOpeningContentTypes: [.folder])` with
-//    `allowsMultipleSelection = false` for signing folder binding.
+//  Uses `asCopy: true` with `[.item, .data, .content]` for flat file imports
+//  (.ipa, .tipa, .plist, .mobiledevicepairing, .json, .xml) so iOS never greys out
+//  files across FileProviders and supports native multi-selection for `.ipa` packages.
 //
 
 import SwiftUI
@@ -17,16 +15,11 @@ import UIKit
 #endif
 
 public enum DocumentPickerKind: String, Identifiable {
-    case signingFolder
     case ipaFiles
     case pairingFile
     case registrySnapshot
 
     public var id: String { rawValue }
-
-    public var isFolderSelection: Bool {
-        self == .signingFolder
-    }
 
     public var allowsMultipleSelection: Bool {
         self == .ipaFiles
@@ -39,7 +32,6 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
     public static let shared = NativeDocumentPickerPresenter()
 
     private var retainedPicker: UIDocumentPickerViewController?
-    private var activeKind: DocumentPickerKind = .pairingFile
     private var onPickHandler: (([URL]) -> Void)?
     private var onCancelHandler: (() -> Void)?
 
@@ -57,34 +49,18 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
             return
         }
 
-        let picker: UIDocumentPickerViewController
-        switch kind {
-        case .signingFolder:
-            // Explicit `asCopy: false` directory open-in-place mode (works for On My iPhone user folders,
-            // iCloud Drive, and apps declaring `LSSupportsOpeningDocumentsInPlace = true`).
-            picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
-        case .ipaFiles:
-            // `asCopy: true` with `.applicationBundle` + `.package` + `.item` allows selecting BOTH `.ipa`/`.tipa`
-            // archives AND unpacked `.app` bundles inside `Feather -> Signed -> <UUID>/` even when the host signer
-            // app (`Feather`) omits `LSSupportsOpeningDocumentsInPlace`!
-            picker = UIDocumentPickerViewController(
-                forOpeningContentTypes: [.applicationBundle, .package, .bundle, .item, .data, .content],
-                asCopy: true
-            )
-        case .pairingFile, .registrySnapshot:
-            // `asCopy: true` + `[.item, .data, .content]` enables ALL `.plist`, `.mobiledevicepairing`,
-            // `.json`, and `.xml` files across every FileProvider without greying out.
-            picker = UIDocumentPickerViewController(
-                forOpeningContentTypes: [.item, .data, .content],
-                asCopy: true
-            )
-        }
+        // `asCopy: true` + `[.item, .data, .content]` guarantees flat files (.ipa, .tipa,
+        // .plist, .mobiledevicepairing, .json, .xml) are selectable across all FileProviders
+        // without Open-In-Place restrictions, with multi-select enabled for `.ipaFiles`.
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.item, .data, .content],
+            asCopy: true
+        )
         picker.allowsMultipleSelection = kind.allowsMultipleSelection
         picker.shouldShowFileExtensions = true
         picker.delegate = self
         picker.presentationController?.delegate = self
 
-        self.activeKind = kind
         self.retainedPicker = picker
         self.onPickHandler = onPick
         self.onCancelHandler = onCancel
@@ -96,20 +72,15 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
         MainActor.assumeIsolated {
             let pick = self.onPickHandler
             let cancel = self.onCancelHandler
-            let isFolder = self.activeKind.isFolderSelection
             self.clearRetainedState()
             guard !urls.isEmpty else {
                 cancel?()
                 return
             }
 
-            if isFolder {
-                pick?(urls)
-            } else {
-                // Persist `asCopy: true` temp inbox files synchronously before UIKit cleans up `-Inbox`
-                let safeURLs = Self.stageCopiedFilesIfNeeded(urls)
-                pick?(safeURLs)
-            }
+            // Persist `asCopy: true` temp inbox files synchronously before UIKit cleans up `-Inbox`
+            let safeURLs = Self.stageCopiedFilesIfNeeded(urls)
+            pick?(safeURLs)
         }
     }
 

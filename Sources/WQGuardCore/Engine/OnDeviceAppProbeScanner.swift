@@ -50,14 +50,14 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
             canonicalBundleId: "p3.xyz.yyyue.esign",
             schemes: ["esign"],
             role: .sideloadSigner,
-            summaryZh: "本机已安装侧载签名工具「全能签 / ESign」。建议点击「绑定签名工具目录」选中『我的 iPhone -> 全能签』，即可对该工具签发的所有 IPA 进行二进制深扫。"
+            summaryZh: "本机已安装侧载签名工具「全能签 / ESign」。可将其导出的 .ipa 文件多选加入扫描列表，对该工具签发的应用执行二进制深扫。"
         ),
         AppProbeDefinition(
             displayName: "Feather",
             canonicalBundleId: "kh.crysalis.feather",
             schemes: ["feather"],
             role: .sideloadSigner,
-            summaryZh: "本机已安装开源侧载签名器 Feather。可绑定『我的 iPhone -> Feather』目录扫描全部已签应用包。"
+            summaryZh: "本机已安装开源侧载签名器 Feather。可在 Feather「库 → 已签名 → 导出 IPA」或手动多选本地 .ipa 文件加入扫描列表进行深扫。"
         ),
         AppProbeDefinition(
             displayName: "SideStore",
@@ -78,7 +78,7 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
             canonicalBundleId: "com.gbox.pub",
             schemes: ["gbox"],
             role: .sideloadSigner,
-            summaryZh: "本机已安装侧载签名工具 GBox。建议绑定其本地文件夹以审计已签名 IPA 包。"
+            summaryZh: "本机已安装侧载签名工具 GBox。可手动多选其 .ipa 文件加入扫描列表进行二进制审计。"
         ),
         AppProbeDefinition(
             displayName: "Scarlet",

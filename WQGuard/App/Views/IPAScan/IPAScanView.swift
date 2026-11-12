@@ -2,7 +2,7 @@
 //  IPAScanView.swift
 //  WQGuard
 //
-//  Pre-installation security scanner for local .ipa packages.
+//  Pre-installation & batch multi-select security scanner for local .ipa / .tipa packages.
 //
 
 import SwiftUI
@@ -17,13 +17,13 @@ public struct IPAScanView: View {
     public var body: some View {
         ScrollView {
             VStack(spacing: 20) {
-                // Drop / Import Card
+                // Multi-Select IPA Import Card
                 VStack(spacing: 16) {
                     ZStack {
                         Circle()
                             .fill(Color(red: 0.0, green: 0.78, blue: 0.65).opacity(0.15))
                             .frame(width: 72, height: 72)
-                        Image(systemName: "arrow.up.doc.fill")
+                        Image(systemName: "doc.badge.plus")
                             .font(.system(size: 32))
                             .foregroundColor(Color(red: 0.0, green: 0.78, blue: 0.65))
                     }
@@ -39,31 +39,19 @@ public struct IPAScanView: View {
                             .padding(.horizontal, 24)
                     }
 
-                    HStack(spacing: 12) {
-                        Button(action: { presentPicker(.ipaFiles) }) {
-                            Label(WQStrings.selectIPAFileButton, systemImage: "doc.zipper")
-                                .font(.subheadline.bold())
-                                .padding(.horizontal, 18)
-                                .padding(.vertical, 13)
-                                .background(Color(red: 0.0, green: 0.78, blue: 0.65))
-                                .foregroundColor(.black)
-                                .clipShape(Capsule())
-                        }
-
-                        Button(action: { presentPicker(.signingFolder) }) {
-                            Label(WQStrings.bindSigningFolderButton, systemImage: "folder.fill.badge.plus")
-                                .font(.subheadline.bold())
-                                .padding(.horizontal, 18)
-                                .padding(.vertical, 13)
-                                .background(Color.white.opacity(0.1))
-                                .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
-                                .clipShape(Capsule())
-                        }
+                    Button(action: { presentPicker() }) {
+                        Label(WQStrings.selectIPAFileButton, systemImage: "doc.badge.plus")
+                            .font(.subheadline.bold())
+                            .padding(.horizontal, 22)
+                            .padding(.vertical, 14)
+                            .background(Color(red: 0.0, green: 0.78, blue: 0.65))
+                            .foregroundColor(.black)
+                            .clipShape(Capsule())
                     }
 
-                    Text("💡 Feather 用户：点击左侧「导入源包」，进入『我的 iPhone → Feather → Signed → UUID文件夹』直接点选里面的 .app 包即可深扫（或在 Feather 内导出 IPA 用 WQGuard 打开）")
+                    Text("💡 支持在系统『文件』中一次勾选多个 .ipa / .tipa 文件加入扫描列表；Feather 已签名应用可在 Feather「库 → 已签名 → 导出 IPA」后导入。")
                         .font(.caption2)
-                        .foregroundColor(.orange.opacity(0.9))
+                        .foregroundColor(.gray)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 20)
                 }
@@ -79,6 +67,54 @@ public struct IPAScanView: View {
                         )
                 )
                 .padding(.horizontal)
+
+                // Queued / Added IPA Scan List Card
+                if !vm.syncedPackageNames.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Label("已加入扫描文件 (\(vm.syncedPackageNames.count))", systemImage: "tray.full.fill")
+                                .font(.subheadline.bold())
+                                .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
+                            Spacer()
+                            Button(action: { vm.rescanAllSyncedPackages(correlateWithInstalled: false) }) {
+                                Text("全部重扫")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.cyan)
+                            }
+                            Text("·")
+                                .foregroundColor(.gray)
+                            Button(role: .destructive, action: { vm.clearSyncedPackages() }) {
+                                Text("清空")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.red)
+                            }
+                        }
+
+                        ForEach(vm.syncedPackageNames, id: \.self) { pkgName in
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.zipper")
+                                    .font(.caption)
+                                    .foregroundColor(.teal)
+                                Text(pkgName)
+                                    .font(.caption.monospaced())
+                                    .foregroundColor(.white)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button(action: { vm.removeSyncedPackage(named: pkgName) }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .padding(16)
+                    .background(Color(red: 0.11, green: 0.13, blue: 0.18))
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .padding(.horizontal)
+                }
 
                 // Inspection Status & Results
                 if vm.isInspectingIPA {
@@ -127,14 +163,15 @@ public struct IPAScanView: View {
                 }
             }
             .padding(.top, 16)
+            .padding(.bottom, 24)
         }
         .navigationTitle(WQStrings.tabIPAScan)
     }
 
-    private func presentPicker(_ kind: DocumentPickerKind) {
+    private func presentPicker() {
         #if canImport(UIKit)
-        NativeDocumentPickerPresenter.shared.present(kind: kind) { urls in
-            vm.scanMultipleIPAPackages(at: urls)
+        NativeDocumentPickerPresenter.shared.present(kind: .ipaFiles) { urls in
+            vm.scanMultipleIPAPackages(at: urls, correlateWithInstalled: false)
         }
         #endif
     }

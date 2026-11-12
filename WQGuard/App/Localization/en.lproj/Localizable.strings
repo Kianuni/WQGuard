@@ -38,7 +38,7 @@
 /* IPA Scan View */
 "ipa_import_title" = "Import Local IPA Package";
 "ipa_import_sub" = "Pre-installation sandbox analysis for containermanagerd escape, private photos & dylib injection";
-"select_ipa_button" = "Select Local .ipa File";
+"select_ipa_button" = "Select .ipa Files (Multi-Select)";
 "ipa_analyzing" = "Performing 4-layer sandbox analysis & Mach-O static decompilation...";
 "ipa_analysis_failed" = "IPA Analysis Failed";
 "preinstall_alert_high_risk" = "Pre-install Warning: Detected sandbox escape exploit! Do NOT install!";
