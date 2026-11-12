@@ -1,4 +1,4 @@
-# 安全策略与只读不变量规范 / Security Policy & Invariant Specification
+# 安全架构与物理只读不变量规范 / Security Architecture & Read-Only Invariant Specification
 
 **[🇨🇳 简体中文](#简体中文) · [🇺🇸 English](#english)**
 
@@ -17,28 +17,9 @@
 
 ---
 
-### 2. 安全漏洞负责任披露流程
+### 2. 核心安全工程实现细节
 
-如果您在 WQGuard 引擎、客户端或代理护盾规则中发现了潜在安全漏洞、解析器越界风险或检测绕过手法，欢迎向我们提交负责任披露报告。
-
-#### 2.1 适用范围
-- **`WQGuardCore` 核心引擎**：Mach-O 二进制解析、双槽 `CSBlob`（XML + ASN.1 DER）权限解析、`CSStore2` 读取器、`LockdownInstallationProxyClient` 协议交互、静态签名与行为元组裁决管线。
-- **`wqguard-cli` 命令行工具**：参数解析、文件流处理与报告生成器。
-- **`WQGuard` iOS 客户端**：SwiftUI 视图层、沙盒文件导入队列与本地存储隔离。
-- **`Shields/` 多平台代理护盾矩阵**：Surge (`.sgmodule`)、Shadowrocket (`.module`)、Quantumult X (`.conf`)、Loon (`.plugin`)、Stash (`.stoverride`) 规则及 `Shields/scripts/brotli-guard.js` 响应拦截脚本。
-
-#### 2.2 提交通道与响应时效
-- **首选私密通道**：通过 [GitHub Private Vulnerability Advisory](https://github.com/Kianuni/WQGuard/security/advisories/new) 提交私密安全报告（请附带复现环境、PoC 样本或最小复现步骤）。
-- **响应承诺**：
-  - **48 小时内**：确认收到报告并启动初步评估；
-  - **5 个工作日内**：完成漏洞复现与严重度定级；
-  - **14 个工作日内**：完成补丁开发与回归测试验证，并协调公开致谢与披露。
-
----
-
-### 3. 核心安全工程实现细节
-
-#### 3.1 POSIX 文件描述符硬锁死 (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)
+#### 2.1 POSIX 文件描述符硬锁死 (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)
 在通过底层系统调用直接读取容器或元数据文件时（如 `MCMReader.swift`），强制组合三项标志位：
 ```swift
 let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
@@ -47,29 +28,29 @@ let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
 - **`O_NOFOLLOW`**：若目标路径为符号链接，`open()` 立即报错 `ELOOP` 终止，彻底阻断恶意包利用软链接诱导扫描器越界读取宿主机敏感文件。
 - **`O_CLOEXEC`**：防止文件描述符意外泄漏至任何子进程。
 
-#### 3.2 只读零拷贝内存映射 (`.mappedIfSafe` / `PROT_READ`)
+#### 2.2 只读零拷贝内存映射 (`.mappedIfSafe` / `PROT_READ`)
 在 `MachOParser.swift`、`CSStore2Parser.swift` 与 `IPAPackageScanner.swift` 中，二进制结构解析均采用只读内存映射与严格整数溢出边界检查：
 ```swift
 let data = try Data(contentsOf: url, options: [.mappedIfSafe])
 ```
 底层对应 `mmap(..., PROT_READ, MAP_SHARED | MAP_RESILIENT_CODESIGN, ...)`，虚拟内存页仅授予 `PROT_READ` 只读权限，并且所有 Mach-O Load Command 偏移与切片范围均经过 64 位无溢出边界校验，防止畸形二进制引发越界崩溃。
 
-#### 3.3 非递归软链接穿越防御 (`lstat` + `readlink`)
+#### 2.3 非递归软链接穿越防御 (`lstat` + `readlink`)
 针对利用 `worse_query` 将 `<AppGroup>/Library/Caches` 替换为逃逸软链接的攻击场景，普通文件遍历 API（如 `stat()` 或默认目录枚举）会跟随软链接跨入受害者容器。WQGuard 在 `ContainerScanner.swift` 中严格执行：
 1. **禁用 `stat()`，强制使用 `lstat()`** 识别节点本身的 `S_IFLNK` 属性；
 2. **使用 `readlink()` 原位读取指向路径字符串** 作为取证证据；
 3. **严禁递归进入软链接节点**：一旦检测到 `isSymlink == true`，立即记录告警并终止该分支向下遍历。
 
-#### 3.4 作用域沙盒令牌自动回收 (`ScopedSandboxToken` / `SEC-M5-02`)
+#### 2.4 作用域沙盒令牌自动回收 (`ScopedSandboxToken` / `SEC-M5-02`)
 iOS 内核为单个进程分配的沙盒扩展槽位（Sandbox Extension Slots）数量有限。若扫描器连续校验数百个容器而未及时释放句柄，将触发内核表耗尽（错误码 `-6` / `EXFULL`）。WQGuard 通过线程安全的 RAII 封装类 `ScopedSandboxToken`，确保每次单点检查退出作用域或 `deinit` 时立即释放对应句柄。
 
-#### 3.5 本地数据隔离与无痕临时拆包
+#### 2.5 本地数据隔离与无痕临时拆包
 - **`.ipa` 无痕拆包自毁**：未安装的 `.ipa` / `.tipa` 仅解压至随机 UUID 命名的隔离临时目录 `NSTemporaryDirectory()/WQGuard_IPA_<UUID>/`，并由 Swift `defer` 块保证无论解析成功或抛出异常均在函数返回前彻底删除临时目录。
 - **配对记录与环回通信隔离**：用户导入的 `.mobiledevicepairing` 仅保存在本机沙盒 `Application Support/WQGuardRegistry/` 内，支持随时一键销毁；连接 `installation_proxy` 时仅与本机虚拟环回地址（如 `10.7.0.1` 或同网段本机隧道端）建立本地 TLS 握手，绝不向外部网络发送任何字节。
 
 ---
 
-### 4. 自动化只读回归验证体系
+### 3. 自动化只读回归验证体系
 
 WQGuard 的只读承诺由 **664 项自动化单元测试**（含 `ReadOnlyAssertions.swift` 对抗测试套件）在每次构建时强制校验：
 1. **全目录逐字节 SHA-256 前后比对**：扫描前后对目标目录全部文件计算 SHA-256，任何 1 比特变化立即判定测试失败。
@@ -92,21 +73,7 @@ WQGuard 的只读承诺由 **664 项自动化单元测试**（含 `ReadOnlyAsser
 
 ---
 
-### 2. Responsible Vulnerability Disclosure
-
-#### 2.1 Scope
-- **`WQGuardCore` Framework**: Mach-O parser, dual-slot `CSBlob` (XML + ASN.1 DER) entitlement parser, `CSStore2` reader, `LockdownInstallationProxyClient`, and static/behavioral risk pipeline.
-- **`wqguard-cli` Binary**: Argument parsing, stream purity, and report exporters.
-- **`WQGuard` iOS App**: SwiftUI views, sandboxed package queue, and local storage isolation.
-- **`Shields/` 5-Client Brotli Shield Matrix**: Configurations for Surge (`.sgmodule`), Shadowrocket (`.module`), Quantumult X (`.conf`), Loon (`.plugin`), Stash (`.stoverride`), and `Shields/scripts/brotli-guard.js`.
-
-#### 2.2 Reporting & Timeline
-- **Preferred Channel**: Submit via [GitHub Private Vulnerability Advisory](https://github.com/Kianuni/WQGuard/security/advisories/new) with reproduction steps or PoC samples.
-- **Response Targets**: Initial acknowledgement within **48 hours**, triage within **5 business days**, and patch validation within **14 business days**.
-
----
-
-### 3. Core Engineering Safeguards
+### 2. Core Engineering Safeguards
 
 1. **POSIX Descriptor Locking (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)**: Direct file reads enforce read-only kernel descriptors and immediately fail with `ELOOP` on symbolic links rather than dereferencing untrusted targets.
 2. **Read-Only Memory Mapping (`.mappedIfSafe` / `PROT_READ`)**: Binary parsers operate on read-only mapped pages guarded by overflow-checked 64-bit bounds validation.
@@ -116,7 +83,7 @@ WQGuard 的只读承诺由 **664 项自动化单元测试**（含 `ReadOnlyAsser
 
 ---
 
-### 4. Automated Read-Only Regression Verification
+### 3. Automated Read-Only Regression Verification
 
 Continuously enforced across **664 automated unit tests** (`ReadOnlyAssertions.swift`):
 - Pre/post bit-for-bit **SHA-256 checksum equality** across all scanned files;
