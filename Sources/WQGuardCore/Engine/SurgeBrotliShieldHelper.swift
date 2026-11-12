@@ -199,7 +199,10 @@ public final class SurgeBrotliShieldHelper: Sendable {
 
         switch platform {
         case .surge:
-            let replacement = cleanExtra.isEmpty ? "*.example.invalid" : cleanExtra.joined(separator: ", ")
+            if cleanExtra.isEmpty {
+                return Self.rawModuleTemplate
+            }
+            let replacement = cleanExtra.joined(separator: ", ")
             return Self.rawModuleTemplate.replacingOccurrences(of: "{{{EXTRA_MITM_HOSTS}}}", with: replacement)
 
         case .shadowrocket:
@@ -228,7 +231,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
 
             [rewrite_local]
             ; 1. 将客户端请求头中的 Accept-Encoding 强制降级为安全的 gzip, deflate
-            ^https?://.+ url request-header (\\r\\n[Aa]ccept-[Ee]ncoding:).+(\\r\\n) request-header $1 gzip, deflate$2
+            ^https?://.+ url request-header (\\r\\n[Aa][Cc][Cc][Ee][Pp][Tt]-[Ee][Nn][Cc][Oo][Dd][Ii][Nn][Gg]:)[^\\r\\n]+(\\r\\n) request-header $1 gzip, deflate$2
             ; 2. 仅检查响应头（不解压响应体），阻断服务端强行返回的 Content-Encoding: br 数据流
             ^https?://.+ url script-response-header \(Self.remoteGuardScriptURL)
 
@@ -285,7 +288,14 @@ public final class SurgeBrotliShieldHelper: Sendable {
               brotli-response-guard:
                 payload: |
                   const headers = ($response && $response.headers) || {};
-                  const ce = String(headers['Content-Encoding'] || headers['content-encoding'] || '');
+                  const ceParts = [];
+                  for (const k of Object.keys(headers)) {
+                    if (String(k).toLowerCase() === 'content-encoding') {
+                      const v = headers[k];
+                      ceParts.push(Array.isArray(v) ? v.join(', ') : String(v ?? ''));
+                    }
+                  }
+                  const ce = ceParts.join(', ');
                   if (/(^|[,\\s])br($|[,\\s;])/i.test(ce)) {
                     $done({
                       status: 403,

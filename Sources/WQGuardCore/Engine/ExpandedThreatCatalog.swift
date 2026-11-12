@@ -195,8 +195,11 @@ public enum ExpandedThreatCatalog {
             }
         }
 
-        // Entitlement checks
-        for (key, _) in entitlements {
+        // Entitlement checks (ignore explicit boolean `false` placeholders)
+        for (key, val) in entitlements {
+            if let boolVal = val as? Bool, !boolVal {
+                continue
+            }
             if key.hasPrefix(photosEntitlementPrefix) || key == photosBourgeoisieEntitlement {
                 indicators.append(ThreatIndicator(
                     signature: key,
@@ -251,6 +254,52 @@ public enum ExpandedThreatCatalog {
         return indicators
     }
 
+    /// Extracts lowercase ASCII brand tokens from an original-case display name, splitting on:
+    /// - Non-ASCII boundaries (e.g. `"WeChat多开"` -> `"WeChat"`),
+    /// - Punctuation / whitespace,
+    /// - CamelCase transitions (`"TelegramX"` -> `"telegram"`, `"x"`; `"MetaMaskWallet"` -> `"meta"`, `"mask"`, `"wallet"`, `"metamask"`),
+    /// - Acronym-to-word transitions (`"OKXWallet"` -> `"okx"`, `"wallet"`; `"TGPro"` -> `"tg"`, `"pro"`).
+    public static func extractBrandTokens(from rawDisplayName: String) -> Set<String> {
+        var tokens: Set<String> = []
+        let asciiWords = rawDisplayName.split { !$0.isASCII || (!$0.isLetter && !$0.isNumber) }
+
+        for wordSub in asciiWords {
+            let chars = Array(wordSub)
+            guard !chars.isEmpty else { continue }
+            tokens.insert(String(chars).lowercased())
+
+            var subTokens: [String] = []
+            var current: [Character] = [chars[0]]
+            for i in 1..<chars.count {
+                let prev = chars[i - 1]
+                let cur = chars[i]
+                let lowerToUpper = prev.isLowercase && cur.isUppercase
+                let acronymToWord = prev.isUppercase && cur.isUppercase && (i + 1 < chars.count && chars[i + 1].isLowercase)
+                let letterDigitSplit = (prev.isLetter && cur.isNumber) || (prev.isNumber && cur.isLetter)
+
+                if lowerToUpper || acronymToWord || letterDigitSplit {
+                    subTokens.append(String(current).lowercased())
+                    current = [cur]
+                } else {
+                    current.append(cur)
+                }
+            }
+            subTokens.append(String(current).lowercased())
+
+            for t in subTokens where !t.isEmpty {
+                tokens.insert(t)
+            }
+            // Include contiguous camel-pair bigrams (e.g. Meta+Mask -> metamask, Trust+Wallet -> trustwallet, We+Chat -> wechat)
+            if subTokens.count >= 2 {
+                for i in 0..<(subTokens.count - 1) {
+                    tokens.insert(subTokens[i] + subTokens[i + 1])
+                }
+            }
+        }
+
+        return tokens
+    }
+
     /// 3. Evaluates repackaged crypto wallet and messenger impersonation.
     public static func evaluateImpersonation(
         bundleId: String?,
@@ -265,10 +314,9 @@ public enum ExpandedThreatCatalog {
 
         var indicators: [ThreatIndicator] = []
         let rawBid = (bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let rawName = (displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let asciiTokens = Set(
-            rawName.split { !$0.isASCII || (!$0.isLetter && !$0.isNumber) }.map(String.init)
-        )
+        let trimmedOrigName = (displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawName = trimmedOrigName.lowercased()
+        let asciiTokens = extractBrandTokens(from: trimmedOrigName)
 
         for brand in targetBrands {
             let matchBid = !rawBid.isEmpty && brand.bundleIdPatterns.contains { pat in
@@ -280,7 +328,7 @@ public enum ExpandedThreatCatalog {
             let matchName = !rawName.isEmpty && brand.displayNames.contains { pat in
                 let isASCII = pat.unicodeScalars.allSatisfy { $0.isASCII }
                 if isASCII && !pat.contains(" ") {
-                    // Single-word ASCII brand/alias (e.g., "tg", "okx"): require exact word token boundary
+                    // Single-word ASCII brand/alias (e.g., "tg", "okx", "telegram", "metamask"): require exact word/camel token boundary
                     // so substrings inside unrelated words ("NetGuard", "PostgREST", "GitGraph", "ZeroTrust") never false-positive.
                     return rawName == pat || asciiTokens.contains(pat)
                 }

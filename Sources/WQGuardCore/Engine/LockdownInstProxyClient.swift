@@ -759,16 +759,15 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         sec_protocol_options_set_verify_block(secOpts, { _, trust, completion in
             let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
 
-            // Pin directly against the pairing file's DeviceCertificate / RootCertificate DER bytes
-            // because `lockdownd` generates long-lived device certificates that omit standard WebPKI
-            // X.509v3 extensions and would otherwise be rejected by iOS WebPKI SecPolicy evaluation.
-            if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate], !chain.isEmpty {
-                let presentedDERs = chain.map { SecCertificateCopyData($0) as Data }
-                if let devDER = expectedDeviceDER, presentedDERs.contains(devDER) {
-                    completion(true)
-                    return
-                }
-                if let rootDER = expectedRootDER, presentedDERs.contains(rootDER) {
+            // Pin the TLS-authenticated leaf certificate (`chain[0]`) directly against the pairing file's
+            // `DeviceCertificate` DER bytes because `lockdownd` generates long-lived device certificates that omit
+            // standard WebPKI X.509v3 extensions; if `DeviceCertificate` is absent and only `RootCertificate` is
+            // present, trust must be proven cryptographically via `SecTrustEvaluateWithError` below (never `.contains`
+            // on unverified intermediate/trailing chain entries).
+            if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+               let leafCert = chain.first {
+                let leafDER = SecCertificateCopyData(leafCert) as Data
+                if let devDER = expectedDeviceDER, leafDER == devDER {
                     completion(true)
                     return
                 }

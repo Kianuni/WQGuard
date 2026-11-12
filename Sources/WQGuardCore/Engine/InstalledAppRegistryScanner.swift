@@ -481,7 +481,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         return false
     }
 
-    /// Identifies third-party sideloading signers/managers for informational attribution ONLY (strict zero trust: NEVER auto-whitelisted).
+    /// Identifies third-party sideloading signers/managers for zero-trust risk attribution (NEVER auto-whitelisted).
     public static func matchKnownSideloadInfrastructure(bundleId: String, displayName: String) -> String? {
         let lowerBid = bundleId.lowercased()
         let lowerName = displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -492,9 +492,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             ("StikDebug", ["stikdebug", "stikjit", "com.stik.sj"], ["stikdebug", "stikjit"]),
             ("SideStore", ["com.sidestore.sidestore", "sidestore"], ["sidestore"]),
             ("AltStore", ["com.rileytestut.altstore"], ["altstore"]),
-            ("全能签 / ESign", ["yyyue.esign"], ["全能签", "esign"]),
+            ("全能签 / ESign", ["yyyue.esign", "com.esign."], ["全能签", "esign"]),
             ("GBox", ["com.gbox.pub"], ["gbox"]),
-            ("Scarlet", ["debianarch.scarlet"], ["scarlet"])
+            ("Scarlet", ["debianarch.scarlet", "usescarlet.scarlet"], ["scarlet"]),
+            ("TrollStore", ["com.opa334.trollstore", "trollstore"], ["trollstore", "巨魔商店"])
         ]
 
         for rule in rules {
@@ -660,7 +661,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         // 3. Private Photos Entitlements
         var rawEntMap: [String: Any] = [:]
         for k in record.allEntitlementKeys {
-            rawEntMap[k] = true
+            rawEntMap[k] = record.booleanEntitlements[k] ?? true
         }
         let photoInds = ExpandedThreatCatalog.evaluatePhotosBypass(
             linkedDylibs: [],
@@ -727,8 +728,9 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
         if cryptid == 0 && channel.isSideloadedOrEnterprise {
             let lowerBid = record.bundleId.lowercased()
-            let lowerName = record.displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let nameTokens = Set(lowerName.split { !$0.isLetter && !$0.isNumber }.map(String.init))
+            let trimmedOrigName = record.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowerName = trimmedOrigName.lowercased()
+            let nameTokens = ExpandedThreatCatalog.extractBrandTokens(from: trimmedOrigName)
             for extra in Self.extraSideloadImpersonationTargets {
                 let matchBid = extra.bundleIdPatterns.contains { pat in
                     lowerBid == pat || lowerBid.hasPrefix(pat + ".") || lowerBid.contains("." + pat + ".") || lowerBid.hasSuffix("." + pat)
@@ -763,14 +765,32 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             }
             if !persistent.isEmpty {
                 let mStr = persistent.joined(separator: ", ")
+                let bgSig = "UIBackgroundModes(\(mStr))"
                 indicators.append(ThreatIndicator(
-                    signature: "UIBackgroundModes(\(mStr))",
+                    signature: bgSig,
                     description: "已安装侧载应用开启了常驻后台模式 (\(mStr))。若配合剪贴板接口可在后台静默窃取复制的助记词/密码，建议关联本地 IPA 核验二进制符号。",
                     category: "Persistent Background Execution",
                     location: "installation_proxy Info.plist",
                     severity: .caution
                 ))
+                matchedSignatures.insert(bgSig)
             }
+        }
+
+        // 7b. Strict Zero Trust on Third-Party Sideloading & Developer Infrastructure
+        // Even when a third-party signer/debugger (e.g. ESign, Scarlet, GBox, Feather, SideStore, AltStore, LocalDevVPN, StikDebug, TrollStore)
+        // omits `application-groups`, it must surface as `.caution` rather than `.safe` and must never be auto-whitelisted.
+        if channel.isSideloadedOrEnterprise,
+           let sideloadInfraName = Self.matchKnownSideloadInfrastructure(bundleId: record.bundleId, displayName: record.displayName) {
+            let infraSig = "SideloadTool(\(sideloadInfraName))"
+            indicators.append(ThreatIndicator(
+                signature: infraSig,
+                description: "检测到第三方侧载签名/调试工具「\(sideloadInfraName)」。WQGuard 对所有第三方侧载工具严格执行零信任策略（绝不默认加白），请确认安装包来源可信并留意重签环境安全。",
+                category: "Third-Party Sideload Infrastructure",
+                location: "installation_proxy (\(record.bundleId))",
+                severity: .caution
+            ))
+            matchedSignatures.insert(infraSig)
         }
 
         // 8. Risk Tier & Whitelist Resolution (Strict Zero Trust: ONLY explicit WhitelistEngine rules grant .knownTool)

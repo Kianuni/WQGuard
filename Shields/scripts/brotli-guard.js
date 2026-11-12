@@ -7,8 +7,21 @@
  */
 (function () {
   var headers = ($response && $response.headers) || {};
-  var rawCE = headers["Content-Encoding"] || headers["content-encoding"] || "";
-  var hasBrotli = /(^|[,\s])br($|[,\s;])/i.test(String(rawCE));
+  var ceValues = [];
+  var keys = Object.keys(headers);
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (String(k).toLowerCase() === "content-encoding") {
+      var v = headers[k];
+      if (Array.isArray(v)) {
+        ceValues.push(v.join(", "));
+      } else if (v !== undefined && v !== null) {
+        ceValues.push(String(v));
+      }
+    }
+  }
+  var rawCE = ceValues.join(", ");
+  var hasBrotli = /(^|[,\s])br($|[,\s;])/i.test(rawCE);
 
   if (!hasBrotli) {
     $done({});

@@ -66,7 +66,7 @@ In the iOS security architecture, applications from the same developer organizat
 /var/mobile/Containers/Shared/AppGroup/<UUID>/
 ```
 To prevent arbitrary apps from accessing another developer's shared container, Apple enforces cryptographic entitlement verification at the kernel and daemon level:
-1. The app's Mach-O binary (and each embedded `PlugIns/*.appex` extension) must embed an Apple-signed `CSBlob` (SuperBlob magic `0xfade0cc0`).
+1. The app's Mach-O binary (and each embedded `PlugIns/*.appex` or `Extensions/*.appex` extension) must embed an Apple-signed `CSBlob` (SuperBlob magic `0xfade0cc0`).
 2. The `CSBlob` contains the entitlements dictionary in **Slot 5 (XML Plist, `0xfade7171`)** and/or **Slot 7 (Apple CoreEntitlements v1 ASN.1 DER wrapped in `[APPLICATION 16]` `0x70` + `[CONTEXT 16]` `0xb0`, `0xfade7172`)**, which WQGuard unions across all executable ARM slices.
 3. The entitlement key `com.apple.security.application-groups` must list the group identifier.
 
@@ -487,7 +487,7 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 #### `EXP-07`: Injected Dynamic Tweak & Hooking Framework Enumeration
 - **Identifier**: `EXP-07:InjectedTweaks`
 - **Severity**: `MEDIUM` (`RiskTier.caution`)
-- **Detection Layer**: Layer 2 Static Scanner (`LC_LOAD_DYLIB`, `Frameworks/`, `Dylibs/`, `DynamicLibraries/`, `PlugIns/*.appex`)
+- **Detection Layer**: Layer 2 Static Scanner (`LC_LOAD_DYLIB`, `Frameworks/`, `Dylibs/`, `DynamicLibraries/`, `PlugIns/*.appex`, `Extensions/*.appex`)
 - **Technical Description**: Mach-O binary or bundle contains hooking frameworks (`ElleKit`, `CydiaSubstrate`, `libsubstitute`, `libhooker`), dedicated sideload injection libraries (`.app/Dylibs/*.dylib`, `.app/DynamicLibraries/*.dylib` used by Feather / Cyan / Azule), or suspicious `@executable_path/` / `@rpath/` tweaks.
 - **Exploit Path**: Sideloaded modded IPA with injected dylibs capable of runtime method swizzling and credential interception.
 - **Remediation**: Audit injected dylib list displayed in WQGuard findings. Under strict zero-trust policy, verify every injected dylib independently before installing.

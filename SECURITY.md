@@ -52,7 +52,7 @@ iOS 内核为单个进程分配的沙盒扩展槽位（Sandbox Extension Slots�
 
 ### 3. 自动化只读回归验证体系
 
-WQGuard 的只读承诺由 **673 项自动化单元测试**（含 `ReadOnlyAssertions.swift` 与 `SecurityAuditV121RegressionTests.swift` 对抗测试套件）在每次构建时强制校验：
+WQGuard 的只读承诺由 **681 项自动化单元测试**（含 `ReadOnlyAssertions.swift` 与 `SecurityAuditV121RegressionTests.swift` 对抗测试套件）在每次构建时强制校验：
 1. **全目录逐字节 SHA-256 前后比对**：扫描前后对目标目录全部文件计算 SHA-256，任何 1 比特变化立即判定测试失败。
 2. **纳秒级文件系统时间戳校验**：比对 `st_mtimespec.tv_sec` 与 `st_mtimespec.tv_nsec`，确保扫描绝不污染文件修改时间。
 3. **描述符只读模式断言**：通过 `fcntl(fd, F_GETFL)` 校验 `flags & O_ACCMODE == O_RDONLY`。
@@ -85,7 +85,7 @@ WQGuard 的只读承诺由 **673 项自动化单元测试**（含 `ReadOnlyAsser
 
 ### 3. Automated Read-Only Regression Verification
 
-Continuously enforced across **673 automated unit tests** (`ReadOnlyAssertions.swift` & `SecurityAuditV121RegressionTests.swift`):
+Continuously enforced across **681 automated unit tests** (`ReadOnlyAssertions.swift` & `SecurityAuditV121RegressionTests.swift`):
 - Pre/post bit-for-bit **SHA-256 checksum equality** across all scanned files;
 - Pre/post **nanosecond `st_mtimespec` timestamp equality**;
 - Descriptor access mode verification (`fcntl(fd, F_GETFL) & O_ACCMODE == O_RDONLY`);

@@ -146,7 +146,6 @@ public final class WhitelistEngine: @unchecked Sendable {
             ],
             expectedSignatures: [
                 "container_query_create",
-                "container_query_get_single_result",
                 "com.apple.containermanagerd",
                 "com.apple.containermanagerd.system",
                 ".com.apple.mobile_container_manager.metadata.plist",
@@ -241,11 +240,20 @@ public final class WhitelistEngine: @unchecked Sendable {
                 guard matchesBundle else { continue }
             }
 
-            // 2. App Group match check (Crucial for preventing bundle ID spoofing)
+            // 2. App Group match check (Crucial for preventing bundle ID spoofing & piggybacked victim App Groups)
             if !tool.allowedAppGroups.isEmpty {
-                let matchesAppGroup = appGroups.contains { group in
-                    tool.allowedAppGroups.contains { pattern in
-                        PatternMatcher.matches(pattern: pattern, value: group)
+                let matchesAppGroup: Bool
+                if tool.isBuiltIn {
+                    matchesAppGroup = !appGroups.isEmpty && appGroups.allSatisfy { group in
+                        tool.allowedAppGroups.contains { pattern in
+                            PatternMatcher.matches(pattern: pattern, value: group)
+                        }
+                    }
+                } else {
+                    matchesAppGroup = appGroups.contains { group in
+                        tool.allowedAppGroups.contains { pattern in
+                            PatternMatcher.matches(pattern: pattern, value: group)
+                        }
                     }
                 }
                 guard matchesAppGroup else { continue }

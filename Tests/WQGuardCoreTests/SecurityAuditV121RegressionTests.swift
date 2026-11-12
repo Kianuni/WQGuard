@@ -733,4 +733,489 @@ final class SecurityAuditV121RegressionTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Round 2 Deep Audit Regressions (R2-1 .. R2-8)
+
+    func testR2_1_WhitelistSpoofingBypass_ExpandedThreats_BehavioralTuple_And_PiggybackedAppGroups_Blocked() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("wqg_r2_1_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // 1. Trojan IPA spoofing `com.wqguard.app` + `group.com.wqguard.app` carrying Private Photos framework (0 containermanagerd symbols)
+        let spoofPhotosMachO = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/System/Library/PrivateFrameworks/PhotoLibraryServices.framework/PhotoLibraryServices"],
+            symbols: ["_main"],
+            xmlEntitlements: SyntheticMachOGenerator.createXMLEntitlements(appGroups: ["group.com.wqguard.app"])
+        ))
+        let spoofPlist = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "com.wqguard.app",
+            "CFBundleDisplayName": "WQGuard",
+            "CFBundleExecutable": "WQGuard",
+            "CFBundleShortVersionString": "1.2.1"
+        ], format: .xml, options: 0)
+
+        let trojanPhotosIPA = tmpDir.appendingPathComponent("TrojanPhotosWQGuard.ipa")
+        try buildCustomZip(entries: [
+            .init(path: "Payload/WQGuard.app/Info.plist", rawPayload: spoofPlist),
+            .init(path: "Payload/WQGuard.app/WQGuard", rawPayload: spoofPhotosMachO, externalAttributes: (0o100755 << 16))
+        ]).write(to: trojanPhotosIPA)
+
+        let photosFinding = try IPAPackageScanner.shared.scan(ipaURL: trojanPhotosIPA)
+        XCTAssertFalse(photosFinding.isWhitelisted, "Trojan spoofing com.wqguard.app with PhotoLibraryServices must NEVER be whitelisted")
+        XCTAssertEqual(photosFinding.riskTier, .highRisk)
+
+        // 2. Trojan `.app` bundle spoofing `com.wqguard.app` with injected `.app/Dylibs/hook.dylib`
+        let cleanWQGMachO = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/usr/lib/libSystem.B.dylib"],
+            symbols: ["_main"],
+            xmlEntitlements: SyntheticMachOGenerator.createXMLEntitlements(appGroups: ["group.com.wqguard.app"])
+        ))
+        let hookDylib = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/usr/lib/libSystem.B.dylib"],
+            symbols: ["_init_hook"]
+        ))
+        let bundleDir = tmpDir.appendingPathComponent("SpoofedWQGuard.app")
+        try FileManager.default.createDirectory(at: bundleDir.appendingPathComponent("Dylibs"), withIntermediateDirectories: true)
+        try spoofPlist.write(to: bundleDir.appendingPathComponent("Info.plist"))
+        try cleanWQGMachO.write(to: bundleDir.appendingPathComponent("WQGuard"))
+        try hookDylib.write(to: bundleDir.appendingPathComponent("Dylibs/hook.dylib"))
+
+        let bundleFinding = try SecurityPipeline().scanBundle(at: bundleDir)
+        XCTAssertFalse(bundleFinding.isWhitelisted, "Trojan bundle spoofing com.wqguard.app with injected Dylibs/hook.dylib must NEVER be whitelisted")
+        XCTAssertEqual(bundleFinding.riskTier, .caution)
+
+        // 3. Obfuscated `dlopen + dlsym + symlink` behavioral tuple spoofing `com.wqguard.app`
+        let tupleSpoofMachO = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/usr/lib/libSystem.B.dylib"],
+            symbols: ["_dlopen", "_dlsym", "_symlink"],
+            xmlEntitlements: SyntheticMachOGenerator.createXMLEntitlements(appGroups: ["group.com.wqguard.app"])
+        ))
+        let tupleDetails = try MachOScanner.shared.parseMachO(data: tupleSpoofMachO)
+        let tupleFinding = MachOScanner.shared.scan(
+            details: tupleDetails,
+            context: .init(
+                bundleId: "com.wqguard.app",
+                displayName: "WQGuard",
+                installChannel: .developerSideloaded,
+                appGroups: ["group.com.wqguard.app"]
+            )
+        )
+        XCTAssertFalse(tupleFinding.isWhitelisted, "Obfuscated dlopen+dlsym+symlink exploit spoofing com.wqguard.app must NEVER be whitelisted")
+        XCTAssertEqual(tupleFinding.riskTier, .highRisk)
+
+        // 4. Piggybacked victim App Group `["group.com.wqguard.app", "group.victim.wallet"]` must NEVER match built-in WQGuard rule
+        let piggybackCheck = WhitelistEngine().isWhitelisted(
+            bundleId: "com.wqguard.app",
+            appGroups: ["group.com.wqguard.app", "group.victim.wallet"],
+            matchedSignatures: ["com.apple.containermanagerd"]
+        )
+        XCTAssertFalse(piggybackCheck.isWhitelisted, "Piggybacked victim App Group on com.wqguard.app must be rejected")
+    }
+
+    func testR2_2_DualSlotEntitlementShadowing_XMLFalseCannotMaskDERTrue_And_BenignFalseNotMisflagged() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("wqg_r2_2_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // Benign explicit `false` must NOT trigger false-positive Private Photos Bypass
+        let benignFalseInds = ExpandedThreatCatalog.evaluatePhotosBypass(
+            linkedDylibs: [],
+            symbols: [],
+            entitlements: ["com.apple.private.photos.allow": false],
+            cryptid: 0
+        )
+        XCTAssertTrue(benignFalseInds.isEmpty, "Explicit false boolean entitlement must not false-positive")
+
+        // Generate real Apple `codesign` DER Slot 7 carrying `com.apple.private.photos.allow = true` and `keychain-access-groups = ["*"]`
+        let cSrc = tmpDir.appendingPathComponent("m.c")
+        try "int main(void) { return 0; }\n".write(to: cSrc, atomically: true, encoding: .utf8)
+        let binURL = tmpDir.appendingPathComponent("m_arm64")
+        try runProcess("/usr/bin/clang", args: ["-arch", "arm64", "-Os", cSrc.path, "-o", binURL.path])
+
+        let entURL = tmpDir.appendingPathComponent("ent.plist")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0">
+        <dict>
+            <key>com.apple.private.photos.allow</key>
+            <true/>
+            <key>keychain-access-groups</key>
+            <array><string>*</string></array>
+        </dict>
+        </plist>
+        """.write(to: entURL, atomically: true, encoding: .utf8)
+        try runProcess("/usr/bin/codesign", args: ["-f", "-s", "-", "--entitlements", entURL.path, "--generate-entitlement-der", binURL.path])
+
+        let csData = try XCTUnwrap(MachOParser.parse(data: Data(contentsOf: binURL)).codeSignatureData)
+        let derRange = try XCTUnwrap(csData.range(of: Data([0xfa, 0xde, 0x71, 0x72])))
+        let derStart = derRange.lowerBound
+        let derLen: Int = csData.subdata(in: (derStart + 4)..<(derStart + 8)).withUnsafeBytes {
+            Int($0.loadUnaligned(as: UInt32.self).bigEndian)
+        }
+        let fullDerBlob = csData.subdata(in: derStart..<(derStart + derLen))
+
+        // Slot 5 XML tries to mask Slot 7 DER by declaring `false` and `<array/>`!
+        let maskingXML = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0">
+        <dict>
+            <key>com.apple.private.photos.allow</key>
+            <false/>
+            <key>keychain-access-groups</key>
+            <array/>
+        </dict>
+        </plist>
+        """.data(using: .utf8)!
+        let maskingXmlBlob = wrapCSBlob(magic: CSBlobConstants.entitlementXmlMagic, payload: maskingXML)
+        let dualSuperBlob = buildSuperBlob(slots: [
+            (type: CSBlobConstants.slotEntitlements, blob: maskingXmlBlob),
+            (type: CSBlobConstants.slotDerEntitlements, blob: fullDerBlob)
+        ])
+
+        let merged = CSBlobParser.shared.parseMergedEntitlements(from: dualSuperBlob)
+        XCTAssertEqual(merged["com.apple.private.photos.allow"] as? Bool, true, "Slot 5 XML <false/> must never shadow Slot 7 DER true")
+        XCTAssertEqual(merged["keychain-access-groups"] as? [String], ["*"], "Slot 5 XML <array/> must never shadow Slot 7 DER array")
+    }
+
+    func testR2_3_BrandImpersonation_CamelCase_Acronym_And_CJKSuffixes_CaughtWithZeroFalsePositives() throws {
+        let camelClones: [(bundleId: String, name: String)] = [
+            ("com.custom.client1", "TelegramX"),
+            ("com.custom.client2", "TGPro"),
+            ("com.custom.wallet1", "MetaMaskWallet"),
+            ("com.custom.wallet2", "TrustWalletPro"),
+            ("com.custom.wallet3", "OKXWallet"),
+            ("com.custom.wallet4", "BinancePro"),
+            ("com.custom.wallet5", "PhantomWallet"),
+            ("com.custom.wallet6", "TokenPocketPro"),
+            ("com.custom.wallet7", "imTokenPro"),
+            ("com.custom.wallet8", "BitKeepWallet")
+        ]
+        for clone in camelClones {
+            let inds = ExpandedThreatCatalog.evaluateImpersonation(
+                bundleId: clone.bundleId,
+                displayName: clone.name,
+                installChannel: .developerSideloaded,
+                cryptid: 0
+            )
+            XCTAssertEqual(inds.first?.severity, .highRisk, "CamelCase/acronym clone '\(clone.name)' must be flagged High Risk")
+        }
+
+        // Registry CJK+ASCII compound names ("WeChat多开", "Alipay极速版", "WhatsAppBusiness")
+        let regDicts: [[String: Any]] = [
+            [
+                "CFBundleIdentifier": "com.mod.wx1",
+                "CFBundleDisplayName": "WeChat多开",
+                "ApplicationType": "User",
+                "SignerIdentity": "Apple Development: Modder",
+                "ProfileValidated": true,
+                "Entitlements": ["get-task-allow": true]
+            ],
+            [
+                "CFBundleIdentifier": "com.mod.ali1",
+                "CFBundleDisplayName": "Alipay极速版",
+                "ApplicationType": "User",
+                "SignerIdentity": "Apple Development: Modder",
+                "ProfileValidated": true,
+                "Entitlements": ["get-task-allow": true]
+            ],
+            [
+                "CFBundleIdentifier": "com.mod.wa1",
+                "CFBundleDisplayName": "WhatsAppBusiness",
+                "ApplicationType": "User",
+                "SignerIdentity": "Apple Development: Modder",
+                "ProfileValidated": true,
+                "Entitlements": ["get-task-allow": true]
+            ]
+        ]
+        let plistData = try PropertyListSerialization.data(fromPropertyList: regDicts, format: .xml, options: 0)
+        let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(plistData)
+        let findings = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: false)
+        XCTAssertEqual(findings.count, 3)
+        XCTAssertTrue(findings.first { $0.bundleId == "com.mod.wx1" }?.indicators.contains { $0.signature == "IMPERSONATION:WeChat (微信)" } == true)
+        XCTAssertEqual(findings.first { $0.bundleId == "com.mod.ali1" }?.riskTier, .highRisk)
+        XCTAssertTrue(findings.first { $0.bundleId == "com.mod.wa1" }?.indicators.contains { $0.signature == "IMPERSONATION:WhatsApp" } == true)
+    }
+
+    func testR2_4_ExtensionKit_ExtensionsDirectory_And_FairPlayMainWithUnencryptedDylib_Caught() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("wqg_r2_4_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // 1. ExtensionKit `Extensions/*.appex` directory (instead of `PlugIns/*.appex`)
+        let cleanMain = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/usr/lib/libSystem.B.dylib"],
+            symbols: ["_main"]
+        ))
+        let evilExt = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/usr/lib/system/libsystem_containermanager.dylib"],
+            symbols: ["_container_copy_sandbox_token"],
+            xmlEntitlements: SyntheticMachOGenerator.createXMLEntitlements(appGroups: ["group.com.extkit.escape"])
+        ))
+        let mainPlist = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "com.extkit.host",
+            "CFBundleDisplayName": "ExtKitHost",
+            "CFBundleExecutable": "ExtKitHost"
+        ], format: .xml, options: 0)
+        let extPlist = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "com.extkit.host.ext",
+            "CFBundleDisplayName": "ExtKitWorker",
+            "CFBundleExecutable": "ExtKitWorker"
+        ], format: .xml, options: 0)
+
+        let extKitIPA = tmpDir.appendingPathComponent("ExtKitEscape.ipa")
+        try buildCustomZip(entries: [
+            .init(path: "Payload/ExtKitHost.app/Info.plist", rawPayload: mainPlist),
+            .init(path: "Payload/ExtKitHost.app/ExtKitHost", rawPayload: cleanMain, externalAttributes: (0o100755 << 16)),
+            .init(path: "Payload/ExtKitHost.app/Extensions/ExtKitWorker.appex/Info.plist", rawPayload: extPlist),
+            .init(path: "Payload/ExtKitHost.app/Extensions/ExtKitWorker.appex/ExtKitWorker", rawPayload: evilExt, externalAttributes: (0o100755 << 16))
+        ]).write(to: extKitIPA)
+
+        let extKitFinding = try IPAPackageScanner.shared.scan(ipaURL: extKitIPA)
+        XCTAssertEqual(extKitFinding.riskTier, .highRisk, "Extensions/*.appex must be audited with independent CSBlob entitlements")
+        XCTAssertTrue(extKitFinding.evidence.appGroups.contains("group.com.extkit.escape"))
+
+        // 2. FairPlay-encrypted main binary (`cryptid = 1`) bundled with unencrypted `.app/Dylibs/ElleKit.dylib` importing Private Photos
+        let fairPlayMain = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 1,
+            linkedDylibs: ["/usr/lib/libSystem.B.dylib"],
+            symbols: ["_main"]
+        ))
+        let unencryptedInjected = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/System/Library/PrivateFrameworks/PhotoLibraryServices.framework/PhotoLibraryServices"],
+            symbols: ["_PLPhotoLibrary"]
+        ))
+        let hybridIPA = tmpDir.appendingPathComponent("HybridFairPlayInjected.ipa")
+        try buildCustomZip(entries: [
+            .init(path: "Payload/ExtKitHost.app/Info.plist", rawPayload: mainPlist),
+            .init(path: "Payload/ExtKitHost.app/ExtKitHost", rawPayload: fairPlayMain, externalAttributes: (0o100755 << 16)),
+            .init(path: "Payload/ExtKitHost.app/Dylibs/ElleKit.dylib", rawPayload: unencryptedInjected, externalAttributes: (0o100755 << 16))
+        ]).write(to: hybridIPA)
+
+        let hybridFinding = try IPAPackageScanner.shared.scan(ipaURL: hybridIPA)
+        XCTAssertEqual(hybridFinding.riskTier, .highRisk, "Unencrypted dylib inside FairPlay main app must still be evaluated by ExpandedThreatCatalog")
+        XCTAssertTrue(hybridFinding.indicators.contains { $0.category == "Private Photos Bypass" })
+        XCTAssertTrue(hybridFinding.indicators.contains { $0.category == "Injected Tweak / Modded IPA" })
+    }
+
+    func testR2_5_ThirdPartySideloadTools_WithoutAppGroups_StillFlaggedCaution_UnderStrictZeroTrust() throws {
+        let appGroupLessTools: [(bundleId: String, name: String)] = [
+            ("kh.crysalis.feather", "Feather"),
+            ("p3.xyz.yyyue.esign", "全能签"),
+            ("com.gbox.pub", "GBox"),
+            ("com.usescarlet.scarlet", "Scarlet"),
+            ("com.SideStore.SideStore", "SideStore"),
+            ("com.rileytestut.AltStore", "AltStore"),
+            ("com.SideStore.LocalDevVPN", "LocalDevVPN"),
+            ("com.stik.stikdebug", "StikDebug"),
+            ("com.opa334.trollstore", "TrollStore")
+        ]
+        let dicts: [[String: Any]] = appGroupLessTools.map { t in
+            [
+                "CFBundleIdentifier": t.bundleId,
+                "CFBundleDisplayName": t.name,
+                "ApplicationType": "User",
+                "SignerIdentity": "Apple Development: Tester",
+                "ProfileValidated": true,
+                "Entitlements": ["get-task-allow": true] // Zero application-groups!
+            ]
+        }
+        let plistData = try PropertyListSerialization.data(fromPropertyList: dicts, format: .xml, options: 0)
+        let scanner = InstalledAppRegistryScanner(whitelistEngine: WhitelistEngine())
+        let records = try scanner.parseSnapshotData(plistData)
+        let findings = scanner.evaluateRecords(records, includeAppStoreApps: false)
+        XCTAssertEqual(findings.count, appGroupLessTools.count)
+
+        for f in findings {
+            XCTAssertFalse(f.isWhitelisted, "\(f.displayName) must NEVER be whitelisted")
+            XCTAssertEqual(f.riskTier, .caution, "\(f.displayName) without App Groups must still surface as .caution under strict zero trust")
+            XCTAssertTrue(f.indicators.contains { $0.category == "Third-Party Sideload Infrastructure" })
+        }
+    }
+
+    func testR2_6_BrotliGuardJS_Uppercase_MixedCase_DuplicateHeaderSmuggling_And_SurgeDefaultPlaceholder() throws {
+        let scriptURL = repoRoot.appendingPathComponent("Shields/scripts/brotli-guard.js")
+        let scriptSource = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        let stashFile = try String(contentsOf: repoRoot.appendingPathComponent("Shields/Stash/WQGuard-Brotli-Shield.stoverride"), encoding: .utf8)
+        let range = try XCTUnwrap(stashFile.range(of: "payload: |"))
+        let stashJS = stashFile[range.upperBound...]
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                var s = String(line)
+                if s.hasPrefix("      ") { s.removeFirst(6) }
+                return s
+            }
+            .joined(separator: "\n")
+
+        let adversarialHeaderMaps: [[String: Any]] = [
+            ["CONTENT-ENCODING": "br"],
+            ["Content-encoding": "gzip, br"],
+            ["Content-Encoding": "identity", "content-encoding": "br"],
+            ["content-encoding": "gzip", "CONTENT-ENCODING": "br"],
+            ["Content-Encoding": ["gzip", "br"]]
+        ]
+
+        for script in [scriptSource, stashJS] {
+            for hdrMap in adversarialHeaderMaps {
+                let ctx = JSContext()!
+                var captured: JSValue?
+                let doneBlock: @convention(block) (JSValue) -> Void = { val in captured = val }
+                ctx.setObject(doneBlock, forKeyedSubscript: "$done" as NSString)
+                ctx.setObject(["status": 200, "headers": hdrMap], forKeyedSubscript: "$response" as NSString)
+                _ = ctx.evaluateScript(script)
+                XCTAssertNil(ctx.exception)
+                XCTAssertEqual(captured?.forProperty("status")?.toInt32(), 403, "Must block adversarial header map \(hdrMap)")
+            }
+        }
+
+        // Default Surge shield export (empty extraHosts) preserves {{{EXTRA_MITM_HOSTS}}} matching physical file
+        let defaultSurge = SurgeBrotliShieldHelper.shared.generateShieldContent(for: .surge)
+        let physicalSurge = try String(contentsOf: repoRoot.appendingPathComponent("Shields/Surge/WQGuard-Brotli-Shield.sgmodule"), encoding: .utf8)
+        XCTAssertTrue(defaultSurge.contains("{{{EXTRA_MITM_HOSTS}}}"))
+        XCTAssertEqual(
+            defaultSurge.trimmingCharacters(in: .whitespacesAndNewlines),
+            physicalSurge.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    func testR2_7_TinyUnder64ByteZeroDeclaredDeflateBomb_CumulativeQuota_And_ZIP64ExtraField() throws {
+        // 1. 4096 repeated 'A' bytes compress to ~16 bytes (< 64 bytes!) under raw Deflate.
+        // Declaring uncompressedSize = 0 MUST still be caught as quotaExceeded!
+        let payload4K = Data(repeating: 0x41, count: 4096)
+        let tinyCompressed = rawDeflate(payload4K)
+        XCTAssertLessThan(tinyCompressed.count, 64, "Compressed payload must be < 64 bytes to exercise former <=64 bypass")
+
+        let zeroHeaderBomb = buildCustomZip(entries: [
+            .init(
+                path: "Payload/TinyBomb.app/Info.plist",
+                rawPayload: tinyCompressed,
+                compressionMethod: 8,
+                declaredUncompressedSize: 0
+            )
+        ])
+        let bombReader = NativeZIPArchiveReader(data: zeroHeaderBomb)
+        let bombEntries = try bombReader.readCentralDirectory()
+        XCTAssertThrowsError(try bombReader.extract(entry: bombEntries[0])) { err in
+            guard case IPAPackageScannerError.quotaExceeded = err else {
+                XCTFail("Expected quotaExceeded for <64B zero-declared deflate bomb, got \(err)")
+                return
+            }
+        }
+
+        // 2. Cumulative extraction quota across multiple entries
+        let chunkA = Data(repeating: 0x42, count: 600)
+        let chunkB = Data(repeating: 0x43, count: 600)
+        let multiZip = buildCustomZip(entries: [
+            .init(path: "a.bin", rawPayload: chunkA),
+            .init(path: "b.bin", rawPayload: chunkB)
+        ])
+        let smallQuotaReader = NativeZIPArchiveReader(data: multiZip, maxTotalUncompressedBytes: 1000)
+        XCTAssertThrowsError(try smallQuotaReader.readCentralDirectory()) { err in
+            guard case IPAPackageScannerError.quotaExceeded = err else {
+                XCTFail("Expected quotaExceeded on cumulative directory quota, got \(err)")
+                return
+            }
+        }
+
+        // 3. Valid ZIP64 entry (`0xFFFFFFFF` sentinels in CD + `0x0001` extra field carrying real 64-bit sizes)
+        func u16(_ v: UInt16) -> Data { var le = v.littleEndian; return Data(bytes: &le, count: 2) }
+        func u32(_ v: UInt32) -> Data { var le = v.littleEndian; return Data(bytes: &le, count: 4) }
+        func u64(_ v: UInt64) -> Data { var le = v.littleEndian; return Data(bytes: &le, count: 8) }
+
+        let helloBytes = Data("ZIP64-OK".utf8)
+        let nameBytes = Data("Payload/Z64.app/hello.bin".utf8)
+        var z64Archive = Data()
+        // Local File Header
+        z64Archive.append(u32(0x04034b50))
+        z64Archive.append(u16(45))
+        z64Archive.append(u16(0))
+        z64Archive.append(u16(0))
+        z64Archive.append(u16(0))
+        z64Archive.append(u16(0))
+        z64Archive.append(u32(0))
+        z64Archive.append(u32(UInt32(helloBytes.count)))
+        z64Archive.append(u32(UInt32(helloBytes.count)))
+        z64Archive.append(u16(UInt16(nameBytes.count)))
+        z64Archive.append(u16(0))
+        z64Archive.append(nameBytes)
+        z64Archive.append(helloBytes)
+
+        let cdOffset = UInt32(z64Archive.count)
+        var extra0001 = Data()
+        extra0001.append(u16(0x0001))
+        extra0001.append(u16(24))
+        extra0001.append(u64(UInt64(helloBytes.count))) // uncompressedSize
+        extra0001.append(u64(UInt64(helloBytes.count))) // compressedSize
+        extra0001.append(u64(0))                        // localHeaderOffset
+
+        var cd = Data()
+        cd.append(u32(0x02014b50))
+        cd.append(u16(45))
+        cd.append(u16(45))
+        cd.append(u16(0))
+        cd.append(u16(0))
+        cd.append(u16(0))
+        cd.append(u16(0))
+        cd.append(u32(0))
+        cd.append(u32(0xFFFF_FFFF))
+        cd.append(u32(0xFFFF_FFFF))
+        cd.append(u16(UInt16(nameBytes.count)))
+        cd.append(u16(UInt16(extra0001.count)))
+        cd.append(u16(0))
+        cd.append(u16(0))
+        cd.append(u16(0))
+        cd.append(u32(0o100644 << 16))
+        cd.append(u32(0xFFFF_FFFF))
+        cd.append(nameBytes)
+        cd.append(extra0001)
+        z64Archive.append(cd)
+
+        z64Archive.append(u32(0x06054b50))
+        z64Archive.append(u16(0))
+        z64Archive.append(u16(0))
+        z64Archive.append(u16(1))
+        z64Archive.append(u16(1))
+        z64Archive.append(u32(UInt32(cd.count)))
+        z64Archive.append(u32(cdOffset))
+        z64Archive.append(u16(0))
+
+        let z64Reader = NativeZIPArchiveReader(data: z64Archive)
+        let z64Entries = try z64Reader.readCentralDirectory()
+        XCTAssertEqual(z64Entries.count, 1)
+        XCTAssertEqual(z64Entries[0].uncompressedSize, helloBytes.count)
+        XCTAssertEqual(try z64Reader.extract(entry: z64Entries[0]), helloBytes)
+    }
+
+    func testR2_8_ContainerObjectGetPath_StandaloneAttribution_NotMislabeledAsFsgetpath() throws {
+        let objPathMachO = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            cryptid: 0,
+            linkedDylibs: ["/usr/lib/libSystem.B.dylib"],
+            symbols: ["_container_object_get_path"]
+        ))
+        let details = try MachOScanner.shared.parseMachO(data: objPathMachO)
+        let finding = MachOScanner.shared.scan(
+            details: details,
+            context: .init(bundleId: "com.recon.objpath", displayName: "ObjPathRecon", appGroups: [])
+        )
+        XCTAssertEqual(finding.riskTier, .highRisk)
+        XCTAssertTrue(finding.indicators.contains { $0.signature == "container_object_get_path" && $0.severity == .highRisk })
+        XCTAssertFalse(finding.indicators.contains { $0.signature == "fsgetpath" }, "Must not misattribute container_object_get_path as fsgetpath")
+    }
 }
+

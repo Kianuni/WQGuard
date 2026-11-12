@@ -56,7 +56,14 @@ script-providers:
   brotli-response-guard:
     payload: |
       const headers = ($response && $response.headers) || {};
-      const ce = String(headers['Content-Encoding'] || headers['content-encoding'] || '');
+      const ceParts = [];
+      for (const k of Object.keys(headers)) {
+        if (String(k).toLowerCase() === 'content-encoding') {
+          const v = headers[k];
+          ceParts.push(Array.isArray(v) ? v.join(', ') : String(v ?? ''));
+        }
+      }
+      const ce = ceParts.join(', ');
       if (/(^|[,\s])br($|[,\s;])/i.test(ce)) {
         $done({
           status: 403,

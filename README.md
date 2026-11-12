@@ -10,7 +10,7 @@
 [![Platform](https://img.shields.io/badge/Platform-iOS%2016.0%2B%20(iOS%2026.2%2B%20%2F%2027.x)%20%7C%20macOS-lightgrey.svg)]()
 [![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B%20Zero--Dependency-orange.svg)]()
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External%20Packages-informational.svg)]()
-[![Unit Tests](https://img.shields.io/badge/Adversarial%20Tests-673%20Passing-brightgreen.svg)]()
+[![Unit Tests](https://img.shields.io/badge/Adversarial%20Tests-681%20Passing-brightgreen.svg)]()
 [![Read-Only Invariant](https://img.shields.io/badge/Kernel%20I%2FO-O__RDONLY%20%7C%20O__NOFOLLOW-success.svg)](SECURITY.md)
 
 **[🇨🇳 简体中文](#简体中文) · [🇺🇸 English](#english) · [📥 下载 IPA 与护盾规则](https://github.com/Kianuni/WQGuard/releases/latest) · [🔒 安全不变量规范](SECURITY.md) · [📖 底层技术白皮书](USAGE_GUIDE.md)**
@@ -50,12 +50,12 @@
 | 核心模块 | 源码位置 | 底层技术实现与二进制协议细节 |
 |---|---|---|
 | **Mach-O 64/Fat 静态二进制分析器** | `MachO/MachOParser.swift` | 原生解析 32/64 位 Mach-O (`0xfeedfacf` / `0xfeedface`) 与通用胖二进制 `FAT_MAGIC` / `FAT_MAGIC_64` (`0xcafebabe` / `0xbebafeca` / `0xcafebabf`，硬上限 1024 切片防切片炸弹)；对全部 iOS ARM 切片（`arm64` + `arm64e`）取并集防多切片遮蔽，遍历 `LC_SYMTAB`、`LC_LOAD_DYLIB`、`LC_ENCRYPTION_INFO_64` (`cryptid`)、未加密 `__objc_methname` Selector 表与 `__TEXT` 字符串，全程执行 64 位无溢出边界检查 |
-| **双槽 `CSBlob` 签名状态机** | `MachO/CSBlobParser.swift` | 解析 `LC_CODE_SIGNATURE` 超级块 (`0xfade0cc0`)，同时解码 **Slot 5 XML 权限表 (`0xfade7171`)** 与 **Apple `CoreEntitlements` v1 规范（`[APPLICATION 16]` `0x70` + `[CONTEXT 16]` `0xb0` + ITU-T X.690 多字节高标签）Slot 7 ASN.1 DER (`0xfade7172`)**，合并完整权限字典并覆盖每个独立 `PlugIns/*.appex` 插件签名 |
-| **纯 Swift `lockdownd` 协议栈** | `Engine/LockdownInstProxyClient.swift` | 零 `libimobiledevice` / `OpenSSL` 依赖，基于原生套接字与内存 PKCS#12 证书身份实现 `TCP 62078` 握手、严格校验证书指纹（Fail-Closed）的 `StartSession` TLS 升级及 4 字节大端帧封装的 `com.apple.mobile.installation_proxy` (`Browse`) 查询 |
+| **双槽 `CSBlob` 签名状态机** | `MachO/CSBlobParser.swift` | 解析 `LC_CODE_SIGNATURE` 超级块 (`0xfade0cc0`)，同时解码 **Slot 5 XML 权限表 (`0xfade7171`)** 与 **Apple `CoreEntitlements` v1 规范（`[APPLICATION 16]` `0x70` + `[CONTEXT 16]` `0xb0` + ITU-T X.690 多字节高标签）Slot 7 ASN.1 DER (`0xfade7172`)**，无遮蔽合并完整权限字典并覆盖每个独立 `PlugIns/*.appex` / `Extensions/*.appex` 插件签名 |
+| **纯 Swift `lockdownd` 协议栈** | `Engine/LockdownInstProxyClient.swift` | 零 `libimobiledevice` / `OpenSSL` 依赖，基于原生套接字与内存 PKCS#12 证书身份实现 `TCP 62078` 握手、严格校验叶子证书指纹与根 CA 链（Fail-Closed）的 `StartSession` TLS 升级及 4 字节大端帧封装的 `com.apple.mobile.installation_proxy` (`Browse`) 查询 |
 | **`CSStore2` 数据库引擎** | `CSStore/CSStore2Parser.swift` | 只读内存映射解析 LaunchServices `"bdsl"` 二进制缓存（兼容 **iOS 26 与 iOS 27 双代记录偏移布局**，上限保护 `16M` 字符串 ID / `100,000` 包记录，内置 BiDi 控制符剥离）；面向 **macOS 主机/备份取证 (`wqguard-cli --scan-system`) 与 `no-sandbox` 研究环境** |
 | **MCM 容器元数据与软链取证** | `CSStore/MCMReader.swift` / `ContainerScanner.swift` | 强制以 `open(O_RDONLY \| O_NOFOLLOW \| O_CLOEXEC)` 读取容器元数据并以 `lstat` + `readlink` 非递归识别越界软链接（面向 **macOS 备份目录、`--container` 审计与越狱/巨魔 `no-sandbox` 环境**；标准非越狱沙盒下由三引擎注册表与 `.ipa` 审计接管） |
-| **按需隔离拆包 `.ipa` / `.tipa` 审查器** | `Engine/IPAPackageScanner.swift` | 校验 ZIP 中央目录结构，按需提取二进制与签名文件（自动跳过图片/音视频大体积静态资产）至独立 `tmp/wqguard_ipa_<UUID>/` 沙盒并由 `defer` 销毁；内置路径分段级 **Zip-Slip (`../`) 拦截**、`S_IFLNK` 符号链接条目剥离与 `+1` 哨兵字节防伪造头部解压炸弹；深扫主程序、`Frameworks/`、`Dylibs/`、`DynamicLibraries/` 及全部 `PlugIns/*.appex` |
-| **多端代理规则编译器** | `Engine/SurgeBrotliShieldHelper.swift` | 按各代理内核语法规范生成并校验 `.sgmodule` (`script-path=`) / `.module` / `.conf` / `.plugin` / `.stoverride` 配置与顶层 `HTTP 403` 零解压响应熔断脚本，强制校验 16 项核心证书锁定负向排除规则完整性 |
+| **按需隔离拆包 `.ipa` / `.tipa` 审查器** | `Engine/IPAPackageScanner.swift` | 校验 ZIP / ZIP64 中央目录结构，按需提取二进制与签名文件（自动跳过图片/音视频大体积静态资产）至独立 `tmp/wqguard_ipa_<UUID>/` 沙盒并由 `defer` 销毁；内置路径分段级 **Zip-Slip (`../`) 拦截**、`S_IFLNK` 符号链接条目剥离与 64 KB 流式分块防伪造头部解压炸弹；深扫主程序、`Frameworks/`、`Dylibs/`、`DynamicLibraries/` 及全部 `PlugIns/*.appex` / `Extensions/*.appex` |
+| **多端代理规则编译器** | `Engine/SurgeBrotliShieldHelper.swift` | 按各代理内核语法规范生成并校验 `.sgmodule` (`script-path=`) / `.module` / `.conf` / `.plugin` / `.stoverride` 配置与大小写/重复头无关的顶层 `HTTP 403` 零解压响应熔断脚本，强制校验 16 项核心证书锁定负向排除规则完整性 |
 
 ---
 
@@ -104,15 +104,15 @@ flowchart TD
    // 攻击者随后调用 sandbox_extension_consume(token) 直接获得受害者容器完整读写权限！
    ```
 3. **WQGuard 的密码学不可能门禁定理（Cryptographic Impossibility Gate）**：
-   `containermanagerd` 在处理任何容器请求的最前端，会强制核验调用方内核代码签名中的 `com.apple.security.application-groups`。**任何未在签名权限表中声明 `App Group` 的进程，请求会被 `containermanagerd` 立即以错误码 `-1` 物理拒绝**。WQGuard 在前置核验无需 App Group 的独立越权原语（如 `fsgetpath` `bad_query` 侦察系统调用与仿冒钱包特征）之后，对未声明 App Group 的纯净应用在常数时间 $O(1)$ 内完成安全放行，同时对每个独立签名的 `PlugIns/*.appex` 扩展进程单独核验 `CSBlob`，封死小组件跳板绕过。
+   `containermanagerd` 在处理任何容器请求的最前端，会强制核验调用方内核代码签名中的 `com.apple.security.application-groups`。**任何未在签名权限表中声明 `App Group` 的进程，请求会被 `containermanagerd` 立即以错误码 `-1` 物理拒绝**。WQGuard 在前置核验无需 App Group 的独立越权原语（如 `fsgetpath` `bad_query` 侦察系统调用与仿冒钱包特征）之后，对未声明 App Group 的纯净应用在常数时间 $O(1)$ 内完成安全放行，同时对每个独立签名的 `PlugIns/*.appex` 与 `Extensions/*.appex` 扩展进程单独核验 `CSBlob`，封死小组件跳板绕过。
 
 #### 3.2 粉碎「双槽 `CSBlob` 权限遮蔽」签名绕过攻击
 在嵌入式 Mach-O 代码签名超块（`CSMAGIC_EMBEDDED_SIGNATURE = 0xfade0cc0`）中，权限信息同时存在于两个独立槽位：
 - **Slot 5 (`0xfade7171`)**：传统 XML Property List 格式（常规静态脚本默认仅读此槽）；
 - **Slot 7 (`0xfade7172`)**：iOS 内核 AMFI（AppleMobileFileIntegrity）与 `CoreEntitlements` 实际优先采信的 **ASN.1 DER 编码权限树**（顶层封装于 `[APPLICATION 16]` `0x70` + 版本号 `INTEGER 1` + `[CONTEXT 16]` `0xb0` 构造容器内）。
 
-**恶意绕过手法**：高阶恶意侧载包故意在 Slot 5 塞入一份空白无害的 XML `<dict/>` 欺骗静态扫描器，而将恶意 `com.apple.security.application-groups` 或 `com.apple.private.photos.*` 藏匿于 Slot 7 真实 Apple DER 二进制流中。  
-**WQGuard 反制方案**：`CSBlobParser.swift` 内置完整支持 ITU-T X.690 构造标签（`0x30` SEQUENCE、`0x31` SET、`0x70` `[APPLICATION 16]`、`0xb0` `[CONTEXT 16]` 及多字节高标签）的 ASN.1 DER 递归解析器，**遍历全部可执行 ARM 切片及超块索引槽位，对 XML 与 DER 完整权限字典强制取并集（Union）**，经真实 `/usr/bin/codesign --generate-entitlement-der` 对拍回归验证，任何单槽隐藏或槽位遮蔽均无所遁形。
+**恶意绕过手法**：高阶恶意侧载包故意在 Slot 5 塞入一份空白无害的 XML `<dict/>`（或显式写入 `<false/>` / `<array/>` 占位符）欺骗静态扫描器，而将恶意 `com.apple.security.application-groups` 或 `com.apple.private.photos.*` 藏匿于 Slot 7 真实 Apple DER 二进制流中。  
+**WQGuard 反制方案**：`CSBlobParser.swift` 内置完整支持 ITU-T X.690 构造标签（`0x30` SEQUENCE、`0x31` SET、`0x70` `[APPLICATION 16]`、`0xb0` `[CONTEXT 16]` 及多字节高标签）的 ASN.1 DER 递归解析器，**遍历全部可执行 ARM 切片及超块索引槽位，对 XML 与 DER 完整权限字典执行防遮蔽并集合并（Union）**，经真实 `/usr/bin/codesign --generate-entitlement-der` 对拍回归验证，任何单槽隐藏或槽位遮蔽均无所遁形。
 
 #### 3.3 `HTTP2Shell` (`CVE-2026-111497`) 与 iOS 网络扩展 50MB 内存墙工程博弈
 `CVE-2026-111497` 是系统底层 `libbrotli` 解码器在处理畸形 HTTP `Content-Encoding: br` 数据流时的堆缓冲区越界写入漏洞（CVSS 9.2）。在未升级固件的设备上通过代理工具缓解该漏洞面临两大工程陷阱：
@@ -120,7 +120,7 @@ flowchart TD
 2. **陷阱二 · 证书锁定（SSL Pinning）误伤**：若将 MITM 主机名盲目拦截 Apple 与金融域名，Apple Intelligence 私有云计算 PCC、普通话 Siri `guzzoni.apple.com`、iCloud 及网银客户端会因校验证书公钥指纹不匹配而断连重连发热。
 
 **WQGuard 护盾架构与明确协议边界**：
-- **正向降级 + 零解压顶层 `HTTP 403` 熔断**：去程重写 `Accept-Encoding: gzip, deflate` 从源头阻止合规服务器下发 `br` 流；回程采用 **`requires-body=false` / `script-response-header` 纯响应头状态机**（[`brotli-guard.js`](Shields/scripts/brotli-guard.js)），不触碰一字节响应体即可将无视协商强推 `Content-Encoding: br` 的响应直接熔断为顶层 `HTTP 403 Forbidden`。
+- **正向降级 + 零解压顶层 `HTTP 403` 熔断**：去程重写 `Accept-Encoding: gzip, deflate` 从源头阻止合规服务器下发 `br` 流；回程采用 **`requires-body=false` / `script-response-header` 纯响应头状态机**（[`brotli-guard.js`](Shields/scripts/brotli-guard.js)），大小写与重复响应头无关地扫描全部 `Content-Encoding` 字段，不触碰一字节响应体即可将无视协商强推 `br` 的响应直接熔断为顶层 `HTTP 403 Forbidden`。
 - **16 项负向排除 + 21 类高危钓鱼后缀（支持 `*` 全量扩展）**：默认 MITM 黑产投毒最高发的 21 类廉价顶级域（`*.xyz`、`*.top`、`*.icu`、`*.click`、`*.zip`、`*.mov` 等）实现日常零额外耗电；如需覆盖 `.com` / `.net` 全量网页浏览，可将模块参数 `EXTRA_MITM_HOSTS` 设为 `*`（16 项负向排除置顶生效，依然严格保护 Apple 核心服务与金融支付）。
 - **专业防御边界提示（WOFF2 网页字体与 HTTP/3 QUIC）**：HTTP 代理改写仅作用于经 MITM 解密的 HTTP/1.1 与 HTTP/2 `Accept-Encoding` 响应流；WebKit CSS `@font-face` 加载的 **`.woff2` 网页字体内置独立 Brotli 解码**及未走代理 MITM 的 **HTTP/3 QUIC** 不受 `Accept-Encoding` 控制。**针对高危定向攻击场景，建议在启用本护盾的同时禁用代理端 QUIC/UDP 443，并叠加开启系统「设置 → 隐私与安全性 → 锁定模式（Lockdown Mode）」以在 WebKit 层彻底禁用自定义 WOFF2 字体渲染**。
 
@@ -131,7 +131,7 @@ flowchart TD
 作为审计本机敏感注册表与未知第三方安装包的防守方工具，WQGuard 严格兑现以下工程安全边界（完整规范见 [SECURITY.md](SECURITY.md)）：
 
 - **100% 本机离线闭环 · 零遥测零上传**：工程不包含任何网络分析、统计埋点或远端 API 调用。用户导入的 `.mobiledevicepairing` 配对记录、`installed_apps.json` 快照与本地 `.ipa` 扫描列表严格封闭在应用私有沙盒 `Application Support/WQGuardRegistry/` 内，支持随时一键销毁；`LocalDevVPN` 配对扫描全程仅与手机自身 `lockdownd` 进行严格校验证书（Fail-Closed）的本机环回通信，绝无一字节流出设备。
-- **第三方侧载工具严格零信任（Strict Zero-Trust on Sideloading Tools）**：WQGuard **绝不为任何第三方侧载签名器、证书管理器或本地调试隧道预置隐式白名单豁免**（包括 `Feather`、`SideStore`、`AltStore`、`全能签 / ESign`、`GBox`、`Scarlet`、`LocalDevVPN`、`StikDebug` 等均不会自动标为 `Known Tool`，而是客观呈现其 `App Groups`、调试权限或动态库特征为 `🟠 前置留意` 或 `🔴 高危`）。出厂内置白名单仅校验 `WQGuard` 自身精确签名与只读自检字符串子集，任何冒用 `com.wqguard.app` 却夹带逃逸符号的木马均会被立即拦截。
+- **第三方侧载工具严格零信任（Strict Zero-Trust on Sideloading Tools）**：WQGuard **绝不为任何第三方侧载签名器、证书管理器或本地调试隧道预置隐式白名单豁免**（包括 `Feather`、`SideStore`、`AltStore`、`全能签 / ESign`、`GBox`、`Scarlet`、`LocalDevVPN`、`StikDebug`、`TrollStore` 等均不会自动标为 `Known Tool`，即使未声明 `App Groups` 亦客观呈现为 `🟠 前置留意` 或 `🔴 高危`）。出厂内置白名单仅校验 `WQGuard` 自身精确签名、全部 App Group 精确归属与只读自检字符串子集，任何冒用 `com.wqguard.app` 却夹带越权特征或寄生外部 App Group 的木马均会被立即拦截。
 - **零主动漏洞利用（Zero-Exploit）**：绝不调用 `worse_query` 或 `fsgetpath` 去暴力枚举其他容器，彻底杜绝因扫描引发的 `0x8badf00d` 看门狗超时强杀、`containermanagerd` 守护进程异常或残留软链接风险。
 - **内核级物理只读锁死（`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`）**：
   - 所有底层文件读取强制携带 `O_RDONLY` 与 `O_NOFOLLOW`，遇到恶意符号链接内核直接返回 `ELOOP` 拒绝跟随；
@@ -156,7 +156,7 @@ flowchart TD
 | `ESCAPING_SYMLINK` | `S_IFLNK` 指向容器边界外路径（如 `/var/mobile/Containers/Data/...`） | `Library/Caches` | 🔴 高危 | 共享容器内已落盘或残留的跨沙盒逃逸符号链接 |
 | `FAKE_SUPERVISION_MDM` | `CloudConfigurationDetails.plist` (`IsSupervised == true`) | 容器配置目录 | 🔴 高危 | 未授权篡改设备为「受监管模式」实施恶意配置锁机或流量劫持 |
 | `PRIVATE_PHOTOS_BYPASS` | `PhotoLibraryServices.framework` / `PLPhotoLibrary` / `systemPhotoLibrary` / `com.apple.private.photos.*` | `LC_LOAD_DYLIB` / `__objc_methname` / `CSBlob` | 🔴 高危 | 利用 `CVE-2026-112676` 绕过 iOS TCC 弹窗后台静默窃取相册助记词截图 |
-| `BRAND_IMPERSONATION` | 非 App Store 签名却精确分词匹配 **MetaMask / Trust Wallet / Phantom / OKX / Binance / TokenPocket / imToken / Bitget / Telegram** | `Bundle ID` + 显示名分词 + 渠道 | 🔴 高危 | 二次打包盗币假钱包（Web3 Drainer）与钓鱼客户端（严控词边界，零误伤 `NetGuard`/`PostgREST`/`ZeroTrust`） |
+| `BRAND_IMPERSONATION` | 非 App Store 签名却命中驼峰/词边界分词 **MetaMask / Trust Wallet / Phantom / OKX / Binance / TokenPocket / imToken / Bitget / Telegram** | `Bundle ID` + 驼峰/中英分词 + 渠道 | 🔴 高危 | 二次打包盗币假钱包（Web3 Drainer）与钓鱼客户端（严控词边界，零误伤 `NetGuard`/`PostgREST`/`ZeroTrust`） |
 | `INJECTED_HOOK_FRAMEWORK` | 嵌入 `CydiaSubstrate` / `ElleKit` / `libhooker` / `libsubstitute` 或 `.app/Dylibs/*.dylib`、`Frameworks/*.dylib` | `Frameworks/` + `Dylibs/` + `@executable_path` | 🟠 留意 | 侧载重打包注入的越狱插件框架、Feather/Azule/Cyan 注入目录动态库或改版补丁 |
 | `CLIPBOARD_SNOOP_TUPLE` | 常驻后台保活（`audio` / `location` / `voip`）`∧` `UIPasteboard` 读取符号 | `Info.plist` + `LC_SYMTAB` / `__objc_methname` | 🔴 高危 | 利用后台伪装保活持续监听系统剪贴板窃取加密货币转账地址或助记词 |
 | `BUNDLED_LIBBROTLI` | 应用自带 `libbrotli` / `BrotliDecoderDecompressStream` | `LC_LOAD_DYLIB` / `LC_SYMTAB` | 🟠 留意 | 供应链风险提示：内置未打补丁的第三方 Brotli 解码库（`CVE-2026-111497`） |
@@ -164,7 +164,7 @@ flowchart TD
 
 #### 5.2 四级风险裁决与严格零信任白名单准则
 - **🔴 高危告警 (`High Risk`)**：命中上表任一高危逃逸、仿冒钱包、相册绕过、后台剪贴板窃密或越界软链接指标 → **严禁启动，立即卸载并移除描述文件后重启设备回收内核令牌**。
-- **🟡 已知工具 (`Known Tool`)**：**默认仅匹配 `WQGuard` 自身**（需同时满足精确 Bundle ID、精确 App Group 与只读自检特征子集校验），或命中用户显式手动开启的自定义白名单规则。
+- **🟡 已知工具 (`Known Tool`)**：**默认仅匹配 `WQGuard` 自身**（需同时满足精确 Bundle ID、全部 App Group 精确归属与只读自检特征子集校验），或命中用户显式手动开启的自定义白名单规则。
 - **🟠 前置留意 (`Caution`)**：侧载/企业签应用（含各类第三方签名器如 `Feather`、`SideStore`、`全能签 / ESign`、`LocalDevVPN` 等）声明共享 `App Groups`、包含 `.app/Dylibs/` 注入动态库或动态加载原语 → 可点进详情页逐项核查权限表、注入库路径与签名团队 ID。
 - **🟢 安全合规 (`Safe`)**：正版 App Store / TestFlight 应用（如 TestFlight 版 `Surge`），或经完整 4 层扫描（含全部 `.appex` 插件）无任何越权权限与私有调用的纯净侧载应用。
 
@@ -201,11 +201,11 @@ flowchart TD
 
 ### 7. 🧪 红蓝对抗测试体系与性能基准
 
-WQGuard 包含 **26 个测试套件、共计 673 项自动化单元与红蓝对抗测试**（`swift test` 全量执行耗时 `~7.6s`，100% 通过）：
+WQGuard 包含 **32 个 XCTest 测试套件（26 个测试文件）、共计 681 项自动化单元与红蓝对抗测试**（`swift test` 全量执行耗时 `~7.7s`，100% 通过）：
 
-- **真实 Apple `codesign` CoreEntitlements DER 与 JavaScriptCore 实机引擎回归 (`SecurityAuditV121RegressionTests`)**：直接调用宿主机 `/usr/bin/clang`、`/usr/bin/codesign --generate-entitlement-der`、`/usr/bin/lipo` 与 `/usr/bin/strip -x` 生成真实 `0x70`/`0xb0` Slot 7 DER 遮蔽样本、`arm64`+`arm64e` 双切片 `__objc_methname` 剥离样本、独立 `.appex` 越权小组件与伪造 `uncompressedSize` Deflate 炸弹，并在 macOS 原生 `JavaScriptCore` (`JSContext`) 中实跑 `brotli-guard.js` 校验各代理端 `HTTP 403` 响应结构。
+- **真实 Apple `codesign` CoreEntitlements DER 与 JavaScriptCore 实机引擎回归 (`SecurityAuditV121RegressionTests`)**：直接调用宿主机 `/usr/bin/clang`、`/usr/bin/codesign --generate-entitlement-der`、`/usr/bin/lipo` 与 `/usr/bin/strip -x` 生成真实 `0x70`/`0xb0` Slot 7 DER 遮蔽样本（含 XML `<false/>` 掩护 DER `true`）、`arm64`+`arm64e` 双切片 `__objc_methname` 剥离样本、独立 `PlugIns/*.appex` 与 `Extensions/*.appex` 越权小组件及 `<64B` 零声明 Deflate 炸弹，并在 macOS 原生 `JavaScriptCore` (`JSContext`) 中实跑 `brotli-guard.js` 校验大小写/重复头走私拦截与各代理端 `HTTP 403` 响应结构。
 - **畸形二进制与整数溢出模糊测试 (`MachOIntegerSafetyTests` / `AdversarialM2`)**：覆盖 `UInt32` `cryptoff + cryptsize` 环绕溢出、伪造 `65,536` 切片数的胖二进制头部炸弹、越界 `LC_SYMTAB` 字符串表偏移、截断的 `CSBlob` 索引槽与畸形 ASN.1 DER 长度字段，确保解析器永不触发 `EXC_BAD_ACCESS` 崩溃。
-- **签名遮蔽与白名单防冒用对抗 (`AdversarialM6`)**：验证空 Slot 5 XML + 恶意 Slot 7 DER 双槽遮蔽、逆序多槽去重、前缀伪装 Bundle ID（如 `com.wqguard.app.pro`）、同名夹带逃逸符号拦截与第三方侧载工具严格零信任策略。
+- **签名遮蔽与白名单防冒用对抗 (`AdversarialM6`)**：验证空 Slot 5 XML + 恶意 Slot 7 DER 双槽遮蔽、逆序多槽去重、前缀伪装 Bundle ID（如 `com.wqguard.app.pro`）、寄生外部 App Group、同名夹带逃逸或相册/注入特征拦截与第三方侧载工具严格零信任策略。
 - **物理只读不变量强断言 (`ReadOnlyAssertions`)**：每次扫描测试前后比对全目录文件 SHA-256 哈希与纳秒级 `st_mtimespec`，并在 `chmod 0444 / 0555` 纯只读目录权限下执行完整扫描流水线。
 - **万级高并发吞吐基准（Apple Silicon 实测）**：
   - **10,000 条完整审计结果组装**：`0.009s`
@@ -237,7 +237,7 @@ WQGuard/
 │   │   └── CLI/                           # 零依赖命令行参数解析器、TTY 进度渲染与执行器
 │   └── wqguard-cli/main.swift             # macOS 命令行工具入口
 ├── WQGuard/                               # iOS SwiftUI 客户端源码 (仪表盘/审计发现/IPA 审查/固件雷达/设置)
-├── Tests/WQGuardCoreTests/                # 673 项自动化单元、模糊与红蓝对抗测试套件 + 真实 codesign/JavaScriptCore 回归测试
+├── Tests/WQGuardCoreTests/                # 681 项自动化单元、模糊与红蓝对抗测试套件 + 真实 codesign/JavaScriptCore 回归测试
 └── scripts/ipabuild.sh                    # 免开发者证书自动化构建与 Ad-Hoc DER 签名打包脚本
 ```
 
@@ -255,14 +255,14 @@ WQGuard/
      ```
      将生成的 `installed_apps.json` AirDrop 到手机选择「用 WQGuard 打开」即刻出结果。
    - **方式 A（无线直连 · 脱离电脑随时一键扫）**：安装本机环回隧道工具 `LocalDevVPN`，导入一次 Mac `jitterbugpair` 生成的 `.mobiledevicepairing` 配对文件（iOS 26.4+/27 用户可直接点击界面内橙色同网段按钮一键复制对齐 `Tunnel IP` / `Device IP`）。
-3. **本地未安装 / 已签名 `.ipa` / `.tipa` 多选深扫**：点击 **「选择 .ipa 文件加入扫描（支持多选）」**，在系统「文件」中一次勾选任意多个 `.ipa` / `.tipa` 包即可执行完整 4 层 Mach-O 静态二进制审计（含 `Frameworks/`、`Dylibs/` 及全部 `PlugIns/*.appex`）。
+3. **本地未安装 / 已签名 `.ipa` / `.tipa` 多选深扫**：点击 **「选择 .ipa 文件加入扫描（支持多选）」**，在系统「文件」中一次勾选任意多个 `.ipa` / `.tipa` 包即可执行完整 4 层 Mach-O 静态二进制审计（含 `Frameworks/`、`Dylibs/` 及全部 `PlugIns/*.appex` / `Extensions/*.appex`）。
 
 #### 9.2 macOS 源码构建与 `wqguard-cli` 实战
 ```bash
 git clone https://github.com/Kianuni/WQGuard.git
 cd WQGuard
 
-# 运行全量 673 项红蓝对抗与只读不变量测试
+# 运行全量 681 项红蓝对抗与只读不变量测试
 swift test
 
 # 编译 Release 版命令行工具并打包免签名 iOS IPA
@@ -302,12 +302,12 @@ $ .build/release/wqguard-cli --export-shield ./WQGuard-Brotli-Shield.module
 | Engine Component | Source File | Low-Level Protocol & Hardening Details |
 |---|---|---|
 | **Mach-O 32/64 & Fat Analyzer** | `MachO/MachOParser.swift` | Parses Thin 32/64-bit & Universal Fat headers (`0xcafebabe` / `0xbebafeca` / `0xcafebabf`, capped at 1,024 slices), unions all iOS ARM slices (`arm64` + `arm64e`), and inspects `LC_SYMTAB`, `LC_LOAD_DYLIB`, `LC_ENCRYPTION_INFO_64` (`cryptid`), unencrypted `__objc_methname` selectors, and `__TEXT` strings with 64-bit overflow-checked bounds validation |
-| **Dual-Slot `CSBlob` Decoder** | `MachO/CSBlobParser.swift` | Decodes `LC_CODE_SIGNATURE` SuperBlobs (`0xfade0cc0`) across **both Slot 5 XML (`0xfade7171`) and Apple `CoreEntitlements` v1 ASN.1 DER (`[APPLICATION 16]` `0x70` + `[CONTEXT 16]` `0xb0`, Slot 7 `0xfade7172`)**, merging full entitlement dictionaries across all ARM slices and every `PlugIns/*.appex` extension |
-| **Pure-Swift `lockdownd` Stack** | `Engine/LockdownInstProxyClient.swift` | Zero `libimobiledevice` / `OpenSSL` dependencies; performs `TCP 62078` pairing handshake, fail-closed certificate-pinned `StartSession` TLS upgrade via in-memory PKCS#12 identity, and 4-byte Big-Endian framed `com.apple.mobile.installation_proxy` (`Browse`) queries |
+| **Dual-Slot `CSBlob` Decoder** | `MachO/CSBlobParser.swift` | Decodes `LC_CODE_SIGNATURE` SuperBlobs (`0xfade0cc0`) across **both Slot 5 XML (`0xfade7171`) and Apple `CoreEntitlements` v1 ASN.1 DER (`[APPLICATION 16]` `0x70` + `[CONTEXT 16]` `0xb0`, Slot 7 `0xfade7172`)**, merging full entitlement dictionaries without false-shadowing across all ARM slices and every `PlugIns/*.appex` / `Extensions/*.appex` extension |
+| **Pure-Swift `lockdownd` Stack** | `Engine/LockdownInstProxyClient.swift` | Zero `libimobiledevice` / `OpenSSL` dependencies; performs `TCP 62078` pairing handshake, fail-closed leaf-certificate-pinned `StartSession` TLS upgrade via in-memory PKCS#12 identity, and 4-byte Big-Endian framed `com.apple.mobile.installation_proxy` (`Browse`) queries |
 | **`CSStore2` `"bdsl"` Reader** | `CSStore/CSStore2Parser.swift` | Read-only memory-mapped LaunchServices cache parser supporting **iOS 26 and iOS 27 binary unit layouts** (bounded at `16M` string IDs / `100,000` records with BiDi Unicode stripping) for **macOS backup/host forensics (`wqguard-cli --scan-system`) and unsandboxed `no-sandbox` environments** |
 | **POSIX `MCMReader` & `ContainerScanner`** | `CSStore/MCMReader.swift` | Enforces `open(O_RDONLY \| O_NOFOLLOW \| O_CLOEXEC)` and `lstat` + `readlink` non-recursive symlink forensics for **backup directories, `--container` audits, and `no-sandbox` environments** |
-| **Selective `.ipa` / `.tipa` Unpacker** | `Engine/IPAPackageScanner.swift` | Central Directory ZIP validator with path-component Zip-Slip (`../`) blocking, `S_IFLNK` symlink entry stripping, and `+1` sentinel-byte inflate-bomb protection; selectively unpacks executables, `Frameworks/`, `Dylibs/`, `DynamicLibraries/`, and `PlugIns/*.appex` into an isolated `tmp/wqguard_ipa_<UUID>/` sandbox wiped via `defer` |
-| **5-Client Shield Compiler** | `Engine/SurgeBrotliShieldHelper.swift` | Generates and validates `.sgmodule` (`script-path=`), `.module`, `.conf`, `.plugin`, and `.stoverride` profiles with mandatory verification of all 16 SSL-pinning negative exclusions |
+| **Selective `.ipa` / `.tipa` Unpacker** | `Engine/IPAPackageScanner.swift` | Central Directory ZIP / ZIP64 validator with path-component Zip-Slip (`../`) blocking, `S_IFLNK` symlink entry stripping, and 64 KB chunked streaming inflate-bomb protection; selectively unpacks executables, `Frameworks/`, `Dylibs/`, `DynamicLibraries/`, `PlugIns/*.appex`, and `Extensions/*.appex` into an isolated `tmp/wqguard_ipa_<UUID>/` sandbox wiped via `defer` |
+| **5-Client Shield Compiler** | `Engine/SurgeBrotliShieldHelper.swift` | Generates and validates `.sgmodule` (`script-path=`), `.module`, `.conf`, `.plugin`, and `.stoverride` profiles with case-insensitive/duplicate-header-safe `HTTP 403` blocking and mandatory verification of all 16 SSL-pinning negative exclusions |
 
 ---
 
@@ -316,9 +316,9 @@ $ .build/release/wqguard-cli --export-shield ./WQGuard-Brotli-Shield.module
 1. **Defeating Two-Stage Sandbox Escapes (`bad_query` + `worse_query`) & `.appex` Escapes**:
    - **Stage 1 (`fsgetpath` Inode Brute-Force)**: Attackers bypass Seatbelt directory read denials by iterating 64-bit APFS inode numbers via `fsgetpath()` to leak randomized victim container UUIDs — evaluated **prior** to App Group fast-path gating so standalone reconnaissance binaries without App Groups are always caught.
    - **Stage 2 (`containermanagerd` Confused Deputy)**: Attackers query their own `App Group` (`Class 7`, `Part 3` `Library/Caches`) while swapping `Library/Caches` with an escaping symlink, tricking `containermanagerd` into issuing a `com.apple.app-sandbox.read-write` kernel token for the victim's container.
-   - **Cryptographic Impossibility Gate & Independent `.appex` Auditing**: Because `containermanagerd` rejects any caller lacking `com.apple.security.application-groups` with error `-1`, WQGuard fast-paths benign binaries lacking App Groups (and lacking standalone syscalls) as `Safe` in $O(1)$ time while independently auditing every `PlugIns/*.appex` extension's own `CSBlob` and unioning XML + `CoreEntitlements` DER slots.
+   - **Cryptographic Impossibility Gate & Independent `.appex` Auditing**: Because `containermanagerd` rejects any caller lacking `com.apple.security.application-groups` with error `-1`, WQGuard fast-paths benign binaries lacking App Groups (and lacking standalone syscalls) as `Safe` in $O(1)$ time while independently auditing every `PlugIns/*.appex` and `Extensions/*.appex` extension's own `CSBlob` and unioning XML + `CoreEntitlements` DER slots.
 2. **Strip/XOR-Resistant Behavioral Tuples & Token-Bounded Web3 Drainer Detection**:
-   - Even when exploit authors strip `LC_SYMTAB` and XOR-encrypt C string literals, WQGuard extracts Objective-C selectors from `__objc_methname` across all ARM slices (`arm64` + `arm64e`) and flags **`cryptid == 0 ∧ AppGroups ∧ (dlopen/dlsym) ∧ (symlink/createSymbolicLinkAtPath:/sandbox_extension_consume)`**, alongside exact word-token / dot-boundary **impersonation checks** for repackaged crypto wallets (**MetaMask, Trust Wallet, Phantom, OKX, Binance, TokenPocket, imToken, Bitget, Telegram** — zero false positives on `NetGuard`, `PostgREST`, or `ZeroTrust`), injected dylibs (`.app/Dylibs/*`, **ElleKit, CydiaSubstrate, libhooker, Substitute**), private Photos TCC bypasses (`CVE-2026-112676`), and persistent background clipboard snooping.
+   - Even when exploit authors strip `LC_SYMTAB` and XOR-encrypt C string literals, WQGuard extracts Objective-C selectors from `__objc_methname` across all ARM slices (`arm64` + `arm64e`) and flags **`cryptid == 0 ∧ AppGroups ∧ (dlopen/dlsym) ∧ (symlink/createSymbolicLinkAtPath:/sandbox_extension_consume)`**, alongside CamelCase/word-token & dot-boundary **impersonation checks** for repackaged crypto wallets (**MetaMask, Trust Wallet, Phantom, OKX, Binance, TokenPocket, imToken, Bitget, Telegram** — zero false positives on `NetGuard`, `PostgREST`, or `ZeroTrust`), injected dylibs (`.app/Dylibs/*`, **ElleKit, CydiaSubstrate, libhooker, Substitute**), private Photos TCC bypasses (`CVE-2026-112676`), and persistent background clipboard snooping.
 3. **`HTTP2Shell` (`CVE-2026-111497`), the 50MB Jetsam Wall & Explicit Protocol Boundaries**:
    - Enabling body inspection (`requires-body=true`) inside iOS proxy extensions risks hitting Apple's strict **50MB Jetsam memory ceiling** on large streams. WQGuard's shields rewrite outgoing `Accept-Encoding` to `gzip, deflate` and enforce a **zero-body-decompression** (`requires-body=false` / `script-response-header`) top-level `HTTP 403` circuit breaker with **16 built-in negative exclusions** (protecting Apple Intelligence PCC, Siri `guzzoni.apple.com`, iCloud, OpenAI, and banking apps) across 21 high-risk phishing TLDs by default (set `EXTRA_MITM_HOSTS = *` to cover `.com`/`.net` browsing).
    - **Protocol Scope Note**: HTTP header rewriting applies to MITM'd HTTP/1.1 & HTTP/2 `Accept-Encoding` streams; **WebKit CSS `@font-face` `.woff2` web fonts (which embed internal Brotli compression) and unintercepted HTTP/3 QUIC** are not controlled by HTTP `Accept-Encoding`. High-risk users on unpatched firmware should block UDP 443 / QUIC in their proxy client and enable **iOS Lockdown Mode** to disable custom WOFF2 font rendering in WebKit.
@@ -327,9 +327,9 @@ $ .build/release/wqguard-cli --export-shield ./WQGuard-Brotli-Shield.module
 
 ### 3. 🔒 Strict Zero-Trust Security & Read-Only Invariants
 
-- **Strict Zero Trust on Third-Party Sideloading Tools**: Built-in whitelisting matches **only `WQGuard` itself** (`com.wqguard.app` with exact App Group + read-only self-scan signature subset verification). Third-party sideload signers, certificate managers, and loopback debuggers (`Feather`, `SideStore`, `AltStore`, `ESign`, `GBox`, `Scarlet`, `LocalDevVPN`, `StikDebug`) are **never auto-whitelisted**, surfacing objectively as `Caution` (`🟠`) or `High Risk` (`🔴`).
+- **Strict Zero Trust on Third-Party Sideloading Tools**: Built-in whitelisting matches **only `WQGuard` itself** (`com.wqguard.app` with exact App Group ownership + read-only self-scan signature subset verification). Third-party sideload signers, certificate managers, and loopback debuggers (`Feather`, `SideStore`, `AltStore`, `ESign`, `GBox`, `Scarlet`, `LocalDevVPN`, `StikDebug`, `TrollStore`) are **never auto-whitelisted**, surfacing objectively as `Caution` (`🟠`) or `High Risk` (`🔴`) even when App Groups are omitted.
 - **100% On-Device · Zero Telemetry**: Zero analytics SDKs and zero external network calls. Pairing files, registry snapshots, and queued `.ipa` packages remain strictly inside WQGuard's local sandbox (`Application Support/WQGuardRegistry/`), and `LocalDevVPN` communicates exclusively over fail-closed certificate-pinned local loopback with the device's own `lockdownd`.
-- **Zero-Exploit & Strict Physical Read-Only (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)**: Never invokes sandbox exploits, never follows symbolic links (`lstat` + `readlink` non-recursive forensics), maps binaries read-only (`PROT_READ`), releases Seatbelt handles via RAII (`ScopedSandboxToken`), and wipes temporary `.ipa` / `.tipa` unpack directories (`wqguard_ipa_<UUID>/`) via `defer` — continuously verified by **673 automated unit & adversarial tests** (including real Apple `codesign --generate-entitlement-der` and `JavaScriptCore` `brotli-guard.js` execution). See [SECURITY.md](SECURITY.md) for full details.
+- **Zero-Exploit & Strict Physical Read-Only (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)**: Never invokes sandbox exploits, never follows symbolic links (`lstat` + `readlink` non-recursive forensics), maps binaries read-only (`PROT_READ`), releases Seatbelt handles via RAII (`ScopedSandboxToken`), and wipes temporary `.ipa` / `.tipa` unpack directories (`wqguard_ipa_<UUID>/`) via `defer` — continuously verified by **681 automated unit & adversarial tests** (including real Apple `codesign --generate-entitlement-der` and `JavaScriptCore` `brotli-guard.js` execution). See [SECURITY.md](SECURITY.md) for full details.
 
 ---
 
@@ -353,7 +353,7 @@ Download **`WQGuard_v1.2.1.ipa`** from **[GitHub Releases](https://github.com/Ki
 git clone https://github.com/Kianuni/WQGuard.git
 cd WQGuard
 
-# Run all 673 unit & adversarial read-only tests
+# Run all 681 unit & adversarial read-only tests
 swift test
 
 # Build release CLI & ad-hoc DER-signed iOS IPA

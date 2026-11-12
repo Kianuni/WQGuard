@@ -272,29 +272,37 @@ public final class MachOScanner: @unchecked Sendable {
             }
         }
         
-        // Check Path Leak Combination: fsgetpath + /Containers/Data/ or /Containers/Shared/
+        // Check Path Leak Combination: fsgetpath / container_object_get_path + /Containers/Data/ or /Containers/Shared/
         let hasContainerPathStr = details.textStrings.contains { str in
             SignatureCatalog.containerPathSubstrings.contains { str.contains($0) }
         }
         if pathEnumerationDetected {
+            let hasFsgetpath = matchedSymbols.contains("fsgetpath")
+            let hasContainerObjGetPath = matchedSymbols.contains("container_object_get_path")
+            let primarySym = hasFsgetpath ? "fsgetpath" : "container_object_get_path"
             if hasContainerPathStr {
                 let targetSub = details.textStrings.first { s in SignatureCatalog.containerPathSubstrings.contains { s.contains($0) } } ?? "/Containers/Data/"
-                let sig = "fsgetpath:\(targetSub)"
+                let sig = "\(primarySym):\(targetSub)"
                 indicators.append(ThreatIndicator(
                     signature: sig,
-                    description: "Path leak brute-force targeting application containers (fsgetpath combined with container prefix)",
+                    description: "Path leak brute-force targeting application containers (\(primarySym) combined with container prefix)",
                     category: "Sandbox Enumeration",
                     location: "Mach-O (Symbol + String)",
                     severity: .highRisk
                 ))
             } else {
-                indicators.append(ThreatIndicator(
-                    signature: "fsgetpath",
-                    description: "APFS file system inode brute-force primitive",
-                    category: "Sandbox Enumeration",
-                    location: "LC_SYMTAB",
-                    severity: .highRisk
-                ))
+                if hasFsgetpath {
+                    indicators.append(ThreatIndicator(
+                        signature: "fsgetpath",
+                        description: "APFS file system inode brute-force primitive",
+                        category: "Sandbox Enumeration",
+                        location: "LC_SYMTAB",
+                        severity: .highRisk
+                    ))
+                }
+                if hasContainerObjGetPath, let objRule = SignatureCatalog.pathEnumerationSymbols["container_object_get_path"] {
+                    indicators.append(objRule.toIndicator(at: "LC_SYMTAB"))
+                }
             }
         }
         
@@ -305,6 +313,7 @@ public final class MachOScanner: @unchecked Sendable {
             let alreadyHasExplicitExploit = indicators.contains { $0.severity == .highRisk && $0.category == "Private API Symbol" }
             if !alreadyHasExplicitExploit {
                 indicators.append(SignatureCatalog.behavioralTupleRule.toIndicator())
+                matchedSymbols.append(SignatureCatalog.behavioralTupleRule.pattern)
             }
         }
         

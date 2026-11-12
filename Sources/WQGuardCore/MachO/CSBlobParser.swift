@@ -175,6 +175,69 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         }
     }
 
+    /// Merges two entitlement dictionaries without letting benign/empty placeholders shadow active privileges.
+    /// - String arrays (including `com.apple.security.application-groups`, `keychain-access-groups`, `com.apple.private.tcc.allow`) are deduplicated unions.
+    /// - Booleans merge conservatively so an active privilege (`true`, or `false` for `com.apple.private.security.container-required`) is never shadowed by a benign value in another slot/slice.
+    /// - Non-boolean scalars prefer `incoming` (e.g. Slot 7 DER `CoreEntitlements`, which XNU/AMFI prioritizes over Slot 5 XML).
+    public static func mergeEntitlementDictionaries(_ base: [String: Any], _ incoming: [String: Any]) -> [String: Any] {
+        var result = base
+        for (key, newVal) in incoming {
+            if key == CSBlobConstants.appGroupsKey {
+                let oldGroups = CSBlobParser.shared.extractAppGroups(fromPlistDict: result)
+                let newGroups = CSBlobParser.shared.extractAppGroups(fromPlistDict: [key: newVal])
+                var unionGroups = oldGroups
+                for g in newGroups where !unionGroups.contains(g) {
+                    unionGroups.append(g)
+                }
+                if !unionGroups.isEmpty {
+                    result[key] = unionGroups
+                }
+                continue
+            }
+
+            if let newBool = newVal as? Bool {
+                if let oldBool = result[key] as? Bool {
+                    if key == "com.apple.private.security.container-required" {
+                        result[key] = oldBool && newBool
+                    } else {
+                        result[key] = oldBool || newBool
+                    }
+                } else {
+                    result[key] = newBool
+                }
+                continue
+            }
+
+            if let newArr = newVal as? [Any] {
+                let newStrings = newArr.compactMap { $0 as? String }
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                if let oldArr = result[key] as? [Any] {
+                    var unionStrings = oldArr.compactMap { $0 as? String }
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    for s in newStrings where !unionStrings.contains(s) {
+                        unionStrings.append(s)
+                    }
+                    result[key] = unionStrings
+                } else {
+                    result[key] = newStrings.isEmpty ? newArr : newStrings
+                }
+                continue
+            }
+
+            if let newStr = newVal as? String {
+                if !newStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || result[key] == nil {
+                    result[key] = newStr
+                }
+                continue
+            }
+
+            result[key] = newVal
+        }
+        return result
+    }
+
     /// Extracts and merges full entitlements dictionary across all Slot 5 (XML Plist) and Slot 7 (ASN.1 DER) blobs.
     /// Infallible: returns empty dictionary if no valid entitlements are present.
     public func parseMergedEntitlements(from codeSignatureData: Data?) -> [String: Any] {
@@ -192,20 +255,6 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             }
 
             var merged: [String: Any] = [:]
-            var mergedGroups: [String] = []
-
-            func mergeDict(_ dict: [String: Any]) {
-                for (k, v) in dict {
-                    if k == CSBlobConstants.appGroupsKey {
-                        let groups = extractAppGroups(fromPlistDict: [k: v])
-                        for g in groups where !mergedGroups.contains(g) {
-                            mergedGroups.append(g)
-                        }
-                    } else if merged[k] == nil {
-                        merged[k] = v
-                    }
-                }
-            }
 
             // 1. Merge all Slot 5 (XML Plist) entries
             for entry in entries where entry.type == CSBlobConstants.slotEntitlements || entry.magic == CSBlobConstants.entitlementXmlMagic {
@@ -214,31 +263,26 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                 if start >= 0, end <= buffer.count, start <= end {
                     let payload = Data(buffer[start..<end])
                     if let dict = try? parseXMLPlist(payload) {
-                        mergeDict(dict)
+                        merged = Self.mergeEntitlementDictionaries(merged, dict)
                     }
                 }
             }
 
-            // 2. Merge all Slot 7 (ASN.1 DER CoreEntitlements) entries
+            // 2. Merge all Slot 7 (ASN.1 DER CoreEntitlements) entries (authoritative over Slot 5 XML)
             for entry in entries where entry.type == CSBlobConstants.slotDerEntitlements || entry.magic == CSBlobConstants.entitlementDerMagic {
                 let start = entry.payloadOffset
                 let end = start + entry.payloadLength
                 if start >= 0, end <= buffer.count, start <= end {
                     let payload = Data(buffer[start..<end])
                     if let dict = try? parseDEREntitlements(payload) {
-                        mergeDict(dict)
+                        merged = Self.mergeEntitlementDictionaries(merged, dict)
                     }
-                    if let derGroups = try? parseDERAppGroups(payload) {
-                        for g in derGroups where !mergedGroups.contains(g) {
-                            mergedGroups.append(g)
-                        }
+                    if let derGroups = try? parseDERAppGroups(payload), !derGroups.isEmpty {
+                        merged = Self.mergeEntitlementDictionaries(merged, [CSBlobConstants.appGroupsKey: derGroups])
                     }
                 }
             }
 
-            if !mergedGroups.isEmpty {
-                merged[CSBlobConstants.appGroupsKey] = mergedGroups
-            }
             return merged
         }
     }
