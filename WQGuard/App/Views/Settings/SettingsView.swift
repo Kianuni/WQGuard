@@ -26,7 +26,7 @@ public struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(tool.name)
                                 .font(.subheadline.bold())
-                            Text(tool.description)
+                            Text(tool.isBuiltIn ? WQStrings.builtinWhitelistRuleDesc : tool.description)
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
@@ -86,13 +86,13 @@ public struct SettingsView: View {
                 HStack {
                     Text(WQStrings.settingsEngineVersion)
                     Spacer()
-                    Text("WQGuardCore v1.2.1").foregroundColor(.gray)
+                    Text("WQGuardCore v1.2.2").foregroundColor(.gray)
                 }
                 HStack {
                     Text(WQStrings.settingsAppBuild)
                     Spacer()
-                    let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2.1"
-                    let bld = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "15"
+                    let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2.2"
+                    let bld = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "16"
                     Text("\(ver) (Build \(bld))").foregroundColor(.gray)
                 }
                 HStack {

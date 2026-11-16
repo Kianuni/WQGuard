@@ -82,7 +82,7 @@ public struct PostureHeroCard: View {
                     HStack(spacing: 6) {
                         Image(systemName: "list.bullet.rectangle.portrait.fill")
                             .font(.caption.bold())
-                        Text("查看本次审计结果详情清单")
+                        Text(WQStrings.inspectAuditResultsPrompt)
                             .font(.caption.bold())
                         Spacer()
                         Image(systemName: "chevron.right")

@@ -24,17 +24,35 @@ public enum LockdownClientError: Error, LocalizedError, Sendable, Equatable {
     public var errorDescription: String? {
         switch self {
         case .invalidPairingFile(let detail):
-            return "配对文件 (.mobiledevicepairing) 无效或缺失关键字段: \(detail)"
+            return WQLocale.pick(
+                en: "Invalid or incomplete pairing file (.mobiledevicepairing): \(detail)",
+                zh: "配对文件 (.mobiledevicepairing) 无效或缺失关键字段: \(detail)"
+            )
         case .identityImportFailed(let status):
-            return "无法从配对文件加载 TLS 客户端证书身份 (Keychain OSStatus: \(status))。"
+            return WQLocale.pick(
+                en: "Failed to load TLS client identity from pairing file (Keychain OSStatus: \(status)).",
+                zh: "无法从配对文件加载 TLS 客户端证书身份 (Keychain OSStatus: \(status))。"
+            )
         case .lockdownUnreachable(let host):
-            return "无法连接本机 lockdownd 服务 (\(host):62078)。请确认已开启 StikDebug / SideStore 的 LocalDevVPN（10.7.0.1），或改用「导入已安装应用快照」方式。"
+            return WQLocale.pick(
+                en: "Cannot reach local lockdownd service (\(host):62078). Ensure LocalDevVPN (StikDebug / SideStore) is connected, or import a snapshot instead.",
+                zh: "无法连接本机 lockdownd 服务 (\(host):62078)。请确认已开启 StikDebug / SideStore 的 LocalDevVPN（10.7.0.1），或改用「导入已安装应用快照」方式。"
+            )
         case .protocolError(let msg):
-            return "lockdownd / installation_proxy 协议交互异常: \(msg)"
+            return WQLocale.pick(
+                en: "lockdownd / installation_proxy protocol error: \(msg)",
+                zh: "lockdownd / installation_proxy 协议交互异常: \(msg)"
+            )
         case .sessionRejected(let err):
-            return "配对会话被设备拒绝 (\(err))。该配对文件可能已过期（重置过信任电脑后需重新生成配对文件）。"
+            return WQLocale.pick(
+                en: "Pairing session rejected by device (\(err)). The pairing record may have expired (re-generate after resetting Trust This Computer).",
+                zh: "配对会话被设备拒绝 (\(err))。该配对文件可能已过期（重置过信任电脑后需重新生成配对文件）。"
+            )
         case .serviceStartFailed(let err):
-            return "启动 com.apple.mobile.installation_proxy 服务失败: \(err)"
+            return WQLocale.pick(
+                en: "Failed to start com.apple.mobile.installation_proxy service: \(err)",
+                zh: "启动 com.apple.mobile.installation_proxy 服务失败: \(err)"
+            )
         }
     }
 }
@@ -75,7 +93,10 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
 
     public static func parse(data: Data, fallbackUDID: String? = nil) throws -> LockdownPairingFile {
         guard let outerPlist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] else {
-            throw LockdownClientError.invalidPairingFile("不是有效的 XML/Binary Plist 文件")
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(
+                en: "Not a valid XML or Binary Plist file",
+                zh: "不是有效的 XML/Binary Plist 文件"
+            ))
         }
 
         // Support both direct pairing plists and usbmuxd `{"PairRecord": {...}}` wrappers
@@ -91,23 +112,29 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
 
         if plist["HostID"] == nil && plist["HostId"] == nil {
             if plist["remote_unlock_host_key"] != nil || (plist["public_key"] != nil && plist["private_key"] != nil) {
-                throw LockdownClientError.invalidPairingFile("检测到 RPPairing (CoreDevice 49152) 格式配对文件。iOS 27 推荐直接使用下方「方式 B：复制 Mac 原生 devicectl 命令一键导出快照」（无需配置 VPN）。")
+                throw LockdownClientError.invalidPairingFile(WQLocale.pick(
+                    en: "Detected RPPairing (CoreDevice 49152) pairing record. On iOS 27, use Mode B (xcrun devicectl / pymobiledevice3) to export an installed-app JSON snapshot without VPN.",
+                    zh: "检测到 RPPairing (CoreDevice 49152) 格式配对文件。iOS 27 推荐直接使用下方「方式 B：复制 Mac 原生 devicectl 命令一键导出快照」（无需配置 VPN）。"
+                ))
             }
         }
 
         guard let hostID = (plist["HostID"] as? String) ?? (plist["HostId"] as? String), !hostID.isEmpty else {
-            throw LockdownClientError.invalidPairingFile("缺少 HostID（确认导入的是配对文件而非普通配置 plist）")
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(
+                en: "Missing HostID (verify you selected a lockdown pairing record rather than an ordinary plist)",
+                zh: "缺少 HostID（确认导入的是配对文件而非普通配置 plist）"
+            ))
         }
         guard let systemBUID = (plist["SystemBUID"] as? String) ?? (plist["SystemBuid"] as? String), !systemBUID.isEmpty else {
-            throw LockdownClientError.invalidPairingFile("缺少 SystemBUID")
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(en: "Missing SystemBUID", zh: "缺少 SystemBUID"))
         }
         guard let hostCertRaw = Self.extractDataField(plist["HostCertificate"]),
               let hostCertDER = Self.decodePEMOrDER(hostCertRaw) else {
-            throw LockdownClientError.invalidPairingFile("缺少或无法解码 HostCertificate")
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(en: "Missing or undecodable HostCertificate", zh: "缺少或无法解码 HostCertificate"))
         }
         guard let hostKeyRaw = Self.extractDataField(plist["HostPrivateKey"]),
               let hostKeyDER = Self.decodePEMOrDER(hostKeyRaw) else {
-            throw LockdownClientError.invalidPairingFile("缺少或无法解码 HostPrivateKey")
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(en: "Missing or undecodable HostPrivateKey", zh: "缺少或无法解码 HostPrivateKey"))
         }
 
         let rootDER = Self.extractDataField(plist["RootCertificate"]).flatMap { Self.decodePEMOrDER($0) }
@@ -510,13 +537,15 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
            let recTunnel = diagnosis.recommendedTunnelCIDR,
            let recDevice = diagnosis.recommendedDeviceCIDR,
            let recHost = diagnosis.recommendedDeviceIP {
-            return .protocolError(
-                "iOS 26.4+ / iOS 27 系统 lockdownd 新增了 VPN 子网校验，检测到当前 Wi-Fi (\(wifiIP)) 与 LocalDevVPN (\(diagnosis.configuredHost)) 不在同一网段，握手被系统立即断开 (EOF)。\n\n解决方法（二选一）：\n1️⃣ 在 LocalDevVPN 设置中将 Tunnel IP 改为 \(recTunnel)、Device IP 改为 \(recDevice) 后重连 VPN，并在 WQGuard 将网关设为 \(recHost)（已在「已安装应用扫描源」页面提供一键复制）；\n2️⃣ 或者直接使用「方式 B：电脑端免装工具一键导出快照」（Xcode 原生 devicectl 走 iOS 27 CoreDevice 通道，无需 VPN 秒扫全机）。"
-            )
+            return .protocolError(WQLocale.pick(
+                en: "iOS 26.4+ / iOS 27 lockdownd enforces same-subnet VPN validation: Wi-Fi (\(wifiIP)) differs from LocalDevVPN (\(diagnosis.configuredHost)), closing the handshake (EOF).\n\nFix options:\n1️⃣ In LocalDevVPN settings, set Tunnel IP to \(recTunnel), Device IP to \(recDevice), reconnect the VPN, and set WQGuard gateway to \(recHost) (one-tap copy buttons are in Scan Sources & Pairing);\n2️⃣ Or use Mode B (Mac Snapshot Export) via Xcode devicectl / pymobiledevice3 without VPN.",
+                zh: "iOS 26.4+ / iOS 27 系统 lockdownd 新增了 VPN 子网校验，检测到当前 Wi-Fi (\(wifiIP)) 与 LocalDevVPN (\(diagnosis.configuredHost)) 不在同一网段，握手被系统立即断开 (EOF)。\n\n解决方法（二选一）：\n1️⃣ 在 LocalDevVPN 设置中将 Tunnel IP 改为 \(recTunnel)、Device IP 改为 \(recDevice) 后重连 VPN，并在 WQGuard 将网关设为 \(recHost)（已在「已安装应用扫描源」页面提供一键复制）；\n2️⃣ 或者直接使用「方式 B：电脑端免装工具一键导出快照」（Xcode 原生 devicectl 走 iOS 27 CoreDevice 通道，无需 VPN 秒扫全机）。"
+            ))
         }
-        return .protocolError(
-            "连接建立后被本机 lockdownd (62078) 立即主动关闭 (EOF)。当前 iOS 26.4+ / iOS 27 系统限制了旧版 62078 端口本地 VPN 配对会话。\n\n👉 推荐改用「方式 B：电脑端免装工具一键导出快照」：在「已安装应用扫描源」复制 Mac 原生 xcrun devicectl 命令（无需安装第三方工具、无需开启 VPN），导出 installed_apps.json 发到手机即可完整扫描全机应用。"
-        )
+        return .protocolError(WQLocale.pick(
+            en: "Connection was closed (EOF) by local lockdownd (62078). iOS 26.4+ / iOS 27 restricts legacy port-62078 local VPN pairing sessions.\n\n👉 Recommended: Use Mode B in Scan Sources & Pairing to copy the Mac `xcrun devicectl` or `pymobiledevice3` command and AirDrop `installed_apps.json` to your iPhone.",
+            zh: "连接建立后被本机 lockdownd (62078) 立即主动关闭 (EOF)。当前 iOS 26.4+ / iOS 27 系统限制了旧版 62078 端口本地 VPN 配对会话。\n\n👉 推荐改用「方式 B：电脑端免装工具一键导出快照」：在「已安装应用扫描源」复制 Mac 原生 xcrun devicectl 命令（无需安装第三方工具、无需开启 VPN），导出 installed_apps.json 发到手机即可完整扫描全机应用。"
+        ))
     }
 
     private static let localNetworkWarmedKey = "wqguard_localnet_warmed_v1"
@@ -594,7 +623,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         try Self.writePlistPacket(["Request": "QueryType", "Label": "WQGuard"], toFD: rawSocketFD, step: "QueryType")
         let queryResp = try Self.readPlistPacket(fromFD: rawSocketFD, step: "QueryType")
         guard (queryResp["Type"] as? String) == "com.apple.mobile.lockdown" else {
-            throw LockdownClientError.protocolError("非预期的 QueryType 响应")
+            throw LockdownClientError.protocolError(WQLocale.pick(en: "Unexpected QueryType response", zh: "非预期的 QueryType 响应"))
         }
 
         // 2. StartSession
@@ -642,7 +671,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             throw LockdownClientError.serviceStartFailed(err)
         }
         guard let portNum = serviceResp["Port"] as? NSNumber, portNum.uint16Value > 0 else {
-            throw LockdownClientError.serviceStartFailed("未返回有效的服务端口号")
+            throw LockdownClientError.serviceStartFailed(WQLocale.pick(en: "No valid service port returned", zh: "未返回有效的服务端口号"))
         }
         let enableServiceSSL = (serviceResp["EnableServiceSSL"] as? Bool) ?? false
         return (portNum.uint16Value, enableServiceSSL)
@@ -698,7 +727,10 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         while true {
             let packet = try conn.receivePlist()
             if let err = packet["Error"] as? String {
-                throw LockdownClientError.protocolError("instproxy 错误: \(err)")
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "instproxy error: \(err)",
+                    zh: "instproxy 错误: \(err)"
+                ))
             }
             if let list = packet["CurrentList"] as? [[String: Any]] {
                 for item in list {
@@ -720,7 +752,10 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
 
     private func createTLSOptions(from pairing: LockdownPairingFile) throws -> NWProtocolTLS.Options {
         guard let certRef = SecCertificateCreateWithData(nil, pairing.hostCertificateDER as CFData) else {
-            throw LockdownClientError.invalidPairingFile("HostCertificate X.509 DER 格式无效")
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(
+                en: "Invalid HostCertificate X.509 DER format",
+                zh: "HostCertificate X.509 DER 格式无效"
+            ))
         }
 
         let unwrappedKeyDER = LockdownPairingFile.unwrapPKCS8PrivateKeyIfNeeded(pairing.hostPrivateKeyDER)
@@ -736,7 +771,10 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         guard let privKey = SecKeyCreateWithData(unwrappedKeyDER as CFData, rsaAttrs as CFDictionary, nil)
                 ?? SecKeyCreateWithData(pairing.hostPrivateKeyDER as CFData, rsaAttrs as CFDictionary, nil)
                 ?? SecKeyCreateWithData(pairing.hostPrivateKeyDER as CFData, ecAttrs as CFDictionary, nil) else {
-            throw LockdownClientError.invalidPairingFile("HostPrivateKey 私钥格式无法被系统 Security 框架识别")
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(
+                en: "HostPrivateKey format is not recognized by Security.framework",
+                zh: "HostPrivateKey 私钥格式无法被系统 Security 框架识别"
+            ))
         }
 
         let secIdentity = try importIdentityIntoKeychain(certificate: certRef, privateKey: privKey)
@@ -964,9 +1002,15 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                 if n <= 0 {
                     let errCode = errno
                     if errCode == EPIPE || errCode == ECONNRESET {
-                        throw LockdownClientError.protocolError("\(step) 阶段连接被对端关闭 (EOF/EPIPE)")
+                        throw LockdownClientError.protocolError(WQLocale.pick(
+                            en: "Connection closed by peer during \(step) (EOF/EPIPE)",
+                            zh: "\(step) 阶段连接被对端关闭 (EOF/EPIPE)"
+                        ))
                     }
-                    throw LockdownClientError.protocolError("\(step) 阶段 Socket 写入中断 (errno=\(errCode))")
+                    throw LockdownClientError.protocolError(WQLocale.pick(
+                        en: "Socket write interrupted during \(step) (errno=\(errCode))",
+                        zh: "\(step) 阶段 Socket 写入中断 (errno=\(errCode))"
+                    ))
                 }
                 sent += n
             }
@@ -977,11 +1021,17 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         let header = try readExactBytes(count: 4, fromFD: fd, step: step)
         let length = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         guard length > 0, length <= 64 * 1024 * 1024 else {
-            throw LockdownClientError.protocolError("\(step) 非法数据包长度: \(length)")
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Invalid \(step) packet length: \(length)",
+                zh: "\(step) 非法数据包长度: \(length)"
+            ))
         }
         let body = try readExactBytes(count: Int(length), fromFD: fd, step: step)
         guard let dict = (try? PropertyListSerialization.propertyList(from: body, options: [], format: nil)) as? [String: Any] else {
-            throw LockdownClientError.protocolError("\(step) 响应载荷不是有效的字典 Plist")
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "\(step) response payload is not a dictionary plist",
+                zh: "\(step) 响应载荷不是有效的字典 Plist"
+            ))
         }
         return dict
     }
@@ -997,14 +1047,23 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                     continue
                 }
                 if n == 0 {
-                    throw LockdownClientError.protocolError("\(step) 阶段对端主动关闭连接 (EOF)")
+                    throw LockdownClientError.protocolError(WQLocale.pick(
+                        en: "Peer closed connection during \(step) (EOF)",
+                        zh: "\(step) 阶段对端主动关闭连接 (EOF)"
+                    ))
                 }
                 if n < 0 {
                     let errCode = errno
                     if errCode == ECONNRESET {
-                        throw LockdownClientError.protocolError("\(step) 阶段连接被对端重置 (EOF/ECONNRESET)")
+                        throw LockdownClientError.protocolError(WQLocale.pick(
+                            en: "Connection reset by peer during \(step) (EOF/ECONNRESET)",
+                            zh: "\(step) 阶段连接被对端重置 (EOF/ECONNRESET)"
+                        ))
                     }
-                    throw LockdownClientError.protocolError("\(step) 阶段 Socket 读取超时 (errno=\(errCode))")
+                    throw LockdownClientError.protocolError(WQLocale.pick(
+                        en: "Socket read timeout during \(step) (errno=\(errCode))",
+                        zh: "\(step) 阶段 Socket 读取超时 (errno=\(errCode))"
+                    ))
                 }
                 offset += n
             }
@@ -1026,7 +1085,10 @@ private final class LocalSocketTLSRelay: @unchecked Sendable {
         self.upstreamFD = upstreamFD
         let lfd = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard lfd >= 0 else {
-            throw LockdownClientError.protocolError("无法创建本地 TLS 中继套接字")
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Unable to create local TLS relay socket",
+                zh: "无法创建本地 TLS 中继套接字"
+            ))
         }
         var reuse: Int32 = 1
         setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
@@ -1044,7 +1106,10 @@ private final class LocalSocketTLSRelay: @unchecked Sendable {
         }
         guard bindRes == 0, Darwin.listen(lfd, 1) == 0 else {
             Darwin.close(lfd)
-            throw LockdownClientError.protocolError("无法绑定本地回环端口")
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Unable to bind local loopback port",
+                zh: "无法绑定本地回环端口"
+            ))
         }
 
         var boundAddr = sockaddr_in()
@@ -1129,7 +1194,7 @@ private final class SyncNWChannel: @unchecked Sendable {
         tcp.connectionTimeout = 5
         let params = NWParameters(tls: tlsOptions, tcp: tcp)
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            throw LockdownClientError.protocolError("无效端口号: \(port)")
+            throw LockdownClientError.protocolError(WQLocale.pick(en: "Invalid port: \(port)", zh: "无效端口号: \(port)"))
         }
         let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
         let channel = SyncNWChannel(connection: conn)
@@ -1148,7 +1213,7 @@ private final class SyncNWChannel: @unchecked Sendable {
                     sema.signal()
                 }
             case .cancelled:
-                if stateBox.setIfNil(.failure(LockdownClientError.protocolError("连接已取消"))) {
+                if stateBox.setIfNil(.failure(LockdownClientError.protocolError(WQLocale.pick(en: "Connection cancelled", zh: "连接已取消")))) {
                     sema.signal()
                 }
             default:
@@ -1181,7 +1246,7 @@ private final class SyncNWChannel: @unchecked Sendable {
             sema.signal()
         })
         if sema.wait(timeout: .now() + 8.0) == .timedOut {
-            throw LockdownClientError.protocolError("发送请求超时")
+            throw LockdownClientError.protocolError(WQLocale.pick(en: "Request send timed out", zh: "发送请求超时"))
         }
         if let err = errBox.value {
             throw LockdownClientError.protocolError(err.localizedDescription)
@@ -1192,11 +1257,11 @@ private final class SyncNWChannel: @unchecked Sendable {
         let header = try receiveExact(length: 4)
         let bodyLen = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         guard bodyLen > 0, bodyLen <= 64 * 1024 * 1024 else {
-            throw LockdownClientError.protocolError("非法响应包长度: \(bodyLen)")
+            throw LockdownClientError.protocolError(WQLocale.pick(en: "Invalid response packet length: \(bodyLen)", zh: "非法响应包长度: \(bodyLen)"))
         }
         let body = try receiveExact(length: Int(bodyLen))
         guard let dict = (try? PropertyListSerialization.propertyList(from: body, options: [], format: nil)) as? [String: Any] else {
-            throw LockdownClientError.protocolError("无法解析 installation_proxy 响应 Plist")
+            throw LockdownClientError.protocolError(WQLocale.pick(en: "Unable to parse installation_proxy response plist", zh: "无法解析 installation_proxy 响应 Plist"))
         }
         return dict
     }
@@ -1214,14 +1279,14 @@ private final class SyncNWChannel: @unchecked Sendable {
                 } else if let data = data, !data.isEmpty {
                     chunkBox.value = .success(data)
                 } else if isComplete {
-                    chunkBox.value = .failure(LockdownClientError.protocolError("连接提前关闭"))
+                    chunkBox.value = .failure(LockdownClientError.protocolError(WQLocale.pick(en: "Connection closed prematurely", zh: "连接提前关闭")))
                 } else {
                     chunkBox.value = .success(Data())
                 }
                 sema.signal()
             }
             if sema.wait(timeout: .now() + 12.0) == .timedOut {
-                throw LockdownClientError.protocolError("等待 installation_proxy 数据超时")
+                throw LockdownClientError.protocolError(WQLocale.pick(en: "Timed out waiting for installation_proxy data", zh: "等待 installation_proxy 数据超时"))
             }
             switch chunkBox.value {
             case .success(let chunk):
@@ -1229,7 +1294,7 @@ private final class SyncNWChannel: @unchecked Sendable {
             case .failure(let err):
                 throw err
             case .none:
-                throw LockdownClientError.protocolError("未知读取错误")
+                throw LockdownClientError.protocolError(WQLocale.pick(en: "Unknown read error", zh: "未知读取错误"))
             }
         }
         return accumulated

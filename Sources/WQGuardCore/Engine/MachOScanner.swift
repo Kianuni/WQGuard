@@ -285,7 +285,10 @@ public final class MachOScanner: @unchecked Sendable {
                 let sig = "\(primarySym):\(targetSub)"
                 indicators.append(ThreatIndicator(
                     signature: sig,
-                    description: "Path leak brute-force targeting application containers (\(primarySym) combined with container prefix)",
+                    description: WQLocale.pick(
+                        en: "Path leak brute-force targeting application containers (\(primarySym) combined with container prefix)",
+                        zh: "针对应用容器的路径枚举暴力探测（\(primarySym) 配合容器路径前缀）"
+                    ),
                     category: "Sandbox Enumeration",
                     location: "Mach-O (Symbol + String)",
                     severity: .highRisk
@@ -294,7 +297,10 @@ public final class MachOScanner: @unchecked Sendable {
                 if hasFsgetpath {
                     indicators.append(ThreatIndicator(
                         signature: "fsgetpath",
-                        description: "APFS file system inode brute-force primitive",
+                        description: WQLocale.pick(
+                            en: "APFS file system inode brute-force primitive",
+                            zh: "底层 APFS 文件系统 inode 路径枚举遍历原语 (fsgetpath)"
+                        ),
                         category: "Sandbox Enumeration",
                         location: "LC_SYMTAB",
                         severity: .highRisk
@@ -352,16 +358,31 @@ public final class MachOScanner: @unchecked Sendable {
         
         var remediation = ""
         if finalRisk == .highRisk {
-            remediation = "检测到未经授权的 containermanagerd 跨沙盒利用特征，建议立即卸载或隔离该应用。"
+            remediation = WQLocale.pick(
+                en: "Unauthorized containermanagerd sandbox escape indicators detected. Immediately uninstall or isolate this application.",
+                zh: "检测到未经授权的 containermanagerd 跨沙盒利用特征，建议立即卸载或隔离该应用。"
+            )
         } else if finalRisk == .knownTool {
-            remediation = "该应用匹配已知开源安全审计工具白名单（\(whitelistedToolName ?? "Known Tool")），由授权开发者签署。"
+            remediation = WQLocale.pick(
+                en: "Matched trusted whitelist rule (\(whitelistedToolName ?? "Known Tool")) signed by an authorized developer.",
+                zh: "该应用匹配已知开源安全审计工具白名单（\(whitelistedToolName ?? "Known Tool")），由授权开发者签署。"
+            )
         } else if finalRisk == .caution {
-            remediation = "应用声明了 App Group 共享容器权限并包含动态符号解析能力，建议持续关注。"
+            remediation = WQLocale.pick(
+                en: "The application declares App Group shared containers alongside dynamic symbol resolution capabilities. Review source before trusting.",
+                zh: "应用声明了 App Group 共享容器权限并包含动态符号解析能力，建议持续关注。"
+            )
         } else {
             if details.isFairPlayEncrypted {
-                remediation = "App Store / TestFlight 官方发布应用，FairPlay DRM 加密。未在非加密段发现越权特征，状态安全。"
+                remediation = WQLocale.pick(
+                    en: "Official App Store / TestFlight package protected by FairPlay DRM. No escape indicators found across unencrypted segments; safe.",
+                    zh: "App Store / TestFlight 官方发布应用，FairPlay DRM 加密。未在非加密段发现越权特征，状态安全。"
+                )
             } else {
-                remediation = "未发现任何跨容器越权特征，状态安全。"
+                remediation = WQLocale.pick(
+                    en: "No cross-container sandbox escape indicators detected; safe.",
+                    zh: "未发现任何跨容器越权特征，状态安全。"
+                )
             }
         }
         

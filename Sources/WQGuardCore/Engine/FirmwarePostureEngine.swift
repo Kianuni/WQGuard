@@ -323,180 +323,329 @@ public final class FirmwarePostureEngine: Sendable {
     }
 
     // MARK: - Static Catalog Data
-    public static let allVulnerabilities: [FirmwareVulnerability] = [
-        FirmwareVulnerability(
-            cveId: .worseQuery0day,
-            name: "containermanagerd 跨沙盒令牌签发逃逸 (worse_query / bad_query)",
-            subsystem: "Darwin Sandbox / containermanagerd",
-            cvssScore: 8.8,
-            severity: .highRisk,
-            affectedDescription: "iOS 26.0 – 27.2.1+ (未修复 0day)",
-            patchedVersionDescription: "暂无官方补丁 (未修复 0day)",
-            details: "利用 containermanagerd 在处理 class=7 (App Group) part=3 (Library/Caches) 查询时，缺少路径前缀隔离校验的 Confused Deputy 漏洞，结合 escaping symlink 诱导内核签发任意 App 容器的沙盒扩展令牌。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "侧载应用安装前强制审计",
-                    instructions: "在启动任何外部侧载或企业证书签名的 IPA 之前，使用 WQGuard 运行静态与沙盒分析，拦截声明 App Group 并包含 containermanagerd IPC/逃逸特征的应用。",
-                    category: .wqguardScan,
-                    relatedCVEs: ["0day:worse_query"]
-                )
-            ]
-        ),
-        FirmwareVulnerability(
-            cveId: .photosBypass,
-            name: "Apple Photos 私有相册隐私提示与权限绕过 (CVE-2026-112676)",
-            subsystem: "Photos / TCC Privacy",
-            cvssScore: 7.5,
-            severity: .highRisk,
-            affectedDescription: "iOS < 27.2 且 iOS 26 < 26.7.2",
-            patchedVersionDescription: "iOS 27.2 / iOS 26.7.2",
-            details: "恶意本地应用可调用私有框架 PhotoLibraryServices 或利用私有 Entitlement 绕过 iOS TCC 相册访问授权提示，在后台静默读取用户相册与截图。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "相册敏感凭证清退",
-                    instructions: "切勿在系统相册中保存加密货币助记词/私钥截图或敏感身份证件；及时将机密照片移至硬件加密金库。",
-                    category: .appHygiene,
-                    relatedCVEs: ["CVE-2026-112676"]
+    public static var allVulnerabilities: [FirmwareVulnerability] {
+        [
+            FirmwareVulnerability(
+                cveId: .worseQuery0day,
+                name: WQLocale.pick(
+                    en: "containermanagerd Cross-Sandbox Token Escape (worse_query / bad_query)",
+                    zh: "containermanagerd 跨沙盒令牌签发逃逸 (worse_query / bad_query)"
                 ),
-                ActionableMitigation(
-                    title: "开启相册私有调用扫描",
-                    instructions: "使用 WQGuard 扫描本地 IPA，排查非法引用 PhotoLibraryServices / PLPhotoLibrary 的可疑软件包。",
-                    category: .wqguardScan,
-                    relatedCVEs: ["CVE-2026-112676"]
-                )
-            ]
-        ),
-        FirmwareVulnerability(
-            cveId: .brotliOOB,
-            name: "Brotli 解码器堆越界写入 / 远程代码执行 (HTTP2Shell, CVE-2026-111497)",
-            subsystem: "libbrotli / WebKit / CFNetwork",
-            cvssScore: 9.2,
-            severity: .highRisk,
-            affectedDescription: "iOS < 27.2.1 且 iOS 26 < 26.7.3",
-            patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
-            details: "libbrotli 解码器中存在堆缓冲区越界写入缺陷。恶意服务端通过 HTTP/2 下发精心构造的 Content-Encoding: br 压缩流，可诱发 CFNetwork / WebKit 进程内存破坏与任意代码执行。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "启用代理工具 Brotli 降级护盾 (Surge / 小火箭 / 圈 X / Loon / Stash)",
-                    instructions: "在 Surge、Shadowrocket、Quantumult X、Loon 或 Stash 中导入 WQGuard · 防 Brotli 溢出降级护盾规则，强制将 HTTP 请求头 Accept-Encoding 降级为 'gzip, deflate'，阻断网络传输层下发的恶意 Brotli 数据流。",
-                    category: .networkProxy,
-                    actionUrl: "surge:///install-module",
-                    relatedCVEs: ["CVE-2026-111497"]
+                subsystem: "Darwin Sandbox / containermanagerd",
+                cvssScore: 8.8,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS 26.0 – 27.2.1+ (Unpatched 0-day)",
+                    zh: "iOS 26.0 – 27.2.1+ (未修复 0day)"
                 ),
-                ActionableMitigation(
-                    title: "开启 Safari 锁定模式 (Lockdown Mode)",
-                    instructions: "对于访问不可信外部链接，在'设置 -> 隐私与安全性 -> 锁定模式'中针对特定网页启用严格防护。",
-                    category: .systemSettings,
-                    actionUrl: "App-Prefs:root=Privacy&path=LOCKDOWN_MODE",
-                    relatedCVEs: ["CVE-2026-111497"]
-                )
-            ]
-        ),
-        FirmwareVulnerability(
-            cveId: .coreGraphicsPDF,
-            name: "CoreGraphics 恶意 PDF 字体与图像渲染越界写入 (CVE-2026-112611)",
-            subsystem: "CoreGraphics / PDFKit",
-            cvssScore: 8.8,
-            severity: .highRisk,
-            affectedDescription: "iOS < 27.2 且 iOS 26 < 26.7.2",
-            patchedVersionDescription: "iOS 27.2 / iOS 26.7.2",
-            details: "CoreGraphics 解析特定格式嵌入式字体与色彩空间时发生堆溢出，可能被攻击者通过恶意 PDF 文件实施零点击或单点击攻击。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "关闭即时通讯软件自动下载",
-                    instructions: "在 Telegram（设置 -> 数据与存储）和微信（设置 -> 通用 -> 照片、视频、文件和通话）中关闭'自动下载媒体与文件'。",
-                    category: .appHygiene,
-                    relatedCVEs: ["CVE-2026-112611"]
+                patchedVersionDescription: WQLocale.pick(
+                    en: "No official patch yet (Unpatched 0-day)",
+                    zh: "暂无官方补丁 (未修复 0day)"
                 ),
-                ActionableMitigation(
-                    title: "避免本地快速预览未知 PDF",
-                    instructions: "切勿在系统 QuickLook、Safari 或未隔离的本地阅读器中直接预览来源不明的 PDF 文件。",
-                    category: .appHygiene,
-                    relatedCVEs: ["CVE-2026-112611"]
-                )
-            ]
-        ),
-        FirmwareVulnerability(
-            cveId: .coreGraphics2D,
-            name: "CoreGraphics 2D 图形引擎内存破坏 0day (CVE-2026-86950)",
-            subsystem: "CoreGraphics / Quartz2D",
-            cvssScore: 8.6,
-            severity: .highRisk,
-            affectedDescription: "iOS 26 < 26.7.1、iOS 18 < 18.7.11（及未获回移植补丁的旧分支）",
-            patchedVersionDescription: "iOS 27.0 / iOS 26.7.1 / iOS 18.7.11",
-            details: "图像子系统解析特定 ICC Profile 时存在无界内存复制缺陷（Apple 已在 iOS 27.0、iOS 26.7.1 与 iOS 18.7.11 发布官方安全补丁）；停留在低于 26.7.1 或 18.7.11 的设备易被恶意图像触发内存破坏。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "禁用通讯软件图像自动渲染",
-                    instructions: "禁用即时通讯软件中的图片自动渲染与预加载功能，防止后台静默渲染恶意图像元数据。",
-                    category: .appHygiene,
-                    relatedCVEs: ["CVE-2026-86950"]
-                )
-            ]
-        ),
-        FirmwareVulnerability(
-            cveId: .appIntentsBypass,
-            name: "App Intents 与快捷指令提权授权绕过 (CVE-2026-113963)",
-            subsystem: "AppIntents / Shortcuts",
-            cvssScore: 7.8,
-            severity: .caution,
-            affectedDescription: "iOS < 27.2.1 且 iOS 26 < 26.7.3",
-            patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
-            details: "恶意应用可通过构造特定 AppIntent 元数据绕过系统权限确认对话框，自动触发具备高权限的系统服务与剪贴板访问。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "定期审计快捷指令自动化",
-                    instructions: "进入系统'快捷指令'应用，清理未经审核的第三方共享脚本与自动化流程。",
-                    category: .appHygiene,
-                    actionUrl: "shortcuts://",
-                    relatedCVEs: ["CVE-2026-113963"]
-                )
-            ]
-        ),
-        FirmwareVulnerability(
-            cveId: .imessageGroup,
-            name: "iMessage Blastdoor 群聊未授权加入与历史泄露 (CVE-2026-113960/1)",
-            subsystem: "Messages / Blastdoor",
-            cvssScore: 8.1,
-            severity: .highRisk,
-            affectedDescription: "iOS < 27.2.1 且 iOS 26 < 26.7.3",
-            patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
-            details: "iMessage 协议层在解析畸形 Group Action 消息时存在逻辑漏洞，攻击者可诱导客户端泄露群聊参与者列表及部分未解密历史摘要。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "开启未知发件人信息过滤",
-                    instructions: "进入'设置 -> 信息'，启用'过滤未知发件人'；不要在多人群聊中传递钱包助记词或账户敏感凭据。",
-                    category: .systemSettings,
-                    actionUrl: "App-Prefs:root=MESSAGES",
-                    relatedCVEs: ["CVE-2026-113960"]
-                )
-            ]
-        ),
-        FirmwareVulnerability(
-            cveId: .bluetoothAirPlay,
-            name: "Bluetooth CoreUtils 零点击配对与 AirPlay 释放后使用 (CVE-2026-113964–70)",
-            subsystem: "Bluetooth / AirPlay / rapportd",
-            cvssScore: 8.8,
-            severity: .highRisk,
-            affectedDescription: "iOS < 27.2.1 且 iOS 26 < 26.7.3",
-            patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
-            details: "CoreUtils 蓝牙邻近配对状态机及 AirPlay rapportd 守护进程中存在速率限制绕过与 UAF 内存破坏漏洞，附近恶意发射源可发起未授权配对嗅探。",
-            mitigations: [
-                ActionableMitigation(
-                    title: "将自动隔空播放设为从不",
-                    instructions: "进入'设置 -> 通用 -> 隔空播放与接力'，将'自动隔空播放到电视'调整为'从不'。",
-                    category: .systemSettings,
-                    actionUrl: "App-Prefs:root=General&path=AIRPLAY",
-                    relatedCVEs: ["CVE-2026-113964-70"]
+                details: WQLocale.pick(
+                    en: "Confused-deputy flaw in containermanagerd when handling class=7 (App Group) part=3 (Library/Caches) queries without prefix containment checks. Combined with escaping symlinks and fsgetpath inode enumeration, it tricks the kernel into issuing sandbox extension tokens for arbitrary app containers.",
+                    zh: "利用 containermanagerd 在处理 class=7 (App Group) part=3 (Library/Caches) 查询时，缺少路径前缀隔离校验的 Confused Deputy 漏洞，结合 escaping symlink 诱导内核签发任意 App 容器的沙盒扩展令牌。"
                 ),
-                ActionableMitigation(
-                    title: "公共场所彻底关闭蓝牙",
-                    instructions: "在机场、高铁站等不可信人员密集场所，前往'设置 -> 蓝牙'彻底关闭蓝牙开关（而非仅在控制中心临时断开）。",
-                    category: .systemSettings,
-                    actionUrl: "App-Prefs:root=Bluetooth",
-                    relatedCVEs: ["CVE-2026-113964-70"]
-                )
-            ]
-        )
-    ]
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Mandatory Pre-Install IPA Audit",
+                            zh: "侧载应用安装前强制审计"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Before launching any third-party sideloaded or enterprise-signed IPA, run WQGuard static & sandbox analysis to catch App Group apps invoking containermanagerd IPC or symlink escape primitives.",
+                            zh: "在启动任何外部侧载或企业证书签名的 IPA 之前，使用 WQGuard 运行静态与沙盒分析，拦截声明 App Group 并包含 containermanagerd IPC/逃逸特征的应用。"
+                        ),
+                        category: .wqguardScan,
+                        relatedCVEs: ["0day:worse_query"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .photosBypass,
+                name: WQLocale.pick(
+                    en: "Apple Photos Private TCC Prompt & Access Bypass (CVE-2026-112676)",
+                    zh: "Apple Photos 私有相册隐私提示与权限绕过 (CVE-2026-112676)"
+                ),
+                subsystem: "Photos / TCC Privacy",
+                cvssScore: 7.5,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.2 and iOS 26 < 26.7.2",
+                    zh: "iOS < 27.2 且 iOS 26 < 26.7.2"
+                ),
+                patchedVersionDescription: "iOS 27.2 / iOS 26.7.2",
+                details: WQLocale.pick(
+                    en: "Malicious local apps can link private PhotoLibraryServices frameworks or spoof private entitlements to bypass iOS TCC photo authorization prompts and silently exfiltrate user photos and screenshots.",
+                    zh: "恶意本地应用可调用私有框架 PhotoLibraryServices 或利用私有 Entitlement 绕过 iOS TCC 相册访问授权提示，在后台静默读取用户相册与截图。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Remove Sensitive Credentials from Photos",
+                            zh: "相册敏感凭证清退"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Never keep screenshots of crypto seed phrases, private keys, or identity documents in the system Photo Library; move sensitive images into a hardware-encrypted vault.",
+                            zh: "切勿在系统相册中保存加密货币助记词/私钥截图或敏感身份证件；及时将机密照片移至硬件加密金库。"
+                        ),
+                        category: .appHygiene,
+                        relatedCVEs: ["CVE-2026-112676"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Scan IPAs for Private Photos Frameworks",
+                            zh: "开启相册私有调用扫描"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Inspect local IPAs with WQGuard to catch unauthorized PhotoLibraryServices / PLPhotoLibrary linkages.",
+                            zh: "使用 WQGuard 扫描本地 IPA，排查非法引用 PhotoLibraryServices / PLPhotoLibrary 的可疑软件包。"
+                        ),
+                        category: .wqguardScan,
+                        relatedCVEs: ["CVE-2026-112676"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .brotliOOB,
+                name: WQLocale.pick(
+                    en: "Brotli Decoder Heap Out-of-Bounds Write / RCE (HTTP2Shell, CVE-2026-111497)",
+                    zh: "Brotli 解码器堆越界写入 / 远程代码执行 (HTTP2Shell, CVE-2026-111497)"
+                ),
+                subsystem: "libbrotli / WebKit / CFNetwork",
+                cvssScore: 9.2,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.2.1 and iOS 26 < 26.7.3",
+                    zh: "iOS < 27.2.1 且 iOS 26 < 26.7.3"
+                ),
+                patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
+                details: WQLocale.pick(
+                    en: "Heap buffer out-of-bounds write in the libbrotli decoder. A malicious server returning a crafted Content-Encoding: br response can corrupt memory and achieve code execution in CFNetwork / WebKit.",
+                    zh: "libbrotli 解码器中存在堆缓冲区越界写入缺陷。恶意服务端通过 HTTP/2 下发精心构造的 Content-Encoding: br 压缩流，可诱发 CFNetwork / WebKit 进程内存破坏与任意代码执行。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Enable Proxy Brotli Downgrade Shield (Surge / Shadowrocket / Quantumult X / Loon / Stash)",
+                            zh: "启用代理工具 Brotli 降级护盾 (Surge / 小火箭 / 圈 X / Loon / Stash)"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Import WQGuard's Brotli Downgrade Shield into Surge, Shadowrocket, Quantumult X, Loon, or Stash to rewrite Accept-Encoding to 'gzip, deflate' and block unsolicited Content-Encoding: br responses.",
+                            zh: "在 Surge、Shadowrocket、Quantumult X、Loon 或 Stash 中导入 WQGuard · 防 Brotli 溢出降级护盾规则，强制将 HTTP 请求头 Accept-Encoding 降级为 'gzip, deflate'，阻断网络传输层下发的恶意 Brotli 数据流。"
+                        ),
+                        category: .networkProxy,
+                        actionUrl: "surge:///install-module",
+                        relatedCVEs: ["CVE-2026-111497"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Enable iOS Lockdown Mode",
+                            zh: "开启 Safari 锁定模式 (Lockdown Mode)"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "For untrusted links and WOFF2 web font hardening, enable strict protection under Settings -> Privacy & Security -> Lockdown Mode.",
+                            zh: "对于访问不可信外部链接，在'设置 -> 隐私与安全性 -> 锁定模式'中针对特定网页启用严格防护。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=Privacy&path=LOCKDOWN_MODE",
+                        relatedCVEs: ["CVE-2026-111497"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .coreGraphicsPDF,
+                name: WQLocale.pick(
+                    en: "CoreGraphics Malicious PDF Font & Image OOB Write (CVE-2026-112611)",
+                    zh: "CoreGraphics 恶意 PDF 字体与图像渲染越界写入 (CVE-2026-112611)"
+                ),
+                subsystem: "CoreGraphics / PDFKit",
+                cvssScore: 8.8,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.2 and iOS 26 < 26.7.2",
+                    zh: "iOS < 27.2 且 iOS 26 < 26.7.2"
+                ),
+                patchedVersionDescription: "iOS 27.2 / iOS 26.7.2",
+                details: WQLocale.pick(
+                    en: "Heap overflow in CoreGraphics while parsing crafted embedded PDF fonts and color spaces, enabling zero-click or one-click exploitation via malicious PDF files.",
+                    zh: "CoreGraphics 解析特定格式嵌入式字体与色彩空间时发生堆溢出，可能被攻击者通过恶意 PDF 文件实施零点击或单点击攻击。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Disable Messenger Auto-Download",
+                            zh: "关闭即时通讯软件自动下载"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Disable automatic media and file downloads in Telegram (Settings -> Data and Storage) and WeChat (Settings -> General -> Photos, Videos, Files & Calls).",
+                            zh: "在 Telegram（设置 -> 数据与存储）和微信（设置 -> 通用 -> 照片、视频、文件和通话）中关闭'自动下载媒体与文件'。"
+                        ),
+                        category: .appHygiene,
+                        relatedCVEs: ["CVE-2026-112611"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Avoid QuickLook Previewing Untrusted PDFs",
+                            zh: "避免本地快速预览未知 PDF"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Do not preview unknown PDF files directly in system QuickLook, Safari, or unisolated local document readers.",
+                            zh: "切勿在系统 QuickLook、Safari 或未隔离的本地阅读器中直接预览来源不明的 PDF 文件。"
+                        ),
+                        category: .appHygiene,
+                        relatedCVEs: ["CVE-2026-112611"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .coreGraphics2D,
+                name: WQLocale.pick(
+                    en: "CoreGraphics 2D Image Subsystem Memory Corruption 0-day (CVE-2026-86950)",
+                    zh: "CoreGraphics 2D 图形引擎内存破坏 0day (CVE-2026-86950)"
+                ),
+                subsystem: "CoreGraphics / Quartz2D",
+                cvssScore: 8.6,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS 26 < 26.7.1, iOS 18 < 18.7.11 (and unpatched legacy branches)",
+                    zh: "iOS 26 < 26.7.1、iOS 18 < 18.7.11（及未获回移植补丁的旧分支）"
+                ),
+                patchedVersionDescription: "iOS 27.0 / iOS 26.7.1 / iOS 18.7.11",
+                details: WQLocale.pick(
+                    en: "Unbounded memory copy when parsing crafted ICC profiles (officially patched by Apple in iOS 27.0, iOS 26.7.1, and iOS 18.7.11). Devices below 26.7.1 or 18.7.11 remain vulnerable to crafted image payloads.",
+                    zh: "图像子系统解析特定 ICC Profile 时存在无界内存复制缺陷（Apple 已在 iOS 27.0、iOS 26.7.1 与 iOS 18.7.11 发布官方安全补丁）；停留在低于 26.7.1 或 18.7.11 的设备易被恶意图像触发内存破坏。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Disable Automatic Image Rendering in Messengers",
+                            zh: "禁用通讯软件图像自动渲染"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Disable automatic image prefetching and inline rendering in messaging apps to prevent silent processing of crafted image metadata.",
+                            zh: "禁用即时通讯软件中的图片自动渲染与预加载功能，防止后台静默渲染恶意图像元数据。"
+                        ),
+                        category: .appHygiene,
+                        relatedCVEs: ["CVE-2026-86950"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .appIntentsBypass,
+                name: WQLocale.pick(
+                    en: "App Intents & Shortcuts Privilege Authorization Bypass (CVE-2026-113963)",
+                    zh: "App Intents 与快捷指令提权授权绕过 (CVE-2026-113963)"
+                ),
+                subsystem: "AppIntents / Shortcuts",
+                cvssScore: 7.8,
+                severity: .caution,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.2.1 and iOS 26 < 26.7.3",
+                    zh: "iOS < 27.2.1 且 iOS 26 < 26.7.3"
+                ),
+                patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
+                details: WQLocale.pick(
+                    en: "Crafted AppIntent metadata can bypass system authorization prompts to silently invoke privileged services and clipboard access.",
+                    zh: "恶意应用可通过构造特定 AppIntent 元数据绕过系统权限确认对话框，自动触发具备高权限的系统服务与剪贴板访问。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Audit Shortcuts Automations Regularly",
+                            zh: "定期审计快捷指令自动化"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Open the Apple Shortcuts app and remove unreviewed third-party shared shortcuts or automations.",
+                            zh: "进入系统'快捷指令'应用，清理未经审核的第三方共享脚本与自动化流程。"
+                        ),
+                        category: .appHygiene,
+                        actionUrl: "shortcuts://",
+                        relatedCVEs: ["CVE-2026-113963"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .imessageGroup,
+                name: WQLocale.pick(
+                    en: "iMessage Blastdoor Unauthorized Group Join & History Leak (CVE-2026-113960/1)",
+                    zh: "iMessage Blastdoor 群聊未授权加入与历史泄露 (CVE-2026-113960/1)"
+                ),
+                subsystem: "Messages / Blastdoor",
+                cvssScore: 8.1,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.2.1 and iOS 26 < 26.7.3",
+                    zh: "iOS < 27.2.1 且 iOS 26 < 26.7.3"
+                ),
+                patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
+                details: WQLocale.pick(
+                    en: "Logic flaw in iMessage protocol Group Action parsing that can expose participant lists and partial history metadata.",
+                    zh: "iMessage 协议层在解析畸形 Group Action 消息时存在逻辑漏洞，攻击者可诱导客户端泄露群聊参与者列表及部分未解密历史摘要。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Enable Filter Unknown Senders",
+                            zh: "开启未知发件人信息过滤"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Enable Settings -> Messages -> Filter Unknown Senders, and never share wallet seed phrases or credentials inside group chats.",
+                            zh: "进入'设置 -> 信息'，启用'过滤未知发件人'；不要在多人群聊中传递钱包助记词或账户敏感凭据。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=MESSAGES",
+                        relatedCVEs: ["CVE-2026-113960"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .bluetoothAirPlay,
+                name: WQLocale.pick(
+                    en: "Bluetooth CoreUtils Zero-Click Pairing & AirPlay UAF (CVE-2026-113964–70)",
+                    zh: "Bluetooth CoreUtils 零点击配对与 AirPlay 释放后使用 (CVE-2026-113964–70)"
+                ),
+                subsystem: "Bluetooth / AirPlay / rapportd",
+                cvssScore: 8.8,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.2.1 and iOS 26 < 26.7.3",
+                    zh: "iOS < 27.2.1 且 iOS 26 < 26.7.3"
+                ),
+                patchedVersionDescription: "iOS 27.2.1 / iOS 26.7.3",
+                details: WQLocale.pick(
+                    en: "Rate-limit bypass and use-after-free memory corruption in CoreUtils proximity pairing and AirPlay rapportd daemon, allowing nearby attackers to probe or exploit wireless services.",
+                    zh: "CoreUtils 蓝牙邻近配对状态机及 AirPlay rapportd 守护进程中存在速率限制绕过与 UAF 内存破坏漏洞，附近恶意发射源可发起未授权配对嗅探。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Set Automatically AirPlay to Never",
+                            zh: "将自动隔空播放设为从不"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Go to Settings -> General -> AirPlay & Continuity and set Automatically AirPlay to Never.",
+                            zh: "进入'设置 -> 通用 -> 隔空播放与接力'，将'自动隔空播放到电视'调整为'从不'。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=General&path=AIRPLAY",
+                        relatedCVEs: ["CVE-2026-113964-70"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Turn Off Bluetooth in Settings in Public",
+                            zh: "公共场所彻底关闭蓝牙"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "In airports, transit hubs, or untrusted public spaces, disable Bluetooth completely in Settings -> Bluetooth rather than only in Control Center.",
+                            zh: "在机场、高铁站等不可信人员密集场所，前往'设置 -> 蓝牙'彻底关闭蓝牙开关（而非仅在控制中心临时断开）。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=Bluetooth",
+                        relatedCVEs: ["CVE-2026-113964-70"]
+                    )
+                ]
+            )
+        ]
+    }
 }

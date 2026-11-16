@@ -36,6 +36,7 @@
 		A00002000000000000000018 /* InstalledScanConfigSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000018 /* InstalledScanConfigSheet.swift */; };
 		A00002000000000000000019 /* SystemDocumentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00001000000000000000019 /* SystemDocumentPicker.swift */; };
 		A00003030000000000000001 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A00003000000000000000001 /* Localizable.strings */; };
+		A00003130000000000000001 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = A00003100000000000000001 /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -71,6 +72,8 @@
 		A00001000000000000000019 /* SystemDocumentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Views/Components/SystemDocumentPicker.swift"; sourceTree = "<group>"; };
 		A00003010000000000000001 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "App/Localization/zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		A00003020000000000000001 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = "App/Localization/en.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		A00003110000000000000001 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "Resources/Localization/zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		A00003120000000000000001 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = "Resources/Localization/en.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -126,6 +129,7 @@
 				A00001000000000000000018 /* InstalledScanConfigSheet.swift */,
 				A00001000000000000000019 /* SystemDocumentPicker.swift */,
 				A00003000000000000000001 /* Localizable.strings */,
+				A00003100000000000000001 /* InfoPlist.strings */,
 			);
 			path = WQGuard;
 			sourceTree = "<group>";
@@ -201,6 +205,7 @@
 			files = (
 				A00000100000000000000001 /* Assets.xcassets in Resources */,
 				A00003030000000000000001 /* Localizable.strings in Resources */,
+				A00003130000000000000001 /* InfoPlist.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -250,6 +255,15 @@
 				A00003020000000000000001 /* en */,
 			);
 			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+		A00003100000000000000001 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				A00003110000000000000001 /* zh-Hans */,
+				A00003120000000000000001 /* en */,
+			);
+			name = InfoPlist.strings;
 			sourceTree = "<group>";
 		};
 /* End PBXVariantGroup section */
@@ -307,14 +321,14 @@
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_IDENTITY = "";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 16;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = WQGuard/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
-				MARKETING_VERSION = 1.2.1;
+				MARKETING_VERSION = 1.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wqguard.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -335,14 +349,14 @@
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_IDENTITY = "";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 16;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = WQGuard/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
-				MARKETING_VERSION = 1.2.1;
+				MARKETING_VERSION = 1.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wqguard.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

@@ -132,33 +132,38 @@ public final class WhitelistEngine: @unchecked Sendable {
 
     /// Built-in default whitelist containing only WQGuard's own self-identity rule.
     /// Third-party sideloading tools and research utilities are strictly zero-trust and NEVER built-in.
-    public static let defaultTools: [WhitelistedTool] = [
-        WhitelistedTool(
-            name: "WQGuard",
-            allowedBundleIds: [
-                "com.wqguard.app",
-                "com.wqguard.app.debug",
-                "com.antigravity.wqguard"
-            ],
-            allowedAppGroups: [
-                "group.com.wqguard.app",
-                "group.com.wqguard.scanner"
-            ],
-            expectedSignatures: [
-                "container_query_create",
-                "com.apple.containermanagerd",
-                "com.apple.containermanagerd.system",
-                ".com.apple.mobile_container_manager.metadata.plist",
-                ".csstore",
-                "com.apple.LaunchServices-",
-                "dlopen",
-                "dlsym"
-            ],
-            description: "Self-identity whitelist for WQGuard security scanner",
-            isEnabled: true,
-            isBuiltIn: true
-        )
-    ]
+    public static var defaultTools: [WhitelistedTool] {
+        [
+            WhitelistedTool(
+                name: "WQGuard",
+                allowedBundleIds: [
+                    "com.wqguard.app",
+                    "com.wqguard.app.debug",
+                    "com.antigravity.wqguard"
+                ],
+                allowedAppGroups: [
+                    "group.com.wqguard.app",
+                    "group.com.wqguard.scanner"
+                ],
+                expectedSignatures: [
+                    "container_query_create",
+                    "com.apple.containermanagerd",
+                    "com.apple.containermanagerd.system",
+                    ".com.apple.mobile_container_manager.metadata.plist",
+                    ".csstore",
+                    "com.apple.LaunchServices-",
+                    "dlopen",
+                    "dlsym"
+                ],
+                description: WQLocale.pick(
+                    en: "Self-identity whitelist for WQGuard security scanner",
+                    zh: "WQGuard 安全审计器自身身份白名单规则"
+                ),
+                isEnabled: true,
+                isBuiltIn: true
+            )
+        ]
+    }
 
     /// Initializes a WhitelistEngine instance with specified initial rules (defaults to built-in WQGuard rule).
     public init(tools: [WhitelistedTool] = WhitelistEngine.defaultTools) {

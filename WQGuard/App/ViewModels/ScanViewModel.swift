@@ -212,7 +212,7 @@ public final class ScanViewModel: ObservableObject {
             let pairing = try LockdownPairingFile.parse(data: data, fallbackUDID: fallbackUDID)
             try data.write(to: savedPairingURL, options: .atomic)
             refreshRegistrySourceState()
-            let summary = "已导入配对文件 (HostID: \(pairing.hostID.prefix(8))…)"
+            let summary = WQStrings.pairingImportedSummary(hostPrefix: String(pairing.hostID.prefix(8)))
             lastScanEngineSummary = summary
             #if os(iOS)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -287,14 +287,14 @@ public final class ScanViewModel: ObservableObject {
             }
         }
 
-        return .failure(lastParseError ?? LockdownClientError.invalidPairingFile("剪贴板中未检测到有效的配对文件。请在系统『文件』App 中长按你的配对 .plist 文件点击「拷贝」，再回来点此按钮。"))
+        return .failure(lastParseError ?? LockdownClientError.invalidPairingFile(WQStrings.clipboardNoValidPairing))
         #else
-        return .failure(LockdownClientError.invalidPairingFile("当前平台不支持剪贴板导入"))
+        return .failure(LockdownClientError.invalidPairingFile(WQStrings.clipboardUnsupportedPlatform))
         #endif
     }
 
     /// Automatically imports any `.mobiledevicepairing` / `.plist` / `.json` / `.ipa` / `.tipa` placed into
-    /// `我的 iPhone → WQGuard` (`Documents/` or `Documents/Inbox/`).
+    /// `On My iPhone → WQGuard` (`Documents/` or `Documents/Inbox/`).
     @discardableResult
     public func autoImportFromDocumentsFolderIfNeeded() -> String? {
         let fm = FileManager.default
@@ -330,22 +330,22 @@ public final class ScanViewModel: ObservableObject {
                 if let parsedPairing = try? LockdownPairingFile.parse(data: data, fallbackUDID: stem) {
                     if currentHostID != parsedPairing.hostID {
                         if case .success(let msg) = importPairingDataWithResult(data, fallbackUDID: stem) {
-                            autoImportedNotices.append("已自动加载配对文件：\(msg)")
+                            autoImportedNotices.append(WQStrings.autoImportedPairingNotice(msg))
                         }
                     }
                 } else if !hasSavedSnapshot,
                           case .success(let msg) = importRegistrySnapshotDataWithResult(data, filename: item.lastPathComponent, autoScan: false) {
-                    autoImportedNotices.append("已自动加载快照：\(msg)")
+                    autoImportedNotices.append(WQStrings.autoImportedSnapshotNotice(msg))
                 }
             }
         }
 
         if syncedNewIPA {
             refreshSyncedPackageNames()
-            autoImportedNotices.append("已自动将「我的 iPhone → WQGuard」内的 IPA 加入扫描列表")
+            autoImportedNotices.append(WQStrings.autoImportedIPANotice)
         }
 
-        return autoImportedNotices.isEmpty ? nil : autoImportedNotices.joined(separator: "；")
+        return autoImportedNotices.isEmpty ? nil : autoImportedNotices.joined(separator: WQStrings.autoImportNoticeSeparator)
     }
 
     public func importRegistrySnapshot(from url: URL, autoScan: Bool = true) {
@@ -376,7 +376,7 @@ public final class ScanViewModel: ObservableObject {
             try data.write(to: savedSnapshotURL, options: .atomic)
             UserDefaults.standard.set(filename, forKey: Self.snapshotNameKey)
             refreshRegistrySourceState()
-            let summary = "已导入注册表快照（共 \(records.count) 款已安装应用）"
+            let summary = WQStrings.snapshotImportedSummary(count: records.count)
             lastScanEngineSummary = summary
             #if os(iOS)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -471,7 +471,7 @@ public final class ScanViewModel: ObservableObject {
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
         guard let rawData = try? Data(contentsOf: url, options: .mappedIfSafe) else {
-            activeAlertMessage = "无法读取传入文件 (\(url.lastPathComponent))。"
+            activeAlertMessage = WQStrings.incomingFileReadFailed(url.lastPathComponent)
             showGlobalAlert = true
             return
         }
@@ -498,7 +498,7 @@ public final class ScanViewModel: ObservableObject {
 
     public func testLiveLockdownConnectionAndScan() {
         guard let pairing = loadActivePairingFile() else {
-            activeAlertMessage = "请先导入配对文件 (.plist / .mobiledevicepairing)。"
+            activeAlertMessage = WQStrings.pairingFileRequiredAlert
             showGlobalAlert = true
             return
         }
@@ -506,7 +506,7 @@ public final class ScanViewModel: ObservableObject {
         showInstalledScanConfigSheet = false
         isScanning = true
         let host = lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "10.7.0.1" : lockdownHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        scanProgress = ScanProgress(currentTarget: "正在通过 LocalDevVPN (\(host)) 连接 installation_proxy...", completedCount: 0, totalCount: 1)
+        scanProgress = ScanProgress(currentTarget: WQStrings.connectingViaLocalDevVPN(host: host), completedCount: 0, totalCount: 1)
 
         activeScanTask = Task { [weak self] in
             guard let self = self else { return }
@@ -518,7 +518,7 @@ public final class ScanViewModel: ObservableObject {
                 // Cache live records to local snapshot store so future offline scans remain instant even when VPN is off
                 if let encoded = try? JSONEncoder().encode(liveRecords) {
                     try? encoded.write(to: self.savedSnapshotURL, options: .atomic)
-                    UserDefaults.standard.set("LocalDevVPN 直连缓存", forKey: Self.snapshotNameKey)
+                    UserDefaults.standard.set(WQStrings.localDevVPNCacheName, forKey: Self.snapshotNameKey)
                     self.refreshRegistrySourceState()
                 }
                 self.isScanning = false
@@ -527,7 +527,7 @@ public final class ScanViewModel: ObservableObject {
             } catch {
                 self.isScanning = false
                 self.scanProgress = nil
-                self.activeAlertMessage = "配对文件已保存，但直连未成功：\n\(error.localizedDescription)"
+                self.activeAlertMessage = WQStrings.liveConnectionFailedMessage(error.localizedDescription)
                 self.showGlobalAlert = true
                 #if os(iOS)
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -689,7 +689,7 @@ public final class ScanViewModel: ObservableObject {
                 registryEvaluatedCount: merged.registryCount,
                 correlatedBinaryCount: merged.correlatedCount,
                 probeDetectedCount: merged.probeCount,
-                statusNotice: "已直连读取全机 \(liveRecords.count) 款应用注册表"
+                statusNotice: WQStrings.liveRegistryReadNotice(count: liveRecords.count)
             )
 
             self.currentSession = session
@@ -707,18 +707,18 @@ public final class ScanViewModel: ObservableObject {
     private static func formatEngineSummary(_ res: SecurityPipeline.UnifiedInstalledScanResult) -> String {
         var parts: [String] = []
         if res.liveRegistryConnected {
-            parts.append("🟢 配对直连注册表: \(res.registryEvaluatedCount) 款")
+            parts.append(WQStrings.summaryLiveRegistry(res.registryEvaluatedCount))
         } else if res.registryEvaluatedCount > 0 {
-            parts.append("📋 注册表快照: \(res.registryEvaluatedCount) 款")
+            parts.append(WQStrings.summarySnapshotRegistry(res.registryEvaluatedCount))
         }
         if res.correlatedBinaryCount > 0 {
-            parts.append("🔬 IPA 二进制深扫联动: \(res.correlatedBinaryCount) 款")
+            parts.append(WQStrings.summaryCorrelatedBinary(res.correlatedBinaryCount))
         }
         if res.probeDetectedCount > 0 {
-            parts.append("📡 本机探针: \(res.probeDetectedCount) 款")
+            parts.append(WQStrings.summaryProbeDetected(res.probeDetectedCount))
         }
         if parts.isEmpty {
-            return "📦 本地 IPA 队列深扫: \(res.findings.count) 款"
+            return WQStrings.summaryLocalIPAQueue(res.findings.count)
         }
         return parts.joined(separator: " · ")
     }

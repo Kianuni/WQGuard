@@ -1,12 +1,12 @@
-#!name = WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
-#!desc = 针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell)，强制降级 Accept-Encoding 为 gzip,deflate 并阻断恶意强推的 br 响应。内置 16 项负向排除，保障 Apple Intelligence、Siri 与支付正常使用。
+#!name = WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
+#!desc = Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding to gzip,deflate & blocking unsolicited br responses; 16 Apple/banking exclusions. | 强制降级 Accept-Encoding 并阻断强推 br 响应，内置 16 项负向排除。
 #!openUrl = https://github.com/Kianuni/WQGuard
 #!author = WQGuard Contributors
-#!tag = 安全防护
+#!tag = Security / 安全防护
 #!system = iOS
 
 [Argument]
-EXTRA_MITM_HOSTS = input, "*.example.invalid", tag = 附加防护域名, desc = 可选补充需要开启 Brotli 降级保护的自定义域名后缀（如 *.cc, *.me）
+EXTRA_MITM_HOSTS = input, "*.example.invalid", tag = Extra Domains / 附加域名, desc = Optional extra hostnames/wildcards for Brotli downgrade protection (e.g. *.cc, *.me) / 可选补充需强制降级的域名后缀
 
 [Rewrite]
 ^https?://.+ header-replace Accept-Encoding gzip,deflate

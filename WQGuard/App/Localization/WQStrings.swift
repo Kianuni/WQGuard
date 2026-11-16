@@ -10,17 +10,20 @@ import WQGuardCore
 
 public enum WQStrings {
     // MARK: - Localization Helpers
-    private static var isEnglish: Bool {
-        let pref = Locale.preferredLanguages.first?.lowercased() ?? "en"
-        return !pref.hasPrefix("zh")
+    public static var isEnglish: Bool {
+        WQLocale.isEnglish
     }
 
     private static func localized(_ key: String, en: String, zh: String) -> String {
-        let val = NSLocalizedString(key, tableName: "Localizable", bundle: .main, value: isEnglish ? en : zh, comment: "")
-        if val == key {
-            return isEnglish ? en : zh
+        let langFolder = isEnglish ? "en" : "zh-Hans"
+        if let lprojPath = Bundle.main.path(forResource: langFolder, ofType: "lproj"),
+           let langBundle = Bundle(path: lprojPath) {
+            let val = langBundle.localizedString(forKey: key, value: "__WQ_MISSING__", table: "Localizable")
+            if val != "__WQ_MISSING__" && val != key {
+                return val
+            }
         }
-        return val
+        return isEnglish ? en : zh
     }
 
     // MARK: - Tabs
@@ -32,9 +35,21 @@ public enum WQStrings {
 
     // MARK: - Dashboard Overview
     public static var appTitle: String { localized("app_title", en: "WQGuard", zh: "WQGuard 容器守卫") }
-    public static var startSystemScan: String { localized("start_system_scan", en: "Scan Installed Apps", zh: "一键扫描已安装应用") }
+    public static var startSystemScan: String { localized("start_system_scan", en: "Scan Installed Apps", zh: "开始全盘安全检测") }
     public static var startSystemScanSub: String { localized("start_system_scan_sub", en: "installation_proxy Registry + On-Device Probe + Queued IPA Correlation", zh: "系统注册表权限审计 + 本机探针 + 本地 IPA 二进制联动") }
     public static var configureInstalledScanButton: String { localized("configure_installed_scan_btn", en: "Scan Sources & Pairing", zh: "配置已安装扫描源") }
+    public static func activeEnginesBadge(_ active: Int, total: Int = 3) -> String {
+        localized("active_engines_badge", en: "\(active)/\(total) Engines On", zh: "已启用 \(active)/\(total) 引擎")
+    }
+    public static func queuedIPACountBadge(_ count: Int) -> String {
+        localized("queued_ipa_count_badge", en: "\(count) Queued", zh: "已加入 \(count) 个")
+    }
+    public static func queuedIPAListSummary(_ namesCSV: String) -> String {
+        localized("queued_ipa_list_summary", en: "Queued for scan: \(namesCSV)", zh: "已加入扫描列表: \(namesCSV)")
+    }
+    public static var inspectAuditResultsPrompt: String {
+        localized("inspect_audit_results_prompt", en: "View Detailed Audit Findings", zh: "查看本次审计结果详情清单")
+    }
     public static var selectIPAFileButton: String { localized("select_ipa_file_btn", en: "Select .ipa Files (Multi-Select)", zh: "选择 .ipa 文件加入扫描（支持多选）") }
     public static var batchImportIPAButton: String { localized("batch_import_ipa_button", en: "Select .ipa Files (Multi-Select)", zh: "选择 .ipa 文件加入扫描（支持多选）") }
     public static var scanningInProgress: String { localized("scanning_in_progress", en: "Deep analysis in progress...", zh: "正在深度分析...") }
@@ -230,21 +245,7 @@ public enum WQStrings {
     }
 
     public static func shieldPlatformUsageHint(_ platform: ProxyShieldPlatform) -> String {
-        if !isEnglish {
-            return platform.usageHintZh
-        }
-        switch platform {
-        case .surge:
-            return "Import into Surge Modules and enable MitM + CA certificate trust (keep default high-risk TLDs for zero battery overhead)."
-        case .shadowrocket:
-            return "Import into Shadowrocket Config -> Module, and enable HTTPS Decryption + CA trust."
-        case .quantumultX:
-            return "Add to Quantumult X Rewrite -> Resources, and enable both Rewrite and MitM with CA trust."
-        case .loon:
-            return "Import into Loon Plugins, and enable MITM + system root CA trust."
-        case .stash:
-            return "Import into Stash Overrides, and enable MITM + root CA certificate trust."
-        }
+        platform.localizedUsageHint
     }
 
     public static func shieldOneTapInstallLabel(clientName: String) -> String {
@@ -488,6 +489,284 @@ public enum WQStrings {
 
     public static func auditDepthFullDesc(_ depth: AuditDepth) -> String {
         return isEnglish ? depth.localizedNameEn : depth.localizedNameZh
+    }
+
+    public static var ipaMultiSelectHint: String {
+        localized("ipa_multi_select_hint",
+                  en: "💡 Select multiple .ipa / .tipa files at once in Files to queue them; for signed apps in Feather, tap Library → Signed → Export IPA to import.",
+                  zh: "💡 支持在系统『文件』中一次勾选多个 .ipa / .tipa 文件加入扫描列表；Feather 已签名应用可在 Feather「库 → 已签名 → 导出 IPA」后导入。")
+    }
+    public static func ipaQueuedFilesHeader(_ count: Int) -> String {
+        localized("ipa_queued_files_header", en: "Queued Files (\(count))", zh: "已加入扫描文件 (\(count))")
+    }
+    public static var ipaRescanAllButton: String { localized("ipa_rescan_all_btn", en: "Rescan All", zh: "全部重扫") }
+    public static var ipaClearQueueButton: String { localized("ipa_clear_queue_btn", en: "Clear", zh: "清空") }
+
+    public static var builtinWhitelistRuleDesc: String {
+        localized("builtin_whitelist_rule_desc", en: "Self-identity whitelist for WQGuard security scanner", zh: "WQGuard 安全审计器自身身份白名单规则")
+    }
+
+    // MARK: - ScanViewModel Messages
+    public static func pairingImportedSummary(hostPrefix: String) -> String {
+        localized("pairing_imported_summary", en: "Pairing file imported (HostID: \(hostPrefix)…)", zh: "已导入配对文件 (HostID: \(hostPrefix)…)")
+    }
+    public static var clipboardNoValidPairing: String {
+        localized("clipboard_no_valid_pairing",
+                  en: "No valid pairing file found on clipboard. Long-press your .plist pairing file in Files → Copy, then tap here again.",
+                  zh: "剪贴板中未检测到有效的配对文件。请在系统『文件』App 中长按你的配对 .plist 文件点击「拷贝」，再回来点此按钮。")
+    }
+    public static var clipboardUnsupportedPlatform: String {
+        localized("clipboard_unsupported_platform", en: "Clipboard import is not supported on this platform.", zh: "当前平台不支持剪贴板导入")
+    }
+    public static func autoImportedPairingNotice(_ msg: String) -> String {
+        localized("auto_imported_pairing_notice", en: "Auto-loaded pairing file: \(msg)", zh: "已自动加载配对文件：\(msg)")
+    }
+    public static func autoImportedSnapshotNotice(_ msg: String) -> String {
+        localized("auto_imported_snapshot_notice", en: "Auto-loaded snapshot: \(msg)", zh: "已自动加载快照：\(msg)")
+    }
+    public static var autoImportedIPANotice: String {
+        localized("auto_imported_ipa_notice", en: "Auto-queued IPA packages from Files → On My iPhone → WQGuard", zh: "已自动将「我的 iPhone → WQGuard」内的 IPA 加入扫描列表")
+    }
+    public static var autoImportNoticeSeparator: String {
+        isEnglish ? "; " : "；"
+    }
+    public static func snapshotImportedSummary(count: Int) -> String {
+        localized("snapshot_imported_summary", en: "Registry snapshot imported (\(count) installed apps)", zh: "已导入注册表快照（共 \(count) 款已安装应用）")
+    }
+    public static func incomingFileReadFailed(_ filename: String) -> String {
+        localized("incoming_file_read_failed", en: "Unable to read incoming file (\(filename)).", zh: "无法读取传入文件 (\(filename))。")
+    }
+    public static var pairingFileRequiredAlert: String {
+        localized("pairing_file_required_alert", en: "Please import a pairing file (.plist / .mobiledevicepairing) first.", zh: "请先导入配对文件 (.plist / .mobiledevicepairing)。")
+    }
+    public static func connectingViaLocalDevVPN(host: String) -> String {
+        localized("connecting_localdevvpn", en: "Connecting to installation_proxy via LocalDevVPN (\(host))...", zh: "正在通过 LocalDevVPN (\(host)) 连接 installation_proxy...")
+    }
+    public static var localDevVPNCacheName: String {
+        localized("localdevvpn_cache_name", en: "LocalDevVPN Live Cache", zh: "LocalDevVPN 直连缓存")
+    }
+    public static func liveConnectionFailedMessage(_ errorDescription: String) -> String {
+        localized("live_connection_failed",
+                  en: "Pairing file saved, but direct connection failed:\n\(errorDescription)",
+                  zh: "配对文件已保存，但直连未成功：\n\(errorDescription)")
+    }
+    public static func liveRegistryReadNotice(count: Int) -> String {
+        localized("live_registry_read_notice", en: "Fetched live registry for \(count) installed apps", zh: "已直连读取全机 \(count) 款应用注册表")
+    }
+    public static func summaryLiveRegistry(_ count: Int) -> String {
+        localized("summary_live_registry", en: "🟢 Live Registry: \(count)", zh: "🟢 配对直连注册表: \(count) 款")
+    }
+    public static func summarySnapshotRegistry(_ count: Int) -> String {
+        localized("summary_snapshot_registry", en: "📋 Snapshot Registry: \(count)", zh: "📋 注册表快照: \(count) 款")
+    }
+    public static func summaryCorrelatedBinary(_ count: Int) -> String {
+        localized("summary_correlated_binary", en: "🔬 Correlated IPA Audits: \(count)", zh: "🔬 IPA 二进制深扫联动: \(count) 款")
+    }
+    public static func summaryProbeDetected(_ count: Int) -> String {
+        localized("summary_probe_detected", en: "📡 On-Device Probes: \(count)", zh: "📡 本机探针: \(count) 款")
+    }
+    public static func summaryLocalIPAQueue(_ count: Int) -> String {
+        localized("summary_local_ipa_queue", en: "📦 Local IPA Queue: \(count) audited", zh: "📦 本地 IPA 队列深扫: \(count) 款")
+    }
+
+    // MARK: - Scan Sources & Pairing Sheet + Step-by-Step Tutorial
+    public static var scanConfigNavTitle: String { localized("scan_config_nav_title", en: "Scan Sources & Pairing", zh: "已安装应用扫描源") }
+    public static var tutorialGroupTitle: String { localized("tutorial_group_title", en: "📖 Step-by-Step Setup & Export Guide (Mac · USB · Snapshot · VPN)", zh: "📖 保姆级图文步骤教程（Mac 软件安装 · 连线 · 导出）") }
+    public static var tutorialSectionHeader: String { localized("tutorial_section_header", en: "Getting Started · Step-by-Step Guide", zh: "新手必读 · 详细操作指南") }
+    public static var tutorialIntroHeadline: String { localized("tutorial_intro_headline", en: "💡 Choose EITHER Mode A OR Mode B (no need to enable both)", zh: "💡 方式 A 与 方式 B 二选一即可（无需同时开启）") }
+    public static var tutorialIntroBullets: String {
+        localized("tutorial_intro_bullets",
+                  en: "• **Recommended for Beginners (Mode B)**: No on-device VPN or IP tweaks needed. Export `installed_apps.json` on your Mac in seconds and AirDrop it to your iPhone.\n• **Recommended for Power Users (Mode A)**: Import a pairing file once from your Mac, then scan wirelessly anytime anywhere using `LocalDevVPN`.",
+                  zh: "• **新手最推荐「方式 B」**：不用在手机装 VPN、不用改 IP，连上 Mac 电脑几秒钟导出 `installed_apps.json` 隔空投送到手机即可扫全机应用。\n• **进阶推荐「方式 A」**：只需用 Mac 导出一次配对文件导入手机，以后出门在外无需电脑，打开 `LocalDevVPN` 就能随时无线直连扫描！")
+    }
+    public static var tutorialCategoryPicker: String { localized("tutorial_category_picker", en: "Guide Section", zh: "教程分类") }
+    public static var tutorialTabModeB: String { localized("tutorial_tab_mode_b", en: "Mode B · Mac Export", zh: "方式 B · Mac导出") }
+    public static var tutorialTabModeA: String { localized("tutorial_tab_mode_a", en: "Mode A · Wireless VPN", zh: "方式 A · 无线直连") }
+    public static var tutorialTabEngine2: String { localized("tutorial_tab_engine2", en: "Engine 2 · Deep IPA", zh: "引擎 2 · IPA深扫") }
+
+    public static var cliExportEchoText: String {
+        localized("cli_export_echo_text", en: "✅ Exported to Desktop: ~/Desktop/installed_apps.json", zh: "✅ 已导出到桌面: ~/Desktop/installed_apps.json")
+    }
+    public static var cliDeviceCtlEchoText: String {
+        localized("cli_devicectl_echo_text", en: "✅ Exported ~/Desktop/installed_apps.json", zh: "✅ 已导出 ~/Desktop/installed_apps.json")
+    }
+
+    // Engine 1A
+    public static var engine1ATitle: String { localized("engine1a_title", en: "Mode A: LocalDevVPN Paired Live Registry", zh: "方式 A：LocalDevVPN 配对直连本机注册表") }
+    public static var engine1ANoPairingPlaceholder: String { localized("engine1a_no_pairing", en: "No pairing file imported (.plist / .mobiledevicepairing)", zh: "未导入配对文件（支持 .plist / .mobiledevicepairing 配对文件）") }
+    public static var engine1AGatewayLabel: String { localized("engine1a_gateway_label", en: "Loopback Gateway IP", zh: "环回网关地址") }
+    public static func engine1ASubnetMismatchTitle(wifiIP: String) -> String {
+        localized("engine1a_subnet_mismatch", en: "iOS 26.4+ / 27 Subnet Check (Wi-Fi: \(wifiIP))", zh: "iOS 26.4+ / 27 子网校验提示（当前 Wi-Fi: \(wifiIP)）")
+    }
+    public static func engine1ASubnetAlignedTitle(wifiIP: String) -> String {
+        localized("engine1a_subnet_aligned", en: "Aligned with Current Wi-Fi Subnet (\(wifiIP))", zh: "已对齐当前 Wi-Fi 同网段（\(wifiIP)）")
+    }
+    public static var engine1ASubnetHint: String {
+        localized("engine1a_subnet_hint",
+                  en: "Recent iOS lockdownd drops 10.7.0.x tunnels outside your active Wi-Fi subnet (EOF). If direct connection closes, update LocalDevVPN to the matching subnet addresses below:",
+                  zh: "新系统 lockdownd 会拦截不在当前 Wi-Fi 网段内的 10.7.0.x 隧道。若直连报 EOF 关闭，请将 LocalDevVPN 改为下方同网段地址并重连：")
+    }
+    public static var engine1ACopiedTunnel: String { localized("engine1a_copied_tunnel", en: "✅ Copied Tunnel", zh: "✅ 已复制 Tunnel") }
+    public static func engine1ACopyTunnel(_ cidr: String) -> String { localized("engine1a_copy_tunnel", en: "Copy Tunnel: \(cidr)", zh: "复制 Tunnel: \(cidr)") }
+    public static var engine1ACopiedDevice: String { localized("engine1a_copied_device", en: "✅ Copied & Applied", zh: "✅ 已复制并设为网关") }
+    public static func engine1ACopyDevice(_ cidr: String) -> String { localized("engine1a_copy_device", en: "Copy Device: \(cidr)", zh: "复制 Device: \(cidr) 并填入") }
+    public static var engine1AReplacePairing: String { localized("engine1a_replace_pairing", en: "Replace Pairing File from Files (.plist)", zh: "从文件选择更换配对文件 (.plist)") }
+    public static var engine1APickPairing: String { localized("engine1a_pick_pairing", en: "Option 1: Select Pairing File from Files (.plist / .mobiledevicepairing)", zh: "方式 1：从「文件」选择配对文件 (.plist / .mobiledevicepairing)") }
+    public static var engine1APastePairing: String { localized("engine1a_paste_pairing", en: "Option 2: Paste Pairing Record from Clipboard", zh: "方式 2：从剪贴板一键粘贴配对文件（在系统文件长按 .plist 点拷贝）") }
+    public static var engine1AConnectAndScan: String { localized("engine1a_connect_and_scan", en: "Connect to installation_proxy & Scan All Apps", zh: "立即直连 installation_proxy 并扫描全机应用") }
+    public static var engine1APairingRemoved: String { localized("engine1a_pairing_removed", en: "Saved pairing file removed", zh: "已移除配对文件") }
+    public static var engine1ARemovePairing: String { localized("engine1a_remove_pairing", en: "Remove Saved Pairing File", zh: "移除已保存的配对文件") }
+    public static var engine1AHeader: String { localized("engine1a_header", en: "Engine 1A · Live Pairing Direct (or use 1B)", zh: "引擎 1A · 本机配对直连（与 1B 二选一）") }
+    public static var engine1AFooter: String {
+        localized("engine1a_footer",
+                  en: "💡 Besides the picker or clipboard, you can place a .plist / .mobiledevicepairing file into Files → On My iPhone → WQGuard for automatic detection.",
+                  zh: "💡 除了点选或剪贴板导入外，你也可以在系统『文件』App 中直接把配对 .plist 移入『我的 iPhone → WQGuard』文件夹，返回本页即会自动识别！")
+    }
+
+    // Engine 1B
+    public static var engine1BTitle: String { localized("engine1b_title", en: "Mode B: Import Installed-App Registry Snapshot", zh: "方式 B：导入已安装应用注册表快照") }
+    public static func engine1BCachedSnapshot(filename: String, count: Int) -> String {
+        localized("engine1b_cached_snapshot", en: "Cached snapshot: \(filename) (\(count) installed apps)", zh: "已缓存快照: \(filename)（共 \(count) 款已安装应用）")
+    }
+    public static var engine1BSupportedFormats: String { localized("engine1b_supported_formats", en: "Supports Xcode devicectl (.json), pymobiledevice3 (.json), or .plist", zh: "支持 Mac 原生 devicectl (.json)、pymobiledevice3 (.json) 或 .plist") }
+    public static var engine1BSelectSnapshot: String { localized("engine1b_select_snapshot", en: "Select Registry Snapshot (.json / .plist / .xml)", zh: "选择注册表快照文件 (.json / .plist / .xml)") }
+    public static var engine1BCopyPymobile: String { localized("engine1b_copy_pymobile", en: "Copy pymobiledevice3 Export Command (Full Entitlements)", zh: "复制 pymobiledevice3 导出到桌面命令（推荐·全量权限）") }
+    public static var engine1BCopyDeviceCtl: String { localized("engine1b_copy_devicectl", en: "Copy Xcode devicectl Export Command (No extra tools)", zh: "复制 Xcode devicectl 导出命令（已装 Xcode 免插件）") }
+    public static var commonCopiedLabel: String { localized("common_copied", en: "Copied", zh: "已复制") }
+    public static var engine1BSnapshotCleared: String { localized("engine1b_snapshot_cleared", en: "Cached snapshot cleared", zh: "已清除快照缓存") }
+    public static var engine1BClearSnapshot: String { localized("engine1b_clear_snapshot", en: "Clear Cached Snapshot Data", zh: "清除已缓存的快照数据") }
+    public static var engine1BIncludeAppStoreToggle: String { localized("engine1b_include_appstore", en: "Also show third-party App Store / TestFlight apps (excludes Apple OS)", zh: "同时展示第三方 App Store / TestFlight 应用（已排除苹果系统服务）") }
+    public static var engine1BHeader: String { localized("engine1b_header", en: "Engine 1B · Offline Registry Snapshot (No VPN, 100% iOS 27 Compatible)", zh: "引擎 1B · 离线注册表快照（无需 VPN，100% 兼容 iOS 27）") }
+    public static var engine1BFooter: String {
+        localized("engine1b_footer",
+                  en: "pymobiledevice3 is recommended as it exports complete Entitlements, Team IDs, and Signer identities across sideloaded, enterprise, TestFlight, and App Store apps to ~/Desktop/installed_apps.json. AirDrop the file to your iPhone to audit.",
+                  zh: "推荐优先使用 pymobiledevice3 导出命令（可读取企业签、个人侧载、TestFlight 与官方应用的完整 Entitlements 权限表并直接输出到 Mac 桌面 ~/Desktop/installed_apps.json），隔空投送到手机即可一键完成全盘审计。")
+    }
+
+    // Engine 2
+    public static var engine2AddIPAButton: String { localized("engine2_add_ipa_btn", en: "Select .ipa Files to Queue (Multi-Select)", zh: "选择 .ipa 文件加入扫描列表（支持多选）") }
+    public static var engine2EmptyQueue: String {
+        localized("engine2_empty_queue",
+                  en: "No local .ipa files queued yet. Tap above to pick multiple .ipa / .tipa files in the Files app.",
+                  zh: "尚未加入本地 .ipa 安装包。可点击上方按钮在系统『文件』中一次勾选多个 .ipa / .tipa 文件加入扫描列表。")
+    }
+    public static func engine2QueuedSummary(_ count: Int) -> String {
+        localized("engine2_queued_summary", en: "Queued for scan (\(count) IPA files)", zh: "已加入扫描列表（共 \(count) 个 IPA）")
+    }
+    public static var engine2ClearedBanner: String { localized("engine2_cleared_banner", en: "Cleared all queued IPA files", zh: "已清空全部已加入的 IPA 扫描文件") }
+    public static var engine2ClearAllButton: String { localized("engine2_clear_all_btn", en: "Clear All Queued IPA Files", zh: "清空全部已加入的 IPA 文件") }
+    public static var engine2Header: String { localized("engine2_header", en: "Engine 2 · Local IPA Scan Queue (Multi-Select)", zh: "引擎 2 · 本地 IPA 扫描列表（支持多选）") }
+    public static var engine2Footer: String {
+        localized("engine2_footer",
+                  en: "Queued .ipa / .tipa files are cached and automatically correlated by Bundle ID with the installed registry for deep Mach-O private symbol and dylib audits. For signed apps in Feather, tap Library → Signed → Export IPA.",
+                  zh: "加入列表的所有 .ipa / .tipa 文件会自动缓存，并在扫描时按 Bundle ID 与全机注册表联动合并，深度审计 Mach-O 私有符号与注入动态库。Feather 已签应用可在 Feather「库 → 已签名 → 导出 IPA」后导入。")
+    }
+
+    // Engine 3
+    public static var engine3Toggle: String { localized("engine3_toggle", en: "Enable on-device signer & privileged tool probe", zh: "启用本机已安装签名器与高权限环境探针") }
+    public static var engine3Header: String { localized("engine3_header", en: "Engine 3 · Zero-Config On-Device Presence Probe", zh: "引擎 3 · 本机零配置在位探针（方案三）") }
+    public static var engine3Footer: String {
+        localized("engine3_footer",
+                  en: "Checks standard iOS URL schemes to detect installed signers and privileged tools such as ESign, Feather, SideStore, StikDebug, Filza, TrollStore, and Sileo.",
+                  zh: "通过标准系统接口探测本机是否已安装全能签、Feather、SideStore、StikDebug 以及 Filza、TrollStore、Sileo 等高权限容器环境工具。")
+    }
+
+    // Tutorial Steps & Banners
+    public static var tutStep1Badge: String { localized("tut_step1_badge", en: "Step 1", zh: "第 1 步") }
+    public static var tutStep2Badge: String { localized("tut_step2_badge", en: "Step 2", zh: "第 2 步") }
+    public static var tutStep3Badge: String { localized("tut_step3_badge", en: "Step 3", zh: "第 3 步") }
+    public static var tutStep4Badge: String { localized("tut_step4_badge", en: "Step 4", zh: "第 4 步") }
+    public static var tutOverviewBadge: String { localized("tut_overview_badge", en: "Overview", zh: "作用说明") }
+    public static var tutMethod1Badge: String { localized("tut_method1_badge", en: "Method 1", zh: "方法 ①") }
+    public static var tutMethod2Badge: String { localized("tut_method2_badge", en: "Method 2", zh: "方法 ②") }
+
+    public static var tutModeBStep1Title: String { localized("tut_mb_s1_title", en: "Open Terminal on Mac & install pymobiledevice3", zh: "在 Mac 上打开「终端」并安装 pymobiledevice3") }
+    public static var tutModeBStep1Detail: String {
+        localized("tut_mb_s1_detail",
+                  en: "1. Press Command ⌘ + Space on your Mac, type Terminal, and hit Return.\n2. Tap the button below to copy the install command, paste it into Terminal, and press Return (one-time setup; if macOS asks to install Command Line Tools click Install; if Xcode is already installed you can skip to the devicectl button below):",
+                  zh: "1. 在 Mac 键盘同时按下 Command ⌘ + 空格，输入「终端」(Terminal) 回车打开。\n2. 点击下方按钮复制安装命令，粘贴到 Mac 终端窗口按回车运行（只需安装一次；若弹窗提示安装命令行工具点「安装」即可；若你电脑已安装苹果官方 Xcode 也可跳过此步用下方 Xcode 命令）：")
+    }
+    public static var tutModeBInstallCopied: String { localized("tut_mb_install_copied", en: "✅ Copied Mac install command", zh: "✅ 已复制 Mac 安装命令") }
+    public static var tutModeBInstallCopyBtn: String { localized("tut_mb_install_btn", en: "📋 Copy Mac install command (brew / pip)", zh: "📋 复制 Mac 安装工具命令 (brew / pip)") }
+
+    public static var tutModeBStep2Title: String { localized("tut_mb_s2_title", en: "Connect iPhone to Mac via USB & tap Trust", zh: "数据线连接 iPhone 与 Mac，点击「信任」") }
+    public static var tutModeBStep2Detail: String {
+        localized("tut_mb_s2_detail",
+                  en: "1. Connect your iPhone to your Mac using a data-capable USB / USB-C cable and keep it unlocked on the Home Screen.\n2. When prompted with \"Trust This Computer?\" on iPhone, tap Trust and enter your passcode.\n3. Open Finder on your Mac, click your iPhone in the sidebar, and click Trust if shown.",
+                  zh: "1. 用支持数据传输的 USB / Type-C 数据线将 iPhone 插入 Mac，解锁手机保持在桌面亮屏。\n2. 手机屏幕弹出「要信任此电脑吗？」时，点击「信任」并输入手机锁屏密码。\n3. 打开 Mac 左下角「访达」(Finder)，在左侧栏点一下你的 iPhone，若右侧也显示「信任」按钮请点一下。")
+    }
+
+    public static var tutModeBStep3Title: String { localized("tut_mb_s3_title", en: "Export snapshot to Mac Desktop in Terminal", zh: "在 Mac 终端一键导出快照文件到桌面") }
+    public static var tutModeBStep3Detail: String {
+        localized("tut_mb_s3_detail",
+                  en: "Tap below to copy the export command, paste it via Universal Clipboard into Mac Terminal, and hit Return. Wait 3–8 seconds until \"✅ Exported\" prints — `installed_apps.json` will appear on your Mac Desktop:",
+                  zh: "点击下方按钮复制导出命令，可通过微信/通用剪贴板发到 Mac，粘贴进「终端」按回车。等待约 3～8 秒看到“✅ 已导出到桌面”后，Mac 桌面就会出现 installed_apps.json 文件：")
+    }
+    public static var tutModeBExportCopied: String { localized("tut_mb_export_copied", en: "✅ Copied Desktop export command", zh: "✅ 已复制导出到桌面命令") }
+    public static var tutModeBExportCopyBtn: String { localized("tut_mb_export_btn", en: "📋 Copy export command (saves to Mac Desktop)", zh: "📋 复制导出命令（自动存到 Mac 桌面）") }
+
+    public static var tutModeBStep4Title: String { localized("tut_mb_s4_title", en: "AirDrop to iPhone & import into WQGuard", zh: "隔空投送到 iPhone 并导入 WQGuard") }
+    public static var tutModeBStep4Detail: String {
+        localized("tut_mb_s4_detail",
+                  en: "1. Right-click `installed_apps.json` on your Mac Desktop → Share → AirDrop to your iPhone.\n2. Choose \"Open in WQGuard\" to scan immediately, or \"Save to Files\" and select it via Engine 1B below.",
+                  zh: "1. 在 Mac 桌面上右键点击 installed_apps.json → 选择「共享」→「隔空投送 (AirDrop)」发给你的 iPhone（或通过微信文件传输助手发送）。\n2. 手机收到后直接选「用 WQGuard 打开」自动开扫；或者选「存储到“文件”」，再点本页下方引擎 1B 的「选择注册表快照文件」选中它即可！")
+    }
+
+    public static var tutModeAStep1Title: String { localized("tut_ma_s1_title", en: "iPhone Setup: Install free app LocalDevVPN", zh: "手机端下载什么？安装免费 App「LocalDevVPN」") }
+    public static var tutModeAStep1Detail: String {
+        localized("tut_ma_s1_detail",
+                  en: "Search the App Store on your iPhone and install the free app LocalDevVPN (if you already have StikDebug or SideStore installed, you can also use their built-in loopback tunnel).",
+                  zh: "打开 iPhone 的 App Store，搜索并免费下载安装「LocalDevVPN」（如果你手机上已经装有 StikDebug 或 SideStore，也可直接使用它们内置的隧道）。")
+    }
+    public static var tutModeAStep2Title: String { localized("tut_ma_s2_title", en: "Mac Setup: Generate pairing record with jitterbugpair", zh: "Mac 端下载什么？用 jitterbugpair 生成配对文件") }
+    public static var tutModeAStep2Detail: String {
+        localized("tut_ma_s2_detail",
+                  en: "• Already have a `.mobiledevicepairing` or `.plist` from SideStore / StikDebug? Skip straight to Step 3 and reuse it!\n• First-time setup:\n  1. Download `jitterbugpair-macos.zip` from `github.com/osy/JitterBug/releases` and unzip `jitterbugpair`;\n  2. Connect iPhone to Mac via USB, unlock screen, and tap Trust;\n  3. Open Terminal on Mac, run `cd ~/Desktop`, then drag `jitterbugpair` into Terminal and press Return (if macOS blocks an unidentified developer, allow it in System Settings → Privacy & Security and run again);\n  4. `<Device-UDID>.mobiledevicepairing` will be created on your Mac Desktop.",
+                  zh: "• 如果你以前给 SideStore / StikDebug 生成过 .mobiledevicepairing 或 .plist 配对文件，直接跳到第 3 步复用即可！\n• 首次生成操作：\n  1. 在 Mac 浏览器打开 github.com/osy/JitterBug/releases 下载 jitterbugpair-macos.zip 并双击解压出 jitterbugpair；\n  2. 数据线把 iPhone 连上 Mac，解锁手机亮屏点「信任」输密码；\n  3. 打开 Mac「终端」，先输入 cd ~/Desktop 回车，再把解压出的 jitterbugpair 拖进终端窗口按回车运行（若 Mac 拦截未验证开发者，前往 Mac「系统设置 → 隐私与安全性」底部点「仍要打开」后再运行一次）；\n  4. 运行成功后，Mac 桌面即会生成 <手机UDID>.mobiledevicepairing 配对文件！")
+    }
+    public static var tutModeACdCopied: String { localized("tut_ma_cd_copied", en: "✅ Copied cd ~/Desktop", zh: "✅ 已复制 cd ~/Desktop") }
+    public static var tutModeACdCopyBtn: String { localized("tut_ma_cd_btn", en: "📋 Copy Desktop directory command (cd ~/Desktop)", zh: "📋 复制终端切换桌面目录命令 (cd ~/Desktop)") }
+
+    public static var tutModeAStep3Title: String { localized("tut_ma_s3_title", en: "Transfer pairing record & import into Engine 1A", zh: "把配对文件传到手机并导入引擎 1A") }
+    public static var tutModeAStep3Detail: String {
+        localized("tut_ma_s3_detail",
+                  en: "Right-click `<UDID>.mobiledevicepairing` on your Mac Desktop → Share → AirDrop to iPhone → Save to Files (e.g. On My iPhone → WQGuard), then import it under Engine 1A below.",
+                  zh: "在 Mac 桌面右键该 .mobiledevicepairing 文件 →「共享 → 隔空投送」发到 iPhone → 选「存储到“文件”」（建议存到『我的 iPhone → WQGuard』目录），然后点本页下方引擎 1A 的「从文件选择配对文件」导入。")
+    }
+    public static var tutModeAStep4Title: String { localized("tut_ma_s4_title", en: "Enable VPN & Align Subnet (iOS 26.4+ / iOS 27)", zh: "开启 VPN 直连（iOS 26.4+ / iOS 27 子网对齐）") }
+    public static var tutModeAStep4Detail: String {
+        localized("tut_ma_s4_detail",
+                  en: "• iOS 26.3 or earlier: Open LocalDevVPN, tap Connect, then tap \"Connect to installation_proxy & Scan\" below.\n• iOS 26.4+ / iOS 27 required: Apple requires the tunnel to match your active Wi-Fi subnet. While on Wi-Fi, tap Copy Tunnel & Copy Device in the orange notice below, paste them into LocalDevVPN ⚙️ Settings, reconnect VPN, then scan below (allow Local Network access if prompted).",
+                  zh: "• iOS 26.3 及更早：打开 LocalDevVPN 点 Connect 连接，回本页点「立即直连扫描」即可。\n• iOS 26.4+ / iOS 27 必做：苹果要求隧道与当前 Wi-Fi 同网段。保持手机连 Wi-Fi，先点下方橙色提示框的「复制 Tunnel」，打开 LocalDevVPN 右上角 ⚙️ 设置粘贴到 Tunnel IP；再回本页点「复制 Device 并填入」粘贴到 LocalDevVPN 的 Device IP，保存并重连 VPN，回 WQGuard 点「立即直连扫描」（首次弹窗允许本地网络权限）即可 1 秒扫完全机！")
+    }
+
+    public static var tutEngine2OverviewTitle: String { localized("tut_e2_overview_title", en: "Why combine Engine 2 multi-select .ipa scanning?", zh: "为什么可以配合引擎 2 多选加入 .ipa 文件？") }
+    public static var tutEngine2OverviewDetail: String {
+        localized("tut_e2_overview_detail",
+                  en: "Mode A / B audits signing identities, App Groups, and entitlements across all installed apps, while iOS sandbox isolation blocks reading other apps' Mach-O executables directly from disk. Adding `.ipa` files via Engine 2 automatically correlates them by Bundle ID with the registry, upgrading results to \"🔬 Full Binary Audit\" to catch containermanagerd exploit symbols and injected dylibs.",
+                  zh: "方式 A / B 能查出全机所有应用的签名证书、App Groups 与越权权限表，而受 iOS 沙盒隔离限制无法直接拆包其他已安装应用的主程序。通过下方「引擎 2」将侧载应用的 .ipa 文件加入扫描列表后，WQGuard 会按 Bundle ID 自动将注册表与二进制合并升级为「🔬 全量深扫」，精准检出 containermanagerd 漏洞符号与注入动态库！")
+    }
+    public static var tutEngine2Method1Title: String { localized("tut_e2_m1_title", en: "Multi-select local .ipa files from Files", zh: "手动多选本地 .ipa 文件加入扫描列表") }
+    public static var tutEngine2Method1Detail: String {
+        localized("tut_e2_m1_detail",
+                  en: "Tap \"Select .ipa Files to Queue\" under Engine 2 below, browse in Files (Downloads, Feather/Unsigned, etc.), select multiple `.ipa` / `.tipa` files at once, and tap Open.",
+                  zh: "点击本页下方引擎 2 的「选择 .ipa 文件加入扫描列表（支持多选）」，进入系统『文件』App（例如「下载项」、『我的 iPhone → Feather → Unsigned』或任意保存安装包的目录），可一次勾选多个 .ipa / .tipa 文件点右上角「打开」批量加入扫描！")
+    }
+    public static var tutEngine2Method2Title: String { localized("tut_e2_m2_title", en: "Export signed IPA directly from Feather / ESign", zh: "在 Feather / 全能签内导出已签名 IPA") }
+    public static var tutEngine2Method2Detail: String {
+        localized("tut_e2_m2_detail",
+                  en: "If tweaks (.dylib) were injected during signing, open Feather → Library → Signed → tap the app → Export IPA → Open in WQGuard (or Save to Files and multi-select below).",
+                  zh: "如果某个应用在签名时额外注入了插件（dylib），可打开 Feather → 底部「库」→ 在「已签名」列表点击该应用 → 选择「导出 IPA」→ 直接选「WQGuard」（或先「存储到“文件”」再回 WQGuard 多选导入）。")
+    }
+
+    public static func bannerClipboardPairingScanning(_ summary: String) -> String {
+        localized("banner_clipboard_pairing_scanning", en: "✅ Clipboard imported: \(summary) — connecting & scanning...", zh: "✅ 剪贴板导入成功：\(summary) — 正在直连扫描...")
+    }
+    public static func bannerFilePairingScanning(_ summary: String) -> String {
+        localized("banner_file_pairing_scanning", en: "\(summary) — connecting via LocalDevVPN...", zh: "\(summary) — 正在通过 LocalDevVPN 直连扫描...")
+    }
+    public static func bannerQueuedIPAsScanning(_ count: Int) -> String {
+        localized("banner_queued_ipas_scanning", en: "✅ Added \(count) IPA(s) to queue; scanning...", zh: "✅ 已加入 \(count) 个 IPA 至扫描列表，正在执行扫描...")
     }
 
     // Threat Indicators

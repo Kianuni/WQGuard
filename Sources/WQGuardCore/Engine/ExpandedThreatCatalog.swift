@@ -18,12 +18,24 @@ public enum ExpandedThreatCatalog {
         public let bundleIdPatterns: [String]
         public let displayNames: [String]
         public let description: String
+        public let descriptionEn: String
 
-        public init(name: String, bundleIdPatterns: [String], displayNames: [String], description: String) {
+        public init(
+            name: String,
+            bundleIdPatterns: [String],
+            displayNames: [String],
+            description: String,
+            descriptionEn: String = ""
+        ) {
             self.name = name
             self.bundleIdPatterns = bundleIdPatterns
             self.displayNames = displayNames
             self.description = description
+            self.descriptionEn = descriptionEn.isEmpty ? description : descriptionEn
+        }
+
+        public var localizedDescription: String {
+            WQLocale.pick(en: descriptionEn, zh: description)
         }
     }
 
@@ -32,55 +44,64 @@ public enum ExpandedThreatCatalog {
             name: "MetaMask",
             bundleIdPatterns: ["io.metamask", "metamask"],
             displayNames: ["metamask", "小狐狸"],
-            description: "主流 Web3 以太坊钱包，常见伪造版本用于窃取助记词与私钥"
+            description: "主流 Web3 以太坊钱包，常见伪造版本用于窃取助记词与私钥",
+            descriptionEn: "Major Web3 Ethereum wallet; fake builds commonly harvest seed phrases and private keys"
         ),
         ImpersonatedBrand(
             name: "Trust Wallet",
             bundleIdPatterns: ["com.sixdays.trust", "trustwallet"],
             displayNames: ["trust wallet", "trustwallet"],
-            description: "多链加密货币钱包，常见侧载重打包用于注入资产划转后门"
+            description: "多链加密货币钱包，常见侧载重打包用于注入资产划转后门",
+            descriptionEn: "Multi-chain crypto wallet; sideloaded clones frequently embed asset-draining backdoors"
         ),
         ImpersonatedBrand(
             name: "Phantom",
             bundleIdPatterns: ["app.phantom", "phantom"],
             displayNames: ["phantom"],
-            description: "Solana / 多链钱包，钓鱼重打包高发目标"
+            description: "Solana / 多链钱包，钓鱼重打包高发目标",
+            descriptionEn: "Solana / multi-chain wallet; frequent target of phishing repackages"
         ),
         ImpersonatedBrand(
             name: "OKX",
             bundleIdPatterns: ["com.okex.ios", "com.okinc.okx", "com.okx.ios"],
             displayNames: ["okx", "欧易"],
-            description: "加密货币交易所，钓鱼包通常伪装为企业版以盗取登录令牌与资金"
+            description: "加密货币交易所，钓鱼包通常伪装为企业版以盗取登录令牌与资金",
+            descriptionEn: "Crypto exchange app; phishing builds pose as enterprise apps to steal login tokens and funds"
         ),
         ImpersonatedBrand(
             name: "Binance",
             bundleIdPatterns: ["com.binance.binance", "com.binance.ios"],
             displayNames: ["binance", "币安"],
-            description: "全球最大加密资产平台，非法分发包极高概率为账户凭证嗅探木马"
+            description: "全球最大加密资产平台，非法分发包极高概率为账户凭证嗅探木马",
+            descriptionEn: "Global crypto exchange; unofficial sideload builds are very likely credential-stealing trojans"
         ),
         ImpersonatedBrand(
             name: "TokenPocket",
             bundleIdPatterns: ["vip.mytokenpocket", "tokenpocket"],
             displayNames: ["tokenpocket", "tp钱包"],
-            description: "多链移动钱包，侧载伪装常用于自动签名恶意合约"
+            description: "多链移动钱包，侧载伪装常用于自动签名恶意合约",
+            descriptionEn: "Multi-chain mobile wallet; sideloaded clones are often used to auto-sign malicious contracts"
         ),
         ImpersonatedBrand(
             name: "imToken",
             bundleIdPatterns: ["im.token.app", "org.consenlabs.token"],
             displayNames: ["imtoken"],
-            description: "去中心化钱包，二次打包常见后门"
+            description: "去中心化钱包，二次打包常见后门",
+            descriptionEn: "Decentralized crypto wallet; repackaged builds frequently carry backdoors"
         ),
         ImpersonatedBrand(
             name: "Bitget",
             bundleIdPatterns: ["com.bitkeep.wallet", "com.bitget.ios"],
             displayNames: ["bitget", "bitkeep"],
-            description: "Web3 钱包与交易所应用"
+            description: "Web3 钱包与交易所应用",
+            descriptionEn: "Web3 wallet and exchange app"
         ),
         ImpersonatedBrand(
             name: "Telegram",
             bundleIdPatterns: ["org.telegram.messenger", "org.telegram.telegram-ios"],
             displayNames: ["telegram", "纸飞机", "tg"],
-            description: "加密通讯软件，非官方重打包包常内嵌会话历史记录上传后门"
+            description: "加密通讯软件，非官方重打包包常内嵌会话历史记录上传后门",
+            descriptionEn: "Encrypted messenger; unofficial repackages often embed session token and chat exfiltration backdoors"
         )
     ]
 
@@ -168,7 +189,10 @@ public enum ExpandedThreatCatalog {
                 if dylib.contains(fw) {
                     indicators.append(ThreatIndicator(
                         signature: fw,
-                        description: "应用非法链接了 Apple 内部相册私有框架 \(fw)。可在未经 TCC 提示下直接读取用户相册 (CVE-2026-112676 攻击向量)。",
+                        description: WQLocale.pick(
+                            en: "Unauthorized linkage to private Apple Photos framework \(fw), enabling silent photo library access without TCC consent (CVE-2026-112676 vector).",
+                            zh: "应用非法链接了 Apple 内部相册私有框架 \(fw)。可在未经 TCC 提示下直接读取用户相册 (CVE-2026-112676 攻击向量)。"
+                        ),
                         category: "Private Photos Bypass",
                         location: "LC_LOAD_DYLIB: \(dylib)",
                         severity: .highRisk
@@ -185,7 +209,10 @@ public enum ExpandedThreatCatalog {
                 if matched {
                     indicators.append(ThreatIndicator(
                         signature: targetSym,
-                        description: "二进制包含私有相册调用符号 \(sym)，疑似利用私有接口窃取系统照片。",
+                        description: WQLocale.pick(
+                            en: "Binary imports private Apple Photos symbol \(sym), indicating potential unauthorized photo exfiltration.",
+                            zh: "二进制包含私有相册调用符号 \(sym)，疑似利用私有接口窃取系统照片。"
+                        ),
                         category: "Private Photos Bypass",
                         location: "LC_SYMTAB: \(sym)",
                         severity: .highRisk
@@ -203,7 +230,10 @@ public enum ExpandedThreatCatalog {
             if key.hasPrefix(photosEntitlementPrefix) || key == photosBourgeoisieEntitlement {
                 indicators.append(ThreatIndicator(
                     signature: key,
-                    description: "声明了 Apple 内部相册私有 Entitlement (\(key))，可规避相册隐私受控保护。",
+                    description: WQLocale.pick(
+                        en: "Declares restricted Apple private Photos entitlement (\(key)), bypassing TCC privacy protections.",
+                        zh: "声明了 Apple 内部相册私有 Entitlement (\(key))，可规避相册隐私受控保护。"
+                    ),
                     category: "Private Photos Bypass",
                     location: "CSBlob Entitlements",
                     severity: .highRisk
@@ -227,7 +257,10 @@ public enum ExpandedThreatCatalog {
                 if lower.contains(pattern) {
                     indicators.append(ThreatIndicator(
                         signature: pattern,
-                        description: "应用内嵌打包了 libbrotli 动态库 (\(dylib))。请核验版本是否 >= 1.2.1，早期版本存在 CVSS 9.2 堆溢出远程代码执行高危漏洞 (CVE-2026-111497 / HTTP2Shell)。",
+                        description: WQLocale.pick(
+                            en: "Bundles embedded libbrotli library (\(dylib)). Verify bundled version is >= 1.2.1; earlier versions suffer from a CVSS 9.2 heap OOB write RCE (CVE-2026-111497 / HTTP2Shell).",
+                            zh: "应用内嵌打包了 libbrotli 动态库 (\(dylib))。请核验版本是否 >= 1.2.1，早期版本存在 CVSS 9.2 堆溢出远程代码执行高危漏洞 (CVE-2026-111497 / HTTP2Shell)。"
+                        ),
                         category: "Supply Chain Notice (libbrotli)",
                         location: "LC_LOAD_DYLIB: \(dylib)",
                         severity: .caution
@@ -242,7 +275,10 @@ public enum ExpandedThreatCatalog {
             if brotliSymbols.contains(cleanSym) || brotliSymbols.contains(sym) {
                 indicators.append(ThreatIndicator(
                     signature: cleanSym,
-                    description: "二进制包含 libbrotli 解码符号 \(sym)。若内嵌库未打补丁，可能受 CVE-2026-111497 漏洞威胁。",
+                    description: WQLocale.pick(
+                        en: "Binary contains libbrotli decoder symbol \(sym). Unpatched static builds may be exposed to CVE-2026-111497.",
+                        zh: "二进制包含 libbrotli 解码符号 \(sym)。若内嵌库未打补丁，可能受 CVE-2026-111497 漏洞威胁。"
+                    ),
                     category: "Supply Chain Notice (libbrotli)",
                     location: "LC_SYMTAB: \(sym)",
                     severity: .caution
@@ -338,7 +374,10 @@ public enum ExpandedThreatCatalog {
             if matchBid || matchName {
                 indicators.append(ThreatIndicator(
                     signature: "IMPERSONATION:\(brand.name)",
-                    description: "高危告警：侧载未加密软件包冒充知名应用 '\(brand.name)'。官方应用仅通过 App Store 发行，非官方重打包版本为高危助记词/资金窃取木马（Drainer）！\(brand.description)。",
+                    description: WQLocale.pick(
+                        en: "HIGH RISK: Sideloaded unencrypted package impersonates '\(brand.name)'. Official releases ship exclusively via the App Store; unofficial repackages are prime vectors for seed-phrase/fund drainers. \(brand.localizedDescription).",
+                        zh: "高危告警：侧载未加密软件包冒充知名应用 '\(brand.name)'。官方应用仅通过 App Store 发行，非官方重打包版本为高危助记词/资金窃取木马（Drainer）！\(brand.description)。"
+                    ),
                     category: "Wallet/Messenger Impersonation",
                     location: "BundleID: \(bundleId ?? "nil"), Name: \(displayName ?? "nil")",
                     severity: .highRisk
@@ -363,7 +402,10 @@ public enum ExpandedThreatCatalog {
                 if dylib.contains(hooker) {
                     indicators.append(ThreatIndicator(
                         signature: hooker,
-                        description: "二进制加载了越狱挂钩与注入框架 \(hooker)，表明该软件包已被第三方二次篡改并具备动态方法挂钩能力。",
+                        description: WQLocale.pick(
+                            en: "Binary links hooking/injection framework \(hooker), indicating third-party tampering and runtime method-swizzling capabilities.",
+                            zh: "二进制加载了越狱挂钩与注入框架 \(hooker)，表明该软件包已被第三方二次篡改并具备动态方法挂钩能力。"
+                        ),
                         category: "Injected Tweak / Modded IPA",
                         location: "LC_LOAD_DYLIB: \(dylib)",
                         severity: .caution
@@ -390,7 +432,10 @@ public enum ExpandedThreatCatalog {
                 if flaggedFiles.insert(filename).inserted {
                     indicators.append(ThreatIndicator(
                         signature: filename,
-                        description: "检测到侧载注入目录动态库: \(filename)（常见于 Feather / Cyan / Azule 第三方插件注入），请核实注入组件来源。",
+                        description: WQLocale.pick(
+                            en: "Detected dynamic library in sideload tweak folder: \(filename) (commonly injected by Feather / Cyan / Azule). Verify origin before installing.",
+                            zh: "检测到侧载注入目录动态库: \(filename)（常见于 Feather / Cyan / Azule 第三方插件注入），请核实注入组件来源。"
+                        ),
                         category: "Injected Tweak / Modded IPA",
                         location: "Embedded Dylib: \(dylib)",
                         severity: .caution
@@ -406,7 +451,10 @@ public enum ExpandedThreatCatalog {
                         if flaggedFiles.insert(filename).inserted {
                             indicators.append(ThreatIndicator(
                                 signature: filename,
-                                description: "检测到内嵌可疑注入插件或外挂动态库: \(filename)",
+                                description: WQLocale.pick(
+                                    en: "Detected embedded tweak or suspicious injected dynamic library: \(filename)",
+                                    zh: "检测到内嵌可疑注入插件或外挂动态库: \(filename)"
+                                ),
                                 category: "Injected Tweak / Modded IPA",
                                 location: "LC_LOAD_DYLIB: \(dylib)",
                                 severity: .caution
@@ -441,7 +489,10 @@ public enum ExpandedThreatCatalog {
             let modesStr = backgroundModes.filter { backgroundModesRequiringInspection.contains($0) }.joined(separator: ", ")
             return ThreatIndicator(
                 signature: "UIBackgroundModes(\(modesStr))+UIPasteboard",
-                description: "检测到后台剪贴板监听特征元组：应用声明了常驻后台模式 (\(modesStr)) 且二进制引用了 UIPasteboard 读取接口。极高概率用于在后台持续轮询窃取用户复制的助记词或密码凭证。",
+                description: WQLocale.pick(
+                    en: "Background clipboard snooping tuple detected: persistent background modes (\(modesStr)) combined with UIPasteboard symbols. High probability of silently harvesting copied seed phrases or passwords.",
+                    zh: "检测到后台剪贴板监听特征元组：应用声明了常驻后台模式 (\(modesStr)) 且二进制引用了 UIPasteboard 读取接口。极高概率用于在后台持续轮询窃取用户复制的助记词或密码凭证。"
+                ),
                 category: "Background Clipboard Snooping",
                 location: "Info.plist + LC_SYMTAB",
                 severity: .highRisk
@@ -475,7 +526,10 @@ public enum ExpandedThreatCatalog {
         if let isSupervised = plist["IsSupervised"] as? Bool, isSupervised {
             indicators.append(ThreatIndicator(
                 signature: "CloudConfigurationDetails.IsSupervised=true",
-                description: "高危告警：检测到当前设备处于伪装企业受监管状态 (IsSupervised == true)。零售设备若未授权注册 Apple Business Manager，将引发无限设置向导死锁（Infinite Setup Assistant Loop）或被第三方 MDM 远程下发恶意策略。",
+                description: WQLocale.pick(
+                    en: "HIGH RISK: Spoofed corporate supervision state (IsSupervised == true) detected. On un-enrolled retail devices this can cause an Infinite Setup Assistant Loop or unauthorized MDM policy enforcement.",
+                    zh: "高危告警：检测到当前设备处于伪装企业受监管状态 (IsSupervised == true)。零售设备若未授权注册 Apple Business Manager，将引发无限设置向导死锁（Infinite Setup Assistant Loop）或被第三方 MDM 远程下发恶意策略。"
+                ),
                 category: "Fake Supervision / Rogue Profile",
                 location: cloudConfigURL.path,
                 severity: .highRisk
@@ -483,7 +537,10 @@ public enum ExpandedThreatCatalog {
         } else {
             indicators.append(ThreatIndicator(
                 signature: "CloudConfigurationDetails.plist (Residual)",
-                description: "检测到系统残留的非标准 CloudConfigurationDetails.plist 文件。可能导致后续系统配置文件校验报错。",
+                description: WQLocale.pick(
+                    en: "Residual non-standard CloudConfigurationDetails.plist file detected, which may trigger configuration validation errors.",
+                    zh: "检测到系统残留的非标准 CloudConfigurationDetails.plist 文件。可能导致后续系统配置文件校验报错。"
+                ),
                 category: "Fake Supervision / Rogue Profile",
                 location: cloudConfigURL.path,
                 severity: .caution

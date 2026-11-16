@@ -1,2 +1,3 @@
 "CFBundleDisplayName" = "WQGuard";
 "CFBundleName" = "WQGuard";
+"NSLocalNetworkUsageDescription" = "WQGuard needs Local Network access to connect to iOS installation_proxy over your local LocalDevVPN loopback tunnel for read-only installed app auditing.";

@@ -49,7 +49,7 @@ public struct IPAScanView: View {
                             .clipShape(Capsule())
                     }
 
-                    Text("💡 支持在系统『文件』中一次勾选多个 .ipa / .tipa 文件加入扫描列表；Feather 已签名应用可在 Feather「库 → 已签名 → 导出 IPA」后导入。")
+                    Text(WQStrings.ipaMultiSelectHint)
                         .font(.caption2)
                         .foregroundColor(.gray)
                         .multilineTextAlignment(.center)
@@ -72,19 +72,19 @@ public struct IPAScanView: View {
                 if !vm.syncedPackageNames.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Label("已加入扫描文件 (\(vm.syncedPackageNames.count))", systemImage: "tray.full.fill")
+                            Label(WQStrings.ipaQueuedFilesHeader(vm.syncedPackageNames.count), systemImage: "tray.full.fill")
                                 .font(.subheadline.bold())
                                 .foregroundColor(Color(red: 0.0, green: 0.85, blue: 0.72))
                             Spacer()
                             Button(action: { vm.rescanAllSyncedPackages(correlateWithInstalled: false) }) {
-                                Text("全部重扫")
+                                Text(WQStrings.ipaRescanAllButton)
                                     .font(.caption.bold())
                                     .foregroundColor(.cyan)
                             }
                             Text("·")
                                 .foregroundColor(.gray)
                             Button(role: .destructive, action: { vm.clearSyncedPackages() }) {
-                                Text("清空")
+                                Text(WQStrings.ipaClearQueueButton)
                                     .font(.caption.bold())
                                     .foregroundColor(.red)
                             }

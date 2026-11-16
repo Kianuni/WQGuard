@@ -54,7 +54,10 @@ public enum EntitlementGating {
                 riskTier: .safe,
                 appGroups: [],
                 shouldProceedToDeepScan: false,
-                reason: "Layer 1 Fast-Path Gated: 应用未声明 com.apple.security.application-groups 共享容器权限。AMFI 与 Darwin 内核在物理上无法签发属于该进程的 App Group 跨容器沙盒令牌（containermanagerd 严格校验客户端凭证），亦无对应共享 Library/Caches 目录可供放置逃逸符号链接，物理上无法实施 containermanagerd 跨沙盒攻击。安全放行。"
+                reason: WQLocale.pick(
+                    en: "Layer 1 Fast-Path Gated: The application does not declare com.apple.security.application-groups. AMFI and the Darwin kernel cannot issue cross-container App Group sandbox tokens for this process, nor does a shared Library/Caches symlink surface exist. Safe.",
+                    zh: "Layer 1 Fast-Path Gated: 应用未声明 com.apple.security.application-groups 共享容器权限。AMFI 与 Darwin 内核在物理上无法签发属于该进程的 App Group 跨容器沙盒令牌（containermanagerd 严格校验客户端凭证），亦无对应共享 Library/Caches 目录可供放置逃逸符号链接，物理上无法实施 containermanagerd 跨沙盒攻击。安全放行。"
+                )
             )
         } else {
             return EntitlementGatingResult(
@@ -62,7 +65,10 @@ public enum EntitlementGating {
                 riskTier: .safe,
                 appGroups: validGroups,
                 shouldProceedToDeepScan: true,
-                reason: "Layer 1 Gating Proceed: 应用声明了 com.apple.security.application-groups 共享容器权限 (\(validGroups.joined(separator: ", ")))，满足与 containermanagerd 交互的前置条件，必须继续执行 Layer 2 Mach-O 静态深度扫描。"
+                reason: WQLocale.pick(
+                    en: "Layer 1 Gating Proceed: The application declares com.apple.security.application-groups (\(validGroups.joined(separator: ", "))), meeting the prerequisite for containermanagerd interaction. Proceeding to Layer 2 deep static Mach-O analysis.",
+                    zh: "Layer 1 Gating Proceed: 应用声明了 com.apple.security.application-groups 共享容器权限 (\(validGroups.joined(separator: ", ")))，满足与 containermanagerd 交互的前置条件，必须继续执行 Layer 2 Mach-O 静态深度扫描。"
+                )
             )
         }
     }

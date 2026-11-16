@@ -18,11 +18,20 @@ public enum InstalledAppRegistryError: Error, LocalizedError, Sendable, Equatabl
     public var errorDescription: String? {
         switch self {
         case .fileNotFound(let path):
-            return "未找到已安装应用快照文件: \(path)"
+            return WQLocale.pick(
+                en: "Installed-app snapshot file not found: \(path)",
+                zh: "未找到已安装应用快照文件: \(path)"
+            )
         case .invalidSnapshotFormat(let detail):
-            return "无法解析已安装应用快照格式 (\(detail))。请导入有效的 Xcode devicectl (.json)、pymobiledevice3 (.json) 或 installation_proxy (.plist/.xml) 文件。"
+            return WQLocale.pick(
+                en: "Unable to parse installed-app snapshot format (\(detail)). Import a valid Xcode devicectl (.json), pymobiledevice3 (.json), or installation_proxy (.plist/.xml) file.",
+                zh: "无法解析已安装应用快照格式 (\(detail))。请导入有效的 Xcode devicectl (.json)、pymobiledevice3 (.json) 或 installation_proxy (.plist/.xml) 文件。"
+            )
         case .emptyApplicationList:
-            return "已安装应用注册表为空，未读取到任何应用记录。"
+            return WQLocale.pick(
+                en: "Installed application registry is empty; no app records found.",
+                zh: "已安装应用注册表为空，未读取到任何应用记录。"
+            )
         }
     }
 }
@@ -294,19 +303,22 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             name: "WeChat (微信)",
             bundleIdPatterns: ["com.tencent.xin", "com.tencent.wx"],
             displayNames: ["微信", "wechat"],
-            description: "国民级社交通讯与支付应用，第三方多开/防撤回重打包版本常见聊天记录与账密窃取插件"
+            description: "国民级社交通讯与支付应用，第三方多开/防撤回重打包版本常见聊天记录与账密窃取插件",
+            descriptionEn: "Major messaging & payment app; unofficial clone/tweak repackages frequently bundle credential or chat-history stealers"
         ),
         .init(
             name: "Alipay (支付宝)",
             bundleIdPatterns: ["com.alipay.iphoneclient"],
             displayNames: ["支付宝", "alipay"],
-            description: "核心移动支付应用，严禁安装任何非 App Store 侧载篡改版本"
+            description: "核心移动支付应用，严禁安装任何非 App Store 侧载篡改版本",
+            descriptionEn: "Critical mobile payment app; never install any non-App Store sideloaded or modified build"
         ),
         .init(
             name: "WhatsApp",
             bundleIdPatterns: ["net.whatsapp.whatsapp"],
             displayNames: ["whatsapp"],
-            description: "端到端加密通讯软件，非官方企业签/自签包常见会话劫持木马"
+            description: "端到端加密通讯软件，非官方企业签/自签包常见会话劫持木马",
+            descriptionEn: "End-to-end encrypted messenger; unofficial enterprise/sideloaded builds frequently carry session-hijacking trojans"
         )
     ]
 
@@ -366,7 +378,9 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             }
         }
 
-        throw InstalledAppRegistryError.invalidSnapshotFormat("未知的数据结构")
+        throw InstalledAppRegistryError.invalidSnapshotFormat(
+            WQLocale.pick(en: "Unrecognized snapshot data structure", zh: "未知的数据结构")
+        )
     }
 
     private func extractRecords(from rootObject: Any) -> [InstalledAppRegistryRecord] {
@@ -492,7 +506,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             ("StikDebug", ["stikdebug", "stikjit", "com.stik.sj"], ["stikdebug", "stikjit"]),
             ("SideStore", ["com.sidestore.sidestore", "sidestore"], ["sidestore"]),
             ("AltStore", ["com.rileytestut.altstore"], ["altstore"]),
-            ("全能签 / ESign", ["yyyue.esign", "com.esign."], ["全能签", "esign"]),
+            (WQLocale.pick(en: "ESign", zh: "全能签 / ESign"), ["yyyue.esign", "com.esign."], ["全能签", "esign"]),
             ("GBox", ["com.gbox.pub"], ["gbox"]),
             ("Scarlet", ["debianarch.scarlet", "usescarlet.scarlet"], ["scarlet"]),
             ("TrollStore", ["com.opa334.trollstore", "trollstore"], ["trollstore", "巨魔商店"])
@@ -615,11 +629,26 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
         // 1. Sandbox Escape & Unsandboxed Execution Entitlements
         let escapeEntitlements: [(key: String, expectedBool: Bool, desc: String)] = [
-            ("com.apple.private.security.no-container", true, "声明了无容器隔离私有权限 (no-container)，该已安装应用可直接跨沙盒读写全机应用数据！"),
-            ("com.apple.private.security.no-sandbox", true, "声明了关闭 Seatbelt 沙盒私有权限 (no-sandbox)，完全脱离 iOS 沙盒隔离控制！"),
-            ("com.apple.private.security.container-required", false, "显式关闭了容器强制约束 (container-required=false)，具备沙盒逃逸执行能力！"),
-            ("com.apple.private.MobileContainerManager.allowed", true, "声明了 MobileContainerManager 私有守护进程直连特权，可跨应用查询或操作容器！"),
-            ("com.apple.private.security.storage.AppDataContainers", true, "声明了 Apple 内部跨应用数据容器直接访问权限 (AppDataContainers)！")
+            ("com.apple.private.security.no-container", true, WQLocale.pick(
+                en: "Declares no-container entitlement, permitting direct cross-sandbox read/write access to other apps' data.",
+                zh: "声明了无容器隔离私有权限 (no-container)，该已安装应用可直接跨沙盒读写全机应用数据！"
+            )),
+            ("com.apple.private.security.no-sandbox", true, WQLocale.pick(
+                en: "Declares no-sandbox entitlement, bypassing iOS Seatbelt sandbox confinement completely.",
+                zh: "声明了关闭 Seatbelt 沙盒私有权限 (no-sandbox)，完全脱离 iOS 沙盒隔离控制！"
+            )),
+            ("com.apple.private.security.container-required", false, WQLocale.pick(
+                en: "Explicitly disables container enforcement (container-required=false), enabling unsandboxed execution.",
+                zh: "显式关闭了容器强制约束 (container-required=false)，具备沙盒逃逸执行能力！"
+            )),
+            ("com.apple.private.MobileContainerManager.allowed", true, WQLocale.pick(
+                en: "Declares direct private MobileContainerManager daemon privilege for querying/manipulating containers across apps.",
+                zh: "声明了 MobileContainerManager 私有守护进程直连特权，可跨应用查询或操作容器！"
+            )),
+            ("com.apple.private.security.storage.AppDataContainers", true, WQLocale.pick(
+                en: "Declares internal Apple AppDataContainers cross-application filesystem access entitlement.",
+                zh: "声明了 Apple 内部跨应用数据容器直接访问权限 (AppDataContainers)！"
+            ))
         ]
         for rule in escapeEntitlements {
             if record.booleanEntitlements[rule.key] == rule.expectedBool {
@@ -637,7 +666,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if record.booleanEntitlements["platform-application"] == true && !record.bundleId.hasPrefix("com.apple.") {
             indicators.append(ThreatIndicator(
                 signature: "platform-application",
-                description: "第三方已安装应用伪造声明了 Apple 平台级系统应用特权 (platform-application=true)！",
+                description: WQLocale.pick(
+                    en: "Third-party installed app declares Apple system platform privilege (platform-application=true).",
+                    zh: "第三方已安装应用伪造声明了 Apple 平台级系统应用特权 (platform-application=true)！"
+                ),
                 category: "Privilege Escalation Entitlement",
                 location: "installation_proxy Entitlements",
                 severity: .highRisk
@@ -650,7 +682,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             let joined = record.tccAllowedServices.joined(separator: ", ")
             indicators.append(ThreatIndicator(
                 signature: "com.apple.private.tcc.allow",
-                description: "已安装应用持有 TCC 隐私免授权特权 (\(joined))，可在不弹出系统授权框的情况下静默读取相册、通讯录、麦克风或剪贴板！",
+                description: WQLocale.pick(
+                    en: "Holds silent TCC privacy bypass entitlements (\(joined)), allowing background reads of Photos, Contacts, Microphone, or Pasteboard without consent prompts.",
+                    zh: "已安装应用持有 TCC 隐私免授权特权 (\(joined))，可在不弹出系统授权框的情况下静默读取相册、通讯录、麦克风或剪贴板！"
+                ),
                 category: "TCC Privacy Bypass",
                 location: "installation_proxy Entitlements",
                 severity: .highRisk
@@ -678,7 +713,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if record.keychainAccessGroups.contains("*") || record.keychainAccessGroups.contains(where: { $0.hasSuffix(".*") && $0.contains("apple") }) {
             indicators.append(ThreatIndicator(
                 signature: "keychain-access-groups(*)",
-                description: "已安装应用声明了通配符钥匙串访问组 (\(record.keychainAccessGroups.joined(separator: ", ")))，可跨应用窃取 Keychain 敏感登录凭证与私钥！",
+                description: WQLocale.pick(
+                    en: "Declares wildcard keychain access groups (\(record.keychainAccessGroups.joined(separator: ", "))), exposing cross-app credentials and private keys.",
+                    zh: "已安装应用声明了通配符钥匙串访问组 (\(record.keychainAccessGroups.joined(separator: ", ")))，可跨应用窃取 Keychain 敏感登录凭证与私钥！"
+                ),
                 category: "Keychain Credential Exposure",
                 location: "installation_proxy Entitlements",
                 severity: .highRisk
@@ -696,7 +734,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
                 let gStr = appleGroupAbuse.joined(separator: ", ")
                 indicators.append(ThreatIndicator(
                     signature: "AppleSystemAppGroup(\(gStr))",
-                    description: "第三方侧载应用越权绑定了 Apple 系统共享容器组 (\(gStr))，高危系统配置篡改特征！",
+                    description: WQLocale.pick(
+                        en: "Third-party sideloaded app binds Apple internal system App Groups (\(gStr)), indicating high-risk system configuration tampering.",
+                        zh: "第三方侧载应用越权绑定了 Apple 系统共享容器组 (\(gStr))，高危系统配置篡改特征！"
+                    ),
                     category: "Unauthorized System App Group",
                     location: "installation_proxy Entitlements",
                     severity: .highRisk
@@ -706,7 +747,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
                 let gStr = gating.appGroups.joined(separator: ", ")
                 indicators.append(ThreatIndicator(
                     signature: "com.apple.security.application-groups",
-                    description: "已安装侧载应用声明了共享容器权限 (\(gStr))，满足触发 containermanagerd 跨沙盒漏洞的前置条件。建议手动选择对应 .ipa 文件加入扫描做进一步二进制符号排查。",
+                    description: WQLocale.pick(
+                        en: "Installed sideloaded app declares shared App Groups (\(gStr)), satisfying the prerequisite for containermanagerd cross-sandbox attacks. Import the source .ipa to run deep binary inspection.",
+                        zh: "已安装侧载应用声明了共享容器权限 (\(gStr))，满足触发 containermanagerd 跨沙盒漏洞的前置条件。建议手动选择对应 .ipa 文件加入扫描做进一步二进制符号排查。"
+                    ),
                     category: "Shared Container Surface",
                     location: "installation_proxy Entitlements",
                     severity: .caution
@@ -747,7 +791,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
                     if !matchedSignatures.contains(sig) {
                         indicators.append(ThreatIndicator(
                             signature: sig,
-                            description: "侧载/企业签高危提醒：已安装应用「\(record.displayName)」匹配高频被篡改应用 \(extra.name)。\(extra.description)。请确认注入插件来源可靠，切勿在来历不明的改版包中输入支付密码或助记词！",
+                            description: WQLocale.pick(
+                                en: "Sideloaded/Enterprise Warning: Installed app '\(record.displayName)' matches high-risk tampered target \(extra.name). \(extra.localizedDescription). Verify any injected tweaks and never enter payment passwords or seed phrases into untrusted builds.",
+                                zh: "侧载/企业签高危提醒：已安装应用「\(record.displayName)」匹配高频被篡改应用 \(extra.name)。\(extra.description)。请确认注入插件来源可靠，切勿在来历不明的改版包中输入支付密码或助记词！"
+                            ),
                             category: "Modded Messenger / Payment Risk",
                             location: "BundleID: \(record.bundleId), Signer: \(record.signerIdentity ?? "Unknown")",
                             severity: extra.name.contains("Alipay") ? .highRisk : .caution
@@ -768,7 +815,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
                 let bgSig = "UIBackgroundModes(\(mStr))"
                 indicators.append(ThreatIndicator(
                     signature: bgSig,
-                    description: "已安装侧载应用开启了常驻后台模式 (\(mStr))。若配合剪贴板接口可在后台静默窃取复制的助记词/密码，建议关联本地 IPA 核验二进制符号。",
+                    description: WQLocale.pick(
+                        en: "Sideloaded app declares persistent background execution modes (\(mStr)). Combined with UIPasteboard this can silently harvest copied credentials; correlate the .ipa for binary inspection.",
+                        zh: "已安装侧载应用开启了常驻后台模式 (\(mStr))。若配合剪贴板接口可在后台静默窃取复制的助记词/密码，建议关联本地 IPA 核验二进制符号。"
+                    ),
                     category: "Persistent Background Execution",
                     location: "installation_proxy Info.plist",
                     severity: .caution
@@ -785,7 +835,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             let infraSig = "SideloadTool(\(sideloadInfraName))"
             indicators.append(ThreatIndicator(
                 signature: infraSig,
-                description: "检测到第三方侧载签名/调试工具「\(sideloadInfraName)」。WQGuard 对所有第三方侧载工具严格执行零信任策略（绝不默认加白），请确认安装包来源可信并留意重签环境安全。",
+                description: WQLocale.pick(
+                    en: "Detected third-party sideloading or debugging tool '\(sideloadInfraName)'. Under WQGuard's strict zero-trust policy, third-party sideload utilities are never auto-whitelisted; verify installer origin and re-signed packages.",
+                    zh: "检测到第三方侧载签名/调试工具「\(sideloadInfraName)」。WQGuard 对所有第三方侧载工具严格执行零信任策略（绝不默认加白），请确认安装包来源可信并留意重签环境安全。"
+                ),
                 category: "Third-Party Sideload Infrastructure",
                 location: "installation_proxy (\(record.bundleId))",
                 severity: .caution
@@ -820,13 +873,25 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         let remediation: String
         switch finalRisk {
         case .highRisk:
-            remediation = "系统注册表审计发现高危越权特征（无沙盒特权、TCC 免授权隐私绕过或高危仿冒客户端），建议立即在桌面长按卸载并前往「设置 -> 通用 -> VPN 与设备管理」移除对应证书/描述文件。"
+            remediation = WQLocale.pick(
+                en: "System registry audit detected high-risk privilege escalation (unsandboxed entitlements, TCC bypass, or wallet/payment impersonation). Delete immediately and remove the signing profile in Settings -> General -> VPN & Device Management.",
+                zh: "系统注册表审计发现高危越权特征（无沙盒特权、TCC 免授权隐私绕过或高危仿冒客户端），建议立即在桌面长按卸载并前往「设置 -> 通用 -> VPN 与设备管理」移除对应证书/描述文件。"
+            )
         case .knownTool:
-            remediation = "已安装应用匹配受信任白名单规则（\(whitelistedToolName ?? "Known Tool")）。当前为系统注册表权限审计结果。"
+            remediation = WQLocale.pick(
+                en: "Installed application matches trusted whitelist rule (\(whitelistedToolName ?? "Known Tool")) at system registry audit depth.",
+                zh: "已安装应用匹配受信任白名单规则（\(whitelistedToolName ?? "Known Tool")）。当前为系统注册表权限审计结果。"
+            )
         case .caution:
-            remediation = "已安装侧载应用包含共享容器权限、常驻后台或改版特征。可手动选择对应 .ipa 安装包加入扫描列表自动按 Bundle ID 完成二进制深度复核。"
+            remediation = WQLocale.pick(
+                en: "Installed sideloaded app declares shared App Group containers, background modes, or third-party sideload traits. Add the matching .ipa file to correlate full binary symbol inspection.",
+                zh: "已安装侧载应用包含共享容器权限、常驻后台或改版特征。可手动选择对应 .ipa 安装包加入扫描列表自动按 Bundle ID 完成二进制深度复核。"
+            )
         case .safe:
-            remediation = "系统注册表权限与签名链核验通过：未声明 App Group 共享容器或任何越权私有 Entitlements（当前为注册表级审计，无本地 IPA 二进制）。"
+            remediation = WQLocale.pick(
+                en: "Registry entitlements and signing chain verified: no App Groups or privileged sandbox-bypass entitlements declared (registry-level audit without local IPA binary).",
+                zh: "系统注册表权限与签名链核验通过：未声明 App Group 共享容器或任何越权私有 Entitlements（当前为注册表级审计，无本地 IPA 二进制）。"
+            )
         }
 
         let evidence = AuditEvidence(

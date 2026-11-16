@@ -1,6 +1,6 @@
 # WQGuard Technical Architecture, Exploit Deep Dive & Reference Manual
 
-> **Document Version**: 1.2.1  
+> **Document Version**: 1.2.2  
 > **Target Systems**: iOS 26.2+ / iOS 27.x, macOS Darwin 24.x+ (Host Tooling)  
 > **Security Baseline**: 100% Read-Only Inspection, Zero-Modification & Strict Zero-Trust Sideload Policy  
 > **Classification**: Technical Architecture, Vulnerability Anatomy & Threat Catalog  
@@ -557,19 +557,19 @@ WQGuard's **`FirmwarePostureEngine`** evaluates the host OS version against 8 co
 WQGuard provides ready-to-import shield profiles across **Surge (`.sgmodule`), Shadowrocket (`.module`), Quantumult X (`.conf`), Loon (`.plugin`), and Stash (`.stoverride`)** under `Shields/` (e.g., `Shields/Surge/WQGuard-Brotli-Shield.sgmodule`):
 
 ```ini
-#!name=WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
-#!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 系统未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell, CVSS 9.2)，在网络传输层剥离 Accept-Encoding 中的 br 算法强制降级为 gzip/deflate。内置 16 项严苛负向排除规则，确保 Apple Intelligence、普通话 Siri、iCloud 与网银支付绝对不被拦截。
-#!version=1.2.1
-#!category=安全防护
+#!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
+#!desc=Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write (CVE-2026-111497 / HTTP2Shell, CVSS 9.2) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 针对未修复 libbrotli 堆越界写漏洞，剥离 br 压缩声明并拦截强推响应；内置 16 项苹果与网银负向排除。
+#!version=1.2.2
+#!category=Security / 安全防护
 #!arguments=EXTRA_MITM_HOSTS:*.example.invalid
-#!arguments-desc=可追加需要强制 Brotli 降级保护的高风险自定义域名（支持通配符如 *.example.com；如需保护全部 Safari/WebView 流量可填入 *，内置排除列表已保护 Apple 核心服务与金融应用）。
+#!arguments-desc=Extra hostnames/wildcards for Brotli downgrade protection (set * to cover all Safari/WebView domains; Apple & banking domains remain excluded). | 可追加高风险自定义域名（填 * 可覆盖全站流量，内置排除列表保障苹果与网银不受影响）。
 
 [Header Rewrite]
-# 强制剥离客户端请求中的 br 压缩声明，降级至安全的 gzip 与 deflate 编码
+# Strip br from client Accept-Encoding, downgrading safely to gzip & deflate / 强制剥离请求 br 声明
 ^https?:// header-replace Accept-Encoding "gzip, deflate"
 
 [Script]
-# 零解压（requires-body=false）拦截不遵从客户端协商、强行回传 Content-Encoding: br 的恶意服务端响应
+# Header-only (requires-body=false) block against unsolicited Content-Encoding: br / 零解压拦截强推 br 响应
 brotli-response-guard = type=http-response,pattern=^https?://.+,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/scripts/brotli-guard.js
 
 [MITM]

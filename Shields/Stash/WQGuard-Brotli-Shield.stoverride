@@ -1,6 +1,6 @@
-name: "WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)"
-desc: "针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写漏洞 (HTTP2Shell)，剥离请求头 br 压缩声明并阻断强推响应。内置 16 项负向排除，不破坏 Apple Intelligence、Siri 与移动支付。"
-category: "安全防护"
+name: "WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)"
+desc: "Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (HTTP2Shell) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求声明并阻断强推响应，内置 16 项负向排除。"
+category: "Security / 安全防护"
 
 http:
   mitm:

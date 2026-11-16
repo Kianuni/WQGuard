@@ -88,7 +88,7 @@ public struct DashboardView: View {
                                 Text(WQStrings.configureInstalledScanButton)
                                     .font(.footnote.bold())
                                 Spacer()
-                                Text("已启用 \(vm.activeEngineCount)/3 引擎")
+                                Text(WQStrings.activeEnginesBadge(vm.activeEngineCount))
                                     .font(.caption2.bold())
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 3)
@@ -121,7 +121,7 @@ public struct DashboardView: View {
                                     .font(.footnote.bold())
                                 Spacer()
                                 if !vm.syncedPackageNames.isEmpty {
-                                    Text("已加入 \(vm.syncedPackageNames.count) 个")
+                                    Text(WQStrings.queuedIPACountBadge(vm.syncedPackageNames.count))
                                         .font(.caption2.bold())
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 3)
@@ -148,7 +148,7 @@ public struct DashboardView: View {
                                 .foregroundColor(.cyan)
                                 .lineLimit(1)
                         } else if !vm.syncedPackageNames.isEmpty {
-                            Text("已加入扫描列表: \(vm.syncedPackageNames.joined(separator: ", "))")
+                            Text(WQStrings.queuedIPAListSummary(vm.syncedPackageNames.joined(separator: ", ")))
                                 .font(.caption2)
                                 .foregroundColor(.gray)
                                 .lineLimit(1)

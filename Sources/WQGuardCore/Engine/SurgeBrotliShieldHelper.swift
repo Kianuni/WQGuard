@@ -79,12 +79,32 @@ public enum ProxyShieldPlatform: String, CaseIterable, Identifiable, Codable, Se
         case .stash:
             return URL(string: "stash://install-override?url=\(encoded)")
         case .quantumultX:
-            let jsonParam = "{\"rewrite_remote\":[\"\(remoteRawURLString), tag=WQGuard Brotli 护盾, update-interval=86400, opt-parser=false, enabled=true\"]}"
+            let qxTag = WQLocale.pick(en: "WQGuard Brotli Shield", zh: "WQGuard Brotli 护盾")
+            let jsonParam = "{\"rewrite_remote\":[\"\(remoteRawURLString), tag=\(qxTag), update-interval=86400, opt-parser=false, enabled=true\"]}"
             if let qxEncoded = jsonParam.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
                 return URL(string: "quantumult-x:///add-resource?remote-resource=\(qxEncoded)")
             }
             return nil
         }
+    }
+
+    public var usageHintEn: String {
+        switch self {
+        case .surge:
+            return "Import into Surge Modules and enable MitM + CA certificate trust (keep default high-risk TLDs for zero battery overhead)."
+        case .shadowrocket:
+            return "Import into Shadowrocket Config -> Module, and enable HTTPS Decryption + CA trust."
+        case .quantumultX:
+            return "Add to Quantumult X Rewrite -> Resources, and enable both Rewrite and MitM with CA trust."
+        case .loon:
+            return "Import into Loon Plugins, and enable MITM + system root CA trust."
+        case .stash:
+            return "Import into Stash Overrides, and enable MITM + root CA certificate trust."
+        }
+    }
+
+    public var localizedUsageHint: String {
+        WQLocale.pick(en: usageHintEn, zh: usageHintZh)
     }
 
     public var usageHintZh: String {
@@ -163,23 +183,23 @@ public final class SurgeBrotliShieldHelper: Sendable {
 
     /// Raw verbatim template of the production Surge Brotli Shield module.
     public static let rawModuleTemplate: String = """
-    #!name=WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
-    #!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 系统未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell, CVSS 9.2)，在网络传输层剥离 Accept-Encoding 中的 br 算法强制降级为 gzip/deflate。内置 16 项严苛负向排除规则，确保 Apple Intelligence、Siri、iCloud 与网银支付绝对不被拦截。
-    #!version=1.2.1
-    #!category=安全防护
+    #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
+    #!desc=Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write (CVE-2026-111497 / HTTP2Shell, CVSS 9.2) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 针对未修复 libbrotli 堆越界写漏洞，剥离 br 压缩声明并拦截强推响应；内置 16 项苹果与网银负向排除。
+    #!version=1.2.2
+    #!category=Security / 安全防护
     #!arguments=EXTRA_MITM_HOSTS:*.example.invalid
-    #!arguments-desc=可追加需要强制 Brotli 降级保护的高风险自定义域名（支持通配符如 *.example.com；如需保护全部 Safari/WebView 流量可填入 *，内置排除列表已保护 Apple 核心服务与金融应用）。
+    #!arguments-desc=Extra hostnames/wildcards for Brotli downgrade protection (set * to cover all Safari/WebView domains; Apple & banking domains remain excluded). | 可追加高风险自定义域名（填 * 可覆盖全站流量，内置排除列表保障苹果与网银不受影响）。
 
     [Header Rewrite]
-    # 强制剥离客户端请求中的 br 压缩声明，降级至安全的 gzip 与 deflate 编码
+    # Strip br from client Accept-Encoding, downgrading safely to gzip & deflate / 强制剥离请求 br 声明
     ^https?:// header-replace Accept-Encoding "gzip, deflate"
 
     [Script]
-    # 零解压（requires-body=false）拦截不遵从客户端协商、强行回传 Content-Encoding: br 的恶意服务端响应
+    # Header-only (requires-body=false) block against unsolicited Content-Encoding: br / 零解压拦截强推 br 响应
     brotli-response-guard = type=http-response,pattern=^https?://.+,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/scripts/brotli-guard.js
 
     [MITM]
-    # 严苛负向排除规则保障：Apple Intelligence、普通话 Siri、PCC 中继、OpenAI 及银行绝对不走 MITM！
+    # Strict 16 negative exclusions: never MITM Apple Intelligence, Siri, PCC relays, OpenAI, or banking apps
     hostname = %APPEND% -*.apple.com, -*.icloud.com, -*.icloud-content.com, -*.mzstatic.com, -*.cdn-apple.com, -guzzoni.apple.com, -*.siri.apple.com, -gspe1-ssl.ls.apple.com, -apple-relay.*, -cp4.cloudflare.com, -*.openai.com, -*.chatgpt.com, -*.binance.com, -*.okx.com, -*.tenpay.com, -*.alipay.com, *.xyz, *.top, *.icu, *.cyou, *.sbs, *.cfd, *.buzz, *.fun, *.click, *.link, *.site, *.online, *.shop, *.vip, *.pw, *.work, *.rest, *.monster, *.quest, *.zip, *.mov, {{{EXTRA_MITM_HOSTS}}}
     """
 
@@ -207,16 +227,16 @@ public final class SurgeBrotliShieldHelper: Sendable {
 
         case .shadowrocket:
             return """
-            #!name=WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
-            #!desc=针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写漏洞 (CVE-2026-111497 / HTTP2Shell)，剥离请求头 br 编码并阻断恶意强推响应。内置 16 项负向排除，不破坏 Apple Intelligence、Siri 与移动支付。
-            #!category=安全防护
+            #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
+            #!desc=Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求头并拦截恶意强推响应，内置 16 项苹果与网银负向排除。
+            #!category=Security / 安全防护
 
             [Header Rewrite]
-            # 强制将请求头 Accept-Encoding 降级为安全的 gzip,deflate（无空格防解析歧义）
+            # Downgrade client Accept-Encoding to gzip,deflate / 强制降级客户端请求压缩协商
             ^https?://.+ header-replace Accept-Encoding gzip,deflate
 
             [Script]
-            # 零解压（requires-body=0）拦截强行返回 Content-Encoding: br 的恶意响应
+            # Header-only guard (requires-body=0) blocking unsolicited Content-Encoding: br / 零解压拦截强推 br 响应
             brotli-response-guard = type=http-response,pattern=^https?://.+,script-path=\(Self.remoteGuardScriptURL),requires-body=0,max-size=0
 
             [MITM]
@@ -225,14 +245,14 @@ public final class SurgeBrotliShieldHelper: Sendable {
 
         case .quantumultX:
             return """
-            ; WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497 / HTTP2Shell) — Quantumult X 重写资源
-            ; 针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写漏洞，剥离请求头 br 编码并拦截强推的恶意响应。
-            ; 使用方式：在 Quantumult X「重写 -> 资源引用」中添加本文件链接或本地导入，并确保开启 MitM 与证书信任。
+            ; WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497 / HTTP2Shell) — Quantumult X Rewrite Resource
+            ; Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write by stripping br requests & blocking unsolicited br responses.
+            ; Usage / 使用方式: Add under Quantumult X Rewrite -> Resources and enable Rewrite + MitM + CA certificate trust.
 
             [rewrite_local]
-            ; 1. 将客户端请求头中的 Accept-Encoding 强制降级为安全的 gzip, deflate
+            ; 1. Downgrade Accept-Encoding to gzip, deflate / 将请求头 Accept-Encoding 降级为安全的 gzip, deflate
             ^https?://.+ url request-header (\\r\\n[Aa][Cc][Cc][Ee][Pp][Tt]-[Ee][Nn][Cc][Oo][Dd][Ii][Nn][Gg]:)[^\\r\\n]+(\\r\\n) request-header $1 gzip, deflate$2
-            ; 2. 仅检查响应头（不解压响应体），阻断服务端强行返回的 Content-Encoding: br 数据流
+            ; 2. Header-only response guard blocking unsolicited Content-Encoding: br / 仅检查响应头，拦截强推的 br 数据流
             ^https?://.+ url script-response-header \(Self.remoteGuardScriptURL)
 
             [mitm]
@@ -242,15 +262,15 @@ public final class SurgeBrotliShieldHelper: Sendable {
         case .loon:
             let defaultArg = cleanExtra.isEmpty ? "*.example.invalid" : cleanExtra.joined(separator: ", ")
             return """
-            #!name = WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)
-            #!desc = 针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写高危漏洞 (CVE-2026-111497 / HTTP2Shell)，强制降级 Accept-Encoding 为 gzip,deflate 并阻断恶意强推的 br 响应。内置 16 项负向排除，保障 Apple Intelligence、Siri 与支付正常使用。
+            #!name = WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
+            #!desc = Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding to gzip,deflate & blocking unsolicited br responses; 16 Apple/banking exclusions. | 强制降级 Accept-Encoding 并阻断强推 br 响应，内置 16 项负向排除。
             #!openUrl = https://github.com/Kianuni/WQGuard
             #!author = WQGuard Contributors
-            #!tag = 安全防护
+            #!tag = Security / 安全防护
             #!system = iOS
 
             [Argument]
-            EXTRA_MITM_HOSTS = input, "\(defaultArg)", tag = 附加防护域名, desc = 可选补充需要开启 Brotli 降级保护的自定义域名后缀（如 *.cc, *.me）
+            EXTRA_MITM_HOSTS = input, "\(defaultArg)", tag = Extra Domains / 附加域名, desc = Optional extra hostnames/wildcards for Brotli downgrade protection (e.g. *.cc, *.me) / 可选补充需强制降级的域名后缀
 
             [Rewrite]
             ^https?://.+ header-replace Accept-Encoding gzip,deflate
@@ -266,9 +286,9 @@ public final class SurgeBrotliShieldHelper: Sendable {
             let allHosts = Self.mandatoryNegativeExclusions + Self.defaultHighRiskTLDs + cleanExtra
             let yamlMitmLines = allHosts.map { "    - \"\($0)\"" }.joined(separator: "\n")
             return """
-            name: "WQGuard · 防 Brotli 溢出降级护盾 (CVE-2026-111497)"
-            desc: "针对 iOS 26.x 与 iOS 27.0–27.2.0 未修复之 libbrotli 堆越界写漏洞 (HTTP2Shell)，剥离请求头 br 压缩声明并阻断强推响应。内置 16 项负向排除，不破坏 Apple Intelligence、Siri 与移动支付。"
-            category: "安全防护"
+            name: "WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)"
+            desc: "Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (HTTP2Shell) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求声明并阻断强推响应，内置 16 项负向排除。"
+            category: "Security / 安全防护"
 
             http:
               mitm:
@@ -385,13 +405,22 @@ public final class SurgeBrotliShieldHelper: Sendable {
         }
 
         if !hasValidMetadata {
-            errors.append("缺少合规的 \(platform.shortTitleEn) 元数据头部")
+            errors.append(WQLocale.pick(
+                en: "Missing compliant \(platform.shortTitleEn) metadata header",
+                zh: "缺少合规的 \(platform.shortTitleEn) 元数据头部"
+            ))
         }
         if !hasHeaderRewrite {
-            errors.append("缺少 \(platform.shortTitleEn) Accept-Encoding 强制降级重写规则")
+            errors.append(WQLocale.pick(
+                en: "Missing \(platform.shortTitleEn) Accept-Encoding downgrade rewrite rule",
+                zh: "缺少 \(platform.shortTitleEn) Accept-Encoding 强制降级重写规则"
+            ))
         }
         if !hasScriptGuard {
-            errors.append("缺少 \(platform.shortTitleEn) 零解压响应拦截脚本规则")
+            errors.append(WQLocale.pick(
+                en: "Missing \(platform.shortTitleEn) header-only response guard script rule",
+                zh: "缺少 \(platform.shortTitleEn) 零解压响应拦截脚本规则"
+            ))
         }
 
         var missing: [String] = []
@@ -401,7 +430,10 @@ public final class SurgeBrotliShieldHelper: Sendable {
             }
         }
         if !missing.isEmpty {
-            errors.append("缺少关键负向排除规则: \(missing.joined(separator: ", "))")
+            errors.append(WQLocale.pick(
+                en: "Missing mandatory negative exclusions: \(missing.joined(separator: ", "))",
+                zh: "缺少关键负向排除规则: \(missing.joined(separator: ", "))"
+            ))
         }
 
         let isCompliant = errors.isEmpty && missing.isEmpty

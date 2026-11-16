@@ -17,13 +17,22 @@ public enum SecurityPipelineError: Error, LocalizedError, Sendable, Equatable {
     public var errorDescription: String? {
         switch self {
         case .sandboxRestrictedNoAccessibleTargets:
-            return """
-            当前设备处于标准 iOS Seatbelt 沙盒隔离状态（非 TrollStore / 无全局容器读取权限），系统正常拦截了对其他已安装应用目录的枚举访问。
+            return WQLocale.pick(
+                en: """
+                This device is running inside the standard iOS Seatbelt sandbox (no unsandboxed TrollStore container access), so iOS blocks enumerating other installed apps directly.
 
-            WQGuard 坚持 100% 纯防御零漏洞利用原则，绝不调用系统漏洞越权突破沙盒。请通过以下任一方式完成审计：
-            1. 点击下方「批量导入 IPA / 文件夹检测」直接选择本地侧载包；
-            2. 将待检 .ipa 放入「文件 App -> 我的 iPhone -> WQGuard」目录后再次点击全盘检测。
-            """
+                WQGuard operates strictly read-only with zero exploit payloads. Inspect your apps using either option:
+                1. Tap "Scan Sources & Pairing" to import an installation_proxy snapshot or pair via LocalDevVPN;
+                2. Tap "Select .ipa Files (Multi-Select)" or place .ipa packages into Files -> On My iPhone -> WQGuard.
+                """,
+                zh: """
+                当前设备处于标准 iOS Seatbelt 沙盒隔离状态（非 TrollStore / 无全局容器读取权限），系统正常拦截了对其他已安装应用目录的枚举访问。
+
+                WQGuard 坚持 100% 纯防御零漏洞利用原则，绝不调用系统漏洞越权突破沙盒。请通过以下任一方式完成审计：
+                1. 点击下方「配置已安装扫描源」导入系统应用注册表或通过 LocalDevVPN 直连；
+                2. 点击「选择 .ipa 文件加入扫描」或将 .ipa 放入「文件 App -> 我的 iPhone -> WQGuard」目录后再次检测。
+                """
+            )
         }
     }
 }
@@ -138,7 +147,10 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         guard FileManager.default.fileExists(atPath: infoPlistURL.path),
               let plistData = try? Data(contentsOf: infoPlistURL),
               let infoDict = (try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)) as? [String: Any] else {
-            throw IPAPackageScannerError.invalidInfoPlist("缺少或无效的 Info.plist")
+            throw IPAPackageScannerError.invalidInfoPlist(WQLocale.pick(
+                en: "Missing or invalid Info.plist",
+                zh: "缺少或无效的 Info.plist"
+            ))
         }
         
         let bundleId = infoDict["CFBundleIdentifier"] as? String ?? url.deletingPathExtension().lastPathComponent
@@ -441,13 +453,25 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         let remediation: String
         switch finalRisk {
         case .highRisk:
-            remediation = "检测到高危越权特征（未经授权的跨沙盒逃逸、伪造钱包/通讯软件或隐私绕过 API 引用），建议立即卸载并注销描述文件。"
+            remediation = WQLocale.pick(
+                en: "High-risk privilege escalation indicators detected (unauthorized sandbox escape, impersonated wallet/messenger, or private privacy bypass). Uninstall immediately and remove its provisioning profile.",
+                zh: "检测到高危越权特征（未经授权的跨沙盒逃逸、伪造钱包/通讯软件或隐私绕过 API 引用），建议立即卸载并注销描述文件。"
+            )
         case .knownTool:
-            remediation = "匹配已知开源安全研究工具白名单（\(whitelistedToolName ?? "Known Tool")）。"
+            remediation = WQLocale.pick(
+                en: "Matched trusted whitelist rule (\(whitelistedToolName ?? "Known Tool")).",
+                zh: "匹配已知开源安全研究工具白名单（\(whitelistedToolName ?? "Known Tool")）。"
+            )
         case .caution:
-            remediation = "应用声明了共享容器或包含第三方动态库/供应链风险组件，建议复核安装来源。"
+            remediation = WQLocale.pick(
+                en: "Application declares shared containers or includes third-party dynamic libraries / supply-chain advisories. Review source before trusting.",
+                zh: "应用声明了共享容器或包含第三方动态库/供应链风险组件，建议复核安装来源。"
+            )
         case .safe:
-            remediation = "未发现跨沙盒越权或恶意利用特征，状态安全。"
+            remediation = WQLocale.pick(
+                en: "No cross-container sandbox escape or malicious exploit indicators detected; safe.",
+                zh: "未发现跨沙盒越权或恶意利用特征，状态安全。"
+            )
         }
         
         let evidence = AuditEvidence(
@@ -634,7 +658,10 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         }
 
         let pkgFileName = (package.bundlePath as NSString).lastPathComponent
-        let mergedPath = "\(registry.bundlePath) [已关联源包: \(pkgFileName)]"
+        let mergedPath = "\(registry.bundlePath) " + WQLocale.pick(
+            en: "[Linked IPA: \(pkgFileName)]",
+            zh: "[已关联源包: \(pkgFileName)]"
+        )
 
         let mergedEvidence = AuditEvidence(
             matchedSymbols: mergedSymbols,
@@ -690,7 +717,10 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         // Engine 1A: Live Lockdown installation_proxy via LocalDevVPN
         if let pairing = pairingFile {
             progressHandler?(ScanProgress(
-                currentTarget: "正在连接本机 installation_proxy 系统注册表...",
+                currentTarget: WQLocale.pick(
+                    en: "Connecting to installation_proxy system registry...",
+                    zh: "正在连接本机 installation_proxy 系统注册表..."
+                ),
                 completedCount: 0,
                 totalCount: 1
             ))
@@ -701,9 +731,15 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                     allowInteractiveConsentWait: savedSnapshotData == nil
                 )
                 liveConnected = true
-                notices.append("已通过配对直连读取全机 \(registryRecords.count) 款应用注册表")
+                notices.append(WQLocale.pick(
+                    en: "Loaded live registry of \(registryRecords.count) installed apps via pairing connection",
+                    zh: "已通过配对直连读取全机 \(registryRecords.count) 款应用注册表"
+                ))
             } catch {
-                notices.append("配对直连未就绪（请确认已开启 LocalDevVPN），已自动切换至快照/本地引擎")
+                notices.append(WQLocale.pick(
+                    en: "Live pairing connection unavailable (ensure LocalDevVPN is active); fell back to saved snapshot / local engines",
+                    zh: "配对直连未就绪（请确认已开启 LocalDevVPN），已自动切换至快照/本地引擎"
+                ))
             }
         }
 
@@ -711,7 +747,10 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         if registryRecords.isEmpty, let snapData = savedSnapshotData,
            let parsed = try? InstalledAppRegistryScanner.shared.parseSnapshotData(snapData) {
             registryRecords = parsed
-            notices.append("已加载已安装应用快照（共 \(parsed.count) 款应用记录）")
+            notices.append(WQLocale.pick(
+                en: "Loaded installed-app snapshot (\(parsed.count) app records)",
+                zh: "已加载已安装应用快照（共 \(parsed.count) 款应用记录）"
+            ))
         }
 
         // Engine 2: Bound Signer Directories & Local Packages

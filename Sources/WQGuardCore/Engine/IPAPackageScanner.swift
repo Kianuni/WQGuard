@@ -30,31 +30,31 @@ public enum IPAPackageScannerError: Error, LocalizedError, Sendable, Equatable {
     public var errorDescription: String? {
         switch self {
         case .fileNotFound(let path):
-            return "IPA 文件未找到: \(path)"
+            return WQLocale.pick(en: "IPA file not found: \(path)", zh: "IPA 文件未找到: \(path)")
         case .invalidArchive(let msg):
-            return "无效的 IPA/ZIP 压缩包: \(msg)"
+            return WQLocale.pick(en: "Invalid IPA/ZIP archive: \(msg)", zh: "无效的 IPA/ZIP 压缩包: \(msg)")
         case .endOfCentralDirectoryNotFound:
-            return "未找到 ZIP 核心目录结束标记 (EOCD)，文件可能损坏或已被截断。"
+            return WQLocale.pick(en: "ZIP End of Central Directory (EOCD) signature not found; archive may be corrupted or truncated.", zh: "未找到 ZIP 核心目录结束标记 (EOCD)，文件可能损坏或已被截断。")
         case .corruptHeader(let msg):
-            return "ZIP 头部数据损坏: \(msg)"
+            return WQLocale.pick(en: "Corrupt ZIP header: \(msg)", zh: "ZIP 头部数据损坏: \(msg)")
         case .unsupportedCompressionMethod(let method):
-            return "不支持的 ZIP 压缩算法 (ID: \(method))，仅支持 Store(0) 与 Deflate(8)。"
+            return WQLocale.pick(en: "Unsupported ZIP compression method (ID: \(method)); only Store (0) and Deflate (8) are supported.", zh: "不支持的 ZIP 压缩算法 (ID: \(method))，仅支持 Store(0) 与 Deflate(8)。")
         case .encryptedArchiveNotSupported:
-            return "不支持带密码保护的加密 ZIP 压缩包。"
+            return WQLocale.pick(en: "Password-protected encrypted ZIP archives are not supported.", zh: "不支持带密码保护的加密 ZIP 压缩包。")
         case .decompressionFailed(let code):
-            return "zlib 解压失败，错误码: \(code)"
+            return WQLocale.pick(en: "zlib decompression failed (error code: \(code))", zh: "zlib 解压失败，错误码: \(code)")
         case .zipSlipDetected(let path):
-            return "检测到 Zip Slip 目录穿越恶意路径: \(path)，已终止解压。"
+            return WQLocale.pick(en: "Zip Slip path traversal detected at '\(path)'; extraction aborted.", zh: "检测到 Zip Slip 目录穿越恶意路径: \(path)，已终止解压。")
         case .quotaExceeded(let msg):
-            return "超出安全配额限制 (解压炸弹防御): \(msg)"
+            return WQLocale.pick(en: "Safety quota exceeded (Zip Bomb defense): \(msg)", zh: "超出安全配额限制 (解压炸弹防御): \(msg)")
         case .missingPayload:
-            return "IPA 压缩包中缺少 Payload 目录。"
+            return WQLocale.pick(en: "Missing Payload directory in IPA archive.", zh: "IPA 压缩包中缺少 Payload 目录。")
         case .missingAppBundle:
-            return "Payload 目录下未找到有效的 .app 应用程序包。"
+            return WQLocale.pick(en: "No valid .app bundle found inside Payload directory.", zh: "Payload 目录下未找到有效的 .app 应用程序包。")
         case .invalidInfoPlist(let msg):
-            return "无法读取或解析 Info.plist: \(msg)"
+            return WQLocale.pick(en: "Unable to read or parse Info.plist: \(msg)", zh: "无法读取或解析 Info.plist: \(msg)")
         case .missingExecutable(let name):
-            return "应用包中未找到主可执行文件: \(name)"
+            return WQLocale.pick(en: "Main executable '\(name)' not found in .app bundle.", zh: "应用包中未找到主可执行文件: \(name)")
         }
     }
 }
@@ -112,7 +112,7 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
     /// Parses the Central Directory of the ZIP archive.
     public func readCentralDirectory() throws -> [ZIPArchiveEntry] {
         guard data.count >= 22 else {
-            throw IPAPackageScannerError.invalidArchive("文件大小小于 22 字节")
+            throw IPAPackageScannerError.invalidArchive(WQLocale.pick(en: "File is smaller than 22 bytes", zh: "文件大小小于 22 字节"))
         }
         
         // Scan backwards from end for End of Central Directory signature: 0x06054b50
@@ -138,7 +138,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
             ptr.loadUnaligned(fromByteOffset: eocd + 10, as: UInt16.self).littleEndian
         })
         guard totalEntries <= maxEntries else {
-            throw IPAPackageScannerError.quotaExceeded("ZIP 条目总数 (\(totalEntries)) 超过上限 (\(maxEntries))")
+            throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                en: "Total ZIP entries (\(totalEntries)) exceed limit (\(maxEntries))",
+                zh: "ZIP 条目总数 (\(totalEntries)) 超过上限 (\(maxEntries))"
+            ))
         }
         
         let cdSize = Int(data.withUnsafeBytes { ptr in
@@ -149,7 +152,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
         })
         
         guard cdOffset >= 0, cdSize >= 0, cdOffset + cdSize <= data.count else {
-            throw IPAPackageScannerError.corruptHeader("核心目录偏移或大小超出文件边界")
+            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                en: "Central Directory offset or size exceeds file bounds",
+                zh: "核心目录偏移或大小超出文件边界"
+            ))
         }
         
         var entries: [ZIPArchiveEntry] = []
@@ -164,7 +170,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
                 ptr.loadUnaligned(fromByteOffset: cur, as: UInt32.self).littleEndian
             }
             guard sig == 0x02014b50 else {
-                throw IPAPackageScannerError.corruptHeader("核心目录头部魔数不匹配")
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "Central Directory header magic mismatch",
+                    zh: "核心目录头部魔数不匹配"
+                ))
             }
             
             let flags = data.withUnsafeBytes { ptr in
@@ -203,7 +212,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
             }
             
             guard cur + 46 + nameLen + extraLen <= data.count else {
-                throw IPAPackageScannerError.corruptHeader("文件名或扩展头超出数据边界")
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "Filename or extra header exceeds data bounds",
+                    zh: "文件名或扩展头超出数据边界"
+                ))
             }
             let nameData = data.subdata(in: (cur + 46)..<(cur + 46 + nameLen))
             let path = String(decoding: nameData, as: UTF8.self)
@@ -252,10 +264,16 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
                 throw IPAPackageScannerError.zipSlipDetected(path)
             }
             if uncompSize64 > UInt64(maxTotalUncompressedBytes) {
-                throw IPAPackageScannerError.quotaExceeded("ZIP 条目声明解压体积 (\(uncompSize64)) 超过安全上限 (\(maxTotalUncompressedBytes) 字节)")
+                throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                    en: "ZIP entry declared size (\(uncompSize64)) exceeds limit (\(maxTotalUncompressedBytes) bytes)",
+                    zh: "ZIP 条目声明解压体积 (\(uncompSize64)) 超过安全上限 (\(maxTotalUncompressedBytes) 字节)"
+                ))
             }
             guard compSize64 <= UInt64(data.count), localOffset64 <= UInt64(data.count) else {
-                throw IPAPackageScannerError.corruptHeader("ZIP 条目偏移或压缩大小超出文件边界")
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "ZIP entry offset or compressed size exceeds file bounds",
+                    zh: "ZIP 条目偏移或压缩大小超出文件边界"
+                ))
             }
             let compSize = Int(compSize64)
             let uncompSize = Int(uncompSize64)
@@ -263,7 +281,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
             
             let (nextCumulative, overflow) = cumulativeUncompressedBytes.addingReportingOverflow(uncompSize)
             if overflow || nextCumulative > maxTotalUncompressedBytes {
-                throw IPAPackageScannerError.quotaExceeded("解压总数据量超过上限 (\(maxTotalUncompressedBytes) 字节)")
+                throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                    en: "Total declared uncompressed size exceeds limit (\(maxTotalUncompressedBytes) bytes)",
+                    zh: "解压总数据量超过上限 (\(maxTotalUncompressedBytes) 字节)"
+                ))
             }
             cumulativeUncompressedBytes = nextCumulative
             
@@ -293,14 +314,20 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
         
         let localOffset = entry.localHeaderOffset
         guard localOffset >= 0, localOffset + 30 <= data.count else {
-            throw IPAPackageScannerError.corruptHeader("本地文件头超出数据边界")
+            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                en: "Local file header exceeds data bounds",
+                zh: "本地文件头超出数据边界"
+            ))
         }
         
         let localSig = data.withUnsafeBytes { ptr in
             ptr.loadUnaligned(fromByteOffset: localOffset, as: UInt32.self).littleEndian
         }
         guard localSig == 0x04034b50 else {
-            throw IPAPackageScannerError.corruptHeader("本地文件头魔数无效: \(String(format: "0x%08x", localSig))")
+            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                en: "Invalid local file header magic: \(String(format: "0x%08x", localSig))",
+                zh: "本地文件头魔数无效: \(String(format: "0x%08x", localSig))"
+            ))
         }
         
         let nameLen = Int(data.withUnsafeBytes { ptr in
@@ -313,7 +340,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
         let dataStart = localOffset + 30 + nameLen + extraLen
         let dataEnd = dataStart + entry.compressedSize
         guard dataStart >= 0, dataEnd <= data.count, dataStart <= dataEnd else {
-            throw IPAPackageScannerError.corruptHeader("压缩文件数据段截断")
+            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                en: "Compressed payload is truncated",
+                zh: "压缩文件数据段截断"
+            ))
         }
         
         let rawCompressed = data.subdata(in: dataStart..<dataEnd)
@@ -321,7 +351,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
         switch entry.compressionMethod {
         case 0: // STORE
             if rawCompressed.count > entry.uncompressedSize {
-                throw IPAPackageScannerError.quotaExceeded("STORE 条目实际长度 (\(rawCompressed.count)) 超出声明大小 (\(entry.uncompressedSize) 字节)")
+                throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                    en: "STORE entry payload (\(rawCompressed.count)) exceeds declared size (\(entry.uncompressedSize) bytes)",
+                    zh: "STORE 条目实际长度 (\(rawCompressed.count)) 超出声明大小 (\(entry.uncompressedSize) 字节)"
+                ))
             }
             try recordExtractedBytes(rawCompressed.count)
             return rawCompressed
@@ -358,7 +391,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
                     let produced = chunkSize - Int(strm.avail_out)
                     if produced > 0 {
                         if decompressed.count + produced > entry.uncompressedSize {
-                            throw IPAPackageScannerError.quotaExceeded("ZIP 条目实际解压字节数超过声明上限 (\(entry.uncompressedSize) 字节)")
+                            throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                                en: "Inflated entry size exceeds declared limit (\(entry.uncompressedSize) bytes)",
+                                zh: "ZIP 条目实际解压字节数超过声明上限 (\(entry.uncompressedSize) 字节)"
+                            ))
                         }
                         try recordExtractedBytes(produced)
                         decompressed.append(contentsOf: chunk[0..<produced])
@@ -390,7 +426,10 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
         defer { quotaLock.unlock() }
         let (updated, overflow) = cumulativeExtractedBytes.addingReportingOverflow(delta)
         if overflow || updated > maxTotalUncompressedBytes {
-            throw IPAPackageScannerError.quotaExceeded("累计实际解压数据量超过上限 (\(maxTotalUncompressedBytes) 字节)")
+            throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                en: "Cumulative inflated archive size exceeds limit (\(maxTotalUncompressedBytes) bytes)",
+                zh: "累计实际解压数据量超过上限 (\(maxTotalUncompressedBytes) 字节)"
+            ))
         }
         cumulativeExtractedBytes = updated
     }
@@ -503,7 +542,10 @@ public final class IPAPackageScanner: @unchecked Sendable {
             guard FileManager.default.fileExists(atPath: infoPlistURL.path),
                   let plistData = try? Data(contentsOf: infoPlistURL),
                   let infoDict = (try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)) as? [String: Any] else {
-                throw IPAPackageScannerError.invalidInfoPlist("找不到或无法解析 Info.plist")
+                throw IPAPackageScannerError.invalidInfoPlist(WQLocale.pick(
+                    en: "Missing or unparseable Info.plist",
+                    zh: "找不到或无法解析 Info.plist"
+                ))
             }
             
             let bundleId = infoDict["CFBundleIdentifier"] as? String ?? "unknown.bundle"
@@ -811,13 +853,25 @@ public final class IPAPackageScanner: @unchecked Sendable {
             
             var remediation = ""
             if finalRisk == .highRisk {
-                remediation = "该 IPA 包检测到未经授权的 containermanagerd 跨沙盒利用特征或私有越权 API 引用，严禁在未修补的设备上安装。"
+                remediation = WQLocale.pick(
+                    en: "Unauthorized containermanagerd sandbox escape primitives, privacy bypass APIs, or impersonation traits detected. Do NOT install on unpatched devices.",
+                    zh: "该 IPA 包检测到未经授权的 containermanagerd 跨沙盒利用特征或私有越权 API 引用，严禁在未修补的设备上安装。"
+                )
             } else if finalRisk == .knownTool {
-                remediation = "该 IPA 匹配已知开源安全审计工具白名单（\(whitelistedToolName ?? "Known Tool")），由授权开发者签署。"
+                remediation = WQLocale.pick(
+                    en: "Matched trusted whitelist rule (\(whitelistedToolName ?? "Known Tool")) signed by an authorized developer.",
+                    zh: "该 IPA 匹配已知开源安全审计工具白名单（\(whitelistedToolName ?? "Known Tool")），由授权开发者签署。"
+                )
             } else if finalRisk == .caution {
-                remediation = "该 IPA 声明了 App Group 容器共享权限并包含动态符号解析能力，安装前建议复核来源。"
+                remediation = WQLocale.pick(
+                    en: "This IPA declares App Group shared containers or dynamic symbol resolution / embedded libraries. Verify source before installing.",
+                    zh: "该 IPA 声明了 App Group 容器共享权限并包含动态符号解析能力，安装前建议复核来源。"
+                )
             } else {
-                remediation = "该 IPA 包未发现任何跨沙盒越权或恶意利用特征，状态安全。"
+                remediation = WQLocale.pick(
+                    en: "No cross-container sandbox escape or malicious exploit indicators found in this IPA; safe.",
+                    zh: "该 IPA 包未发现任何跨沙盒越权或恶意利用特征，状态安全。"
+                )
             }
             
             let evidence = AuditEvidence(

@@ -92,7 +92,10 @@ public struct AuditEvidence: Codable, Sendable, Equatable {
             escapingSymlinks: [],
             dynamicLoadingPresent: false,
             pathEnumerationPresent: false,
-            remediationGuidance: "未发现威胁，保持系统更新。"
+            remediationGuidance: WQLocale.pick(
+                en: "No threats detected; keep iOS updated.",
+                zh: "未发现威胁，保持系统更新。"
+            )
         )
     }
 }

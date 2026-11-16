@@ -7,7 +7,11 @@
 
 /* Dashboard */
 "app_title" = "WQGuard";
-"start_system_scan" = "Start System Audit";
+"start_system_scan" = "Scan Installed Apps";
+"start_system_scan_sub" = "installation_proxy Registry + On-Device Probe + Queued IPA Correlation";
+"configure_installed_scan_btn" = "Scan Sources & Pairing";
+"select_ipa_file_btn" = "Select .ipa Files (Multi-Select)";
+"batch_import_ipa_button" = "Select .ipa Files (Multi-Select)";
 "scanning_in_progress" = "Deep analysis in progress...";
 "cancel_scan" = "Cancel Scan";
 "metrics_summary" = "Audit Summary";
@@ -180,6 +184,14 @@
 "button_save" = "Save";
 "button_done" = "Done";
 "button_acknowledge" = "OK";
+
+/* Multi-Select IPA Sheet & Dashboard Helpers */
+"inspect_audit_results_prompt" = "View Detailed Audit Findings";
+"ipa_multi_select_hint" = "💡 Select multiple .ipa / .tipa files at once in Files to queue them; for signed apps in Feather, tap Library → Signed → Export IPA to import.";
+"ipa_rescan_all_btn" = "Rescan All";
+"ipa_clear_queue_btn" = "Clear";
+"builtin_whitelist_rule_desc" = "Self-identity whitelist for WQGuard security scanner";
+"scan_config_nav_title" = "Scan Sources & Pairing";
 
 /* ScanViewModel Auxiliary Strings */
 "scan_engine_initializing" = "Initializing scan engine...";

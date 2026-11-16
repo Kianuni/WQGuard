@@ -181,6 +181,14 @@
 "button_done" = "完成";
 "button_acknowledge" = "好";
 
+/* Multi-Select IPA Sheet & Dashboard Helpers */
+"inspect_audit_results_prompt" = "查看本次审计结果详情清单";
+"ipa_multi_select_hint" = "💡 支持在系统『文件』中一次勾选多个 .ipa / .tipa 文件加入扫描列表；Feather 已签名应用可在 Feather「库 → 已签名 → 导出 IPA」后导入。";
+"ipa_rescan_all_btn" = "全部重扫";
+"ipa_clear_queue_btn" = "清空";
+"builtin_whitelist_rule_desc" = "WQGuard 安全审计器自身身份白名单规则";
+"scan_config_nav_title" = "已安装应用扫描源";
+
 /* ScanViewModel Auxiliary Strings */
 "scan_engine_initializing" = "初始化扫描引擎...";
 "scan_failed_message" = "全盘扫描失败: %@";
