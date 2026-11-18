@@ -1,6 +1,6 @@
 #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
 #!desc=Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求头并拦截恶意强推响应，内置 16 项苹果与网银负向排除。
-#!version=1.3.0
+#!version=1.3.1
 #!category=Security / 安全防护
 
 [Header Rewrite]

@@ -83,21 +83,67 @@ public struct WhitelistedTool: Identifiable, Codable, Sendable, Equatable {
 
 /// Pattern matching utility supporting exact matches, prefix matches, and glob wildcards.
 public enum PatternMatcher {
+    internal static let asciiWhitespace = CharacterSet(charactersIn: " \t\r\n")
+
+    /// Returns true if the string contains any control, format, zero-width, soft-hyphen, or non-printable scalar.
+    internal static func containsForbiddenScalar(_ s: String) -> Bool {
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            if v <= 0x1F || (v >= 0x7F && v <= 0x9F) || v == 0x00AD
+                || (v >= 0x200B && v <= 0x200F)
+                || (v >= 0x2028 && v <= 0x202F)
+                || (v >= 0x2060 && v <= 0x206F)
+                || v == 0xFEFF {
+                return true
+            }
+            let cat = scalar.properties.generalCategory
+            if cat == .control || cat == .format {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Strict RFC-1034 / Apple CFBundleIdentifier ASCII character check: non-empty and every byte in `[A-Za-z0-9.-]`.
+    internal static func isStrictIdentifierASCII(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        return s.utf8.allSatisfy { b in
+            (b >= 0x41 && b <= 0x5A)
+                || (b >= 0x61 && b <= 0x7A)
+                || (b >= 0x30 && b <= 0x39)
+                || b == 0x2E
+                || b == 0x2D
+        }
+    }
+
     /// Evaluates whether a value matches a pattern.
     /// Supports exact matching, prefix with `*` suffix, and general glob matching (`*` and `?`).
     public static func matches(pattern: String, value: String) -> Bool {
-        let trimmedPattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        // 1. Exact match (case-insensitive)
-        if trimmedPattern.caseInsensitiveCompare(trimmedValue) == .orderedSame {
-            return true
+        let trimmedPattern = pattern.trimmingCharacters(in: asciiWhitespace)
+        let trimmedValue = value.trimmingCharacters(in: asciiWhitespace)
+
+        guard !containsForbiddenScalar(trimmedPattern), !containsForbiddenScalar(trimmedValue) else {
+            return false
+        }
+
+        let patternIsASCII = trimmedPattern.utf8.allSatisfy { $0 < 0x80 }
+        let valueIsASCII = trimmedValue.utf8.allSatisfy { $0 < 0x80 }
+
+        // 1. Exact match (strict ASCII byte fold when pattern is ASCII; canonical compare only for explicit non-ASCII custom patterns)
+        if !trimmedPattern.contains("*") && !trimmedPattern.contains("?") {
+            if patternIsASCII {
+                return valueIsASCII && trimmedPattern.lowercased() == trimmedValue.lowercased()
+            }
+            return trimmedPattern.caseInsensitiveCompare(trimmedValue) == .orderedSame
         }
         
         // 2. Simple prefix fast path (e.g., "prefix*")
         if trimmedPattern.hasSuffix("*") && !trimmedPattern.dropLast().contains("*") && !trimmedPattern.contains("?") {
             let prefix = String(trimmedPattern.dropLast())
             if prefix.isEmpty { return true }
+            if patternIsASCII && valueIsASCII {
+                return trimmedValue.lowercased().hasPrefix(prefix.lowercased())
+            }
             return trimmedValue.range(of: prefix, options: [.anchored, .caseInsensitive]) != nil
         }
         
@@ -105,6 +151,9 @@ public enum PatternMatcher {
         if trimmedPattern.hasPrefix("*") && !trimmedPattern.dropFirst().contains("*") && !trimmedPattern.contains("?") {
             let suffix = String(trimmedPattern.dropFirst())
             if suffix.isEmpty { return true }
+            if patternIsASCII && valueIsASCII {
+                return trimmedValue.lowercased().hasSuffix(suffix.lowercased())
+            }
             return trimmedValue.range(of: suffix, options: [.backwards, .anchored, .caseInsensitive]) != nil
         }
         
@@ -146,7 +195,7 @@ public final class WhitelistEngine: @unchecked Sendable {
                     "group.com.wqguard.scanner"
                 ],
                 expectedSignatures: [
-                    "container_query_create",
+                    IOCTokenArmor.tCqCreate,
                     "com.apple.containermanagerd",
                     "com.apple.containermanagerd.system",
                     ".com.apple.mobile_container_manager.metadata.plist",
@@ -237,27 +286,55 @@ public final class WhitelistEngine: @unchecked Sendable {
         lock.unlock()
 
         for tool in currentTools where tool.isEnabled {
+            if tool.isBuiltIn {
+                guard PatternMatcher.isStrictIdentifierASCII(bundleId),
+                      appGroups.allSatisfy({ PatternMatcher.isStrictIdentifierASCII($0) }) else {
+                    continue
+                }
+            }
+
             // 1. Bundle ID match check
             if !tool.allowedBundleIds.isEmpty {
                 let matchesBundle = tool.allowedBundleIds.contains { pattern in
-                    PatternMatcher.matches(pattern: pattern, value: bundleId)
+                    if pattern.utf8.allSatisfy({ $0 < 0x80 }) {
+                        let candidate = bundleId.trimmingCharacters(in: PatternMatcher.asciiWhitespace)
+                        let patternHasUnderscore = pattern.utf8.contains(0x5F)
+                        let allowedCharsOk = candidate.utf8.allSatisfy { b in
+                            (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
+                                || b == 0x2E || b == 0x2D || (patternHasUnderscore && b == 0x5F)
+                        }
+                        guard !candidate.isEmpty && allowedCharsOk else { return false }
+                    }
+                    return PatternMatcher.matches(pattern: pattern, value: bundleId)
                 }
                 guard matchesBundle else { continue }
             }
 
             // 2. App Group match check (Crucial for preventing bundle ID spoofing & piggybacked victim App Groups)
             if !tool.allowedAppGroups.isEmpty {
+                let matchesGroupPattern: (String, String) -> Bool = { pattern, group in
+                    if pattern.utf8.allSatisfy({ $0 < 0x80 }) {
+                        let candidate = group.trimmingCharacters(in: PatternMatcher.asciiWhitespace)
+                        let patternHasUnderscore = pattern.utf8.contains(0x5F)
+                        let allowedCharsOk = candidate.utf8.allSatisfy { b in
+                            (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
+                                || b == 0x2E || b == 0x2D || (patternHasUnderscore && b == 0x5F)
+                        }
+                        guard !candidate.isEmpty && allowedCharsOk else { return false }
+                    }
+                    return PatternMatcher.matches(pattern: pattern, value: group)
+                }
                 let matchesAppGroup: Bool
                 if tool.isBuiltIn {
                     matchesAppGroup = !appGroups.isEmpty && appGroups.allSatisfy { group in
                         tool.allowedAppGroups.contains { pattern in
-                            PatternMatcher.matches(pattern: pattern, value: group)
+                            matchesGroupPattern(pattern, group)
                         }
                     }
                 } else {
                     matchesAppGroup = appGroups.contains { group in
                         tool.allowedAppGroups.contains { pattern in
-                            PatternMatcher.matches(pattern: pattern, value: group)
+                            matchesGroupPattern(pattern, group)
                         }
                     }
                 }

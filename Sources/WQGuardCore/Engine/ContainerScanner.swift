@@ -53,7 +53,7 @@ public final class ScopedSandboxToken: @unchecked Sendable {
             #if os(iOS)
             typealias ReleaseFn = @convention(c) (Int64) -> Int32
             if let handlePtr = dlopen(nil, RTLD_NOW) {
-                if let sym = dlsym(handlePtr, "sandbox_extension_release") {
+                if let sym = IOCTokenArmor.tSbxRelease.withCString({ dlsym(handlePtr, $0) }) {
                     let releaseFn = unsafeBitCast(sym, to: ReleaseFn.self)
                     _ = releaseFn(handle)
                 }

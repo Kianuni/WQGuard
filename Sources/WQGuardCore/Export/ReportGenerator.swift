@@ -94,7 +94,7 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
         md += "| :--- | :--- |\n"
         md += "| **Scan Timestamp / 扫描时间** | `\(timestampISO)` |\n"
         md += "| **Session ID / 审计会话 ID** | `\(session.id.uuidString)` |\n"
-        md += "| **System Version / 操作系统版本** | \(resolvedSysVer) |\n"
+        md += "| **System Version / 操作系统版本** | \(escapeMarkdownCell(markdownInline(resolvedSysVer))) |\n"
         md += "| **Engine Version / 扫描引擎版本** | WQGuardCore v\(session.engineVersion) |\n"
         md += "| **Scan Duration / 扫描耗时** | \(durationStr) |\n"
         md += "| **Total Scanned / 扫描应用总数** | \(session.totalApps) |\n\n"
@@ -191,7 +191,7 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
 
         text += String(format: "%-22@: %@\n", "Scan Timestamp", timestampISO)
         text += String(format: "%-22@: %@\n", "Session ID", session.id.uuidString)
-        text += String(format: "%-22@: %@\n", "System Version", resolvedSysVer)
+        text += String(format: "%-22@: %@\n", "System Version", plain(resolvedSysVer))
         text += String(format: "%-22@: WQGuardCore v%@\n", "Engine Version", session.engineVersion)
         text += String(format: "%-22@: %@\n", "Scan Duration", durationStr)
         text += "\(divider)\n"
@@ -229,40 +229,40 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
             let sortedFindings = session.findings.sorted { $0.riskTier > $1.riskTier }
             for (idx, finding) in sortedFindings.enumerated() {
                 text += "\(subDivider)\n"
-                text += "[\(idx + 1)/\(session.findings.count)] [\(finding.riskTier.rawValue)] \(finding.displayName) (\(finding.bundleId))\n"
+                text += "[\(idx + 1)/\(session.findings.count)] [\(finding.riskTier.rawValue)] \(plain(finding.displayName)) (\(plain(finding.bundleId)))\n"
                 text += "\(subDivider)\n"
-                text += "  * Version:         \(finding.version)\n"
-                text += "  * Team ID:         \(finding.teamId ?? "None (Ad-hoc / Unsigned)")\n"
+                text += "  * Version:         \(plain(finding.version))\n"
+                text += "  * Team ID:         \(finding.teamId.map(plain) ?? "None (Ad-hoc / Unsigned)")\n"
                 text += "  * Install Channel: \(finding.installChannel.localizedNameZh)\n"
-                text += "  * Bundle Path:     \(finding.bundlePath)\n"
-                text += "  * Executable Path: \(finding.executablePath ?? "N/A")\n"
+                text += "  * Bundle Path:     \(plain(finding.bundlePath))\n"
+                text += "  * Executable Path: \(finding.executablePath.map(plain) ?? "N/A")\n"
                 text += "  * DRM Status:      \(finding.evidence.isFairPlayEncrypted ? "FairPlay Encrypted (cryptid: 1)" : "Unencrypted Mach-O (cryptid: 0)")\n"
-                text += "  * Whitelist:       \(finding.isWhitelisted ? "Whitelisted Tool: \(finding.whitelistedToolName ?? "Known Tool")" : "Not Whitelisted")\n"
+                text += "  * Whitelist:       \(finding.isWhitelisted ? "Whitelisted Tool: \(plain(finding.whitelistedToolName ?? "Known Tool"))" : "Not Whitelisted")\n"
 
                 // Indicators
                 if !finding.indicators.isEmpty {
                     text += "\n  [!] Threat Indicators (\(finding.indicators.count)):\n"
                     for (iIdx, ind) in finding.indicators.enumerated() {
-                        text += "      \(iIdx + 1). [\(ind.severity.rawValue)] \(ind.signature)\n"
-                        text += "         Category:    \(ind.category)\n"
-                        text += "         Location:    \(ind.location)\n"
-                        text += "         Description: \(ind.description)\n"
+                        text += "      \(iIdx + 1). [\(ind.severity.rawValue)] \(plain(ind.signature))\n"
+                        text += "         Category:    \(plain(ind.category))\n"
+                        text += "         Location:    \(plain(ind.location))\n"
+                        text += "         Description: \(plain(ind.description))\n"
                     }
                 }
 
                 // Evidence Summary
                 text += "\n  [*] Audit Evidence Summary:\n"
                 if !finding.evidence.matchedSymbols.isEmpty {
-                    text += "      - Matched Symbols: \(finding.evidence.matchedSymbols.joined(separator: ", "))\n"
+                    text += "      - Matched Symbols: \(finding.evidence.matchedSymbols.map(plain).joined(separator: ", "))\n"
                 }
                 if !finding.evidence.linkedDylibs.isEmpty {
-                    text += "      - Linked Dylibs:   \(finding.evidence.linkedDylibs.joined(separator: ", "))\n"
+                    text += "      - Linked Dylibs:   \(finding.evidence.linkedDylibs.map(plain).joined(separator: ", "))\n"
                 }
                 if !finding.evidence.appGroups.isEmpty {
-                    text += "      - App Groups:      \(finding.evidence.appGroups.joined(separator: ", "))\n"
+                    text += "      - App Groups:      \(finding.evidence.appGroups.map(plain).joined(separator: ", "))\n"
                 }
                 if !finding.evidence.escapingSymlinks.isEmpty {
-                    text += "      - Escaping Links:  \(finding.evidence.escapingSymlinks.joined(separator: ", "))\n"
+                    text += "      - Escaping Links:  \(finding.evidence.escapingSymlinks.map(plain).joined(separator: ", "))\n"
                 }
                 text += "      - Dynamic Loading: \(finding.evidence.dynamicLoadingPresent ? "Present (dlopen/dlsym)" : "None")\n"
                 text += "      - Path Enum:       \(finding.evidence.pathEnumerationPresent ? "Present (fsgetpath)" : "None")\n"
@@ -270,9 +270,9 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
                 // Remediation Guidance
                 let (enGuidance, zhGuidance) = bilingualRemediation(for: finding)
                 text += "\n  [+] Remediation Guidance (EN):\n"
-                text += "      \(enGuidance)\n"
+                text += "      \(plain(enGuidance))\n"
                 text += "  [+] 处置建议 (中文):\n"
-                text += "      \(zhGuidance)\n\n"
+                text += "      \(plain(zhGuidance))\n\n"
             }
         }
 
@@ -353,16 +353,20 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
 
         for (idx, finding) in findings.enumerated() {
             let badge = tierEmoji(for: finding.riskTier)
-            s += "#### \(badge) \(idx + 1). \(finding.displayName) (`\(finding.bundleId)`)\n\n"
-            s += "- **Display Name / 应用名称**: \(finding.displayName)\n"
-            s += "- **Bundle Identifier / 标识符**: `\(finding.bundleId)`\n"
-            s += "- **Version / 版本**: `\(finding.version)`\n"
-            s += "- **Signing Team ID / 开发者团队**: `\(finding.teamId ?? "None (Ad-hoc / Unsigned)")`\n"
+            // Every attacker-controlled field (Info.plist / registry / path data) is sanitized: line
+            // terminators collapsed, controls escaped, Markdown syntax neutralized (headings, lists, code spans).
+            let safeName = markdownInline(finding.displayName)
+            let safeBid = codeSpan(finding.bundleId)
+            s += "#### \(badge) \(idx + 1). \(safeName) (\(safeBid))\n\n"
+            s += "- **Display Name / 应用名称**: \(safeName)\n"
+            s += "- **Bundle Identifier / 标识符**: \(safeBid)\n"
+            s += "- **Version / 版本**: \(codeSpan(finding.version))\n"
+            s += "- **Signing Team ID / 开发者团队**: \(codeSpan(finding.teamId ?? "None (Ad-hoc / Unsigned)"))\n"
             s += "- **Install Channel / 分发渠道**: \(finding.installChannel.localizedNameZh)\n"
-            s += "- **Executable Path / 可执行文件路径**: `\(finding.executablePath ?? "N/A")`\n"
-            s += "- **Bundle Path / 安装包路径**: `\(finding.bundlePath)`\n"
+            s += "- **Executable Path / 可执行文件路径**: \(codeSpan(finding.executablePath ?? "N/A"))\n"
+            s += "- **Bundle Path / 安装包路径**: \(codeSpan(finding.bundlePath))\n"
             s += "- **FairPlay DRM / 加密状态**: \(finding.evidence.isFairPlayEncrypted ? "🔒 FairPlay Encrypted (cryptid: 1)" : "🔓 Unencrypted Mach-O (cryptid: 0)")\n"
-            s += "- **Whitelist Status / 白名单状态**: \(finding.isWhitelisted ? "✅ Whitelisted (\(finding.whitelistedToolName ?? "Known Tool"))" : "❌ Not Whitelisted")\n\n"
+            s += "- **Whitelist Status / 白名单状态**: \(finding.isWhitelisted ? "✅ Whitelisted (\(markdownInline(finding.whitelistedToolName ?? "Known Tool")))" : "❌ Not Whitelisted")\n\n"
 
             // Indicators Table
             if !finding.indicators.isEmpty {
@@ -371,21 +375,21 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
                 s += "| :-: | :--- | :--- | :---: | :--- | :--- |\n"
                 for (iIdx, ind) in finding.indicators.enumerated() {
                     let sevBadge = "\(tierEmoji(for: ind.severity)) \(ind.severity.rawValue)"
-                    let safeSig = escapeMarkdownCell(ind.signature)
-                    let safeCat = escapeMarkdownCell(ind.category)
-                    let safeLoc = escapeMarkdownCell(ind.location)
-                    let safeDesc = escapeMarkdownCell(ind.description)
-                    s += "| \(iIdx + 1) | `\(safeSig)` | \(safeCat) | \(sevBadge) | `\(safeLoc)` | \(safeDesc) |\n"
+                    let safeSig = escapeMarkdownCell(codeSpan(ind.signature))
+                    let safeCat = escapeMarkdownCell(markdownInline(ind.category))
+                    let safeLoc = escapeMarkdownCell(codeSpan(ind.location))
+                    let safeDesc = escapeMarkdownCell(markdownInline(ind.description))
+                    s += "| \(iIdx + 1) | \(safeSig) | \(safeCat) | \(sevBadge) | \(safeLoc) | \(safeDesc) |\n"
                 }
                 s += "\n"
             }
 
             // Evidence Breakdown
             s += "##### 🔬 Audit Evidence Breakdown / 详细审计取证信息\n\n"
-            let symbols = finding.evidence.matchedSymbols.isEmpty ? "*None*" : finding.evidence.matchedSymbols.map { "`\($0)`" }.joined(separator: ", ")
-            let dylibs = finding.evidence.linkedDylibs.isEmpty ? "*None*" : finding.evidence.linkedDylibs.map { "`\($0)`" }.joined(separator: ", ")
-            let groups = finding.evidence.appGroups.isEmpty ? "*None*" : finding.evidence.appGroups.map { "`\($0)`" }.joined(separator: ", ")
-            let symlinks = finding.evidence.escapingSymlinks.isEmpty ? "*None*" : finding.evidence.escapingSymlinks.map { "`\($0)`" }.joined(separator: ", ")
+            let symbols = finding.evidence.matchedSymbols.isEmpty ? "*None*" : finding.evidence.matchedSymbols.map { codeSpan($0) }.joined(separator: ", ")
+            let dylibs = finding.evidence.linkedDylibs.isEmpty ? "*None*" : finding.evidence.linkedDylibs.map { codeSpan($0) }.joined(separator: ", ")
+            let groups = finding.evidence.appGroups.isEmpty ? "*None*" : finding.evidence.appGroups.map { codeSpan($0) }.joined(separator: ", ")
+            let symlinks = finding.evidence.escapingSymlinks.isEmpty ? "*None*" : finding.evidence.escapingSymlinks.map { codeSpan($0) }.joined(separator: ", ")
 
             s += "- **Matched Private Symbols / 私有符号**: \(symbols)\n"
             s += "- **Linked Dylibs / 动态链接库**: \(dylibs)\n"
@@ -399,10 +403,10 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
             s += "> #### 🛡️ Actionable Remediation Guidance / 处置建议\n"
             s += ">\n"
             s += "> **English (EN)**:\n"
-            s += "> \(enGuidance)\n"
+            s += "> \(markdownInline(enGuidance))\n"
             s += ">\n"
             s += "> **中文 (zh-Hans)**:\n"
-            s += "> \(zhGuidance)\n\n"
+            s += "> \(markdownInline(zhGuidance))\n\n"
         }
 
         return s
@@ -470,10 +474,106 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
         }
     }
 
-    private func escapeMarkdownCell(_ text: String) -> String {
-        return text
-            .replacingOccurrences(of: "|", with: "\\|")
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
+    /// Escapes a value for a GFM table cell:
+    /// - Every line terminator CommonMark (or a renderer) may honor (CRLF, lone CR, LF, U+0085, U+2028, U+2029)
+    ///   collapses to a space and C0/C1/DEL/bidi controls are escaped via `plain(_:)`.
+    /// - Every `|` is guaranteed to be preceded by an ODD number of backslashes (`\`^k + `|` becomes
+    ///   `\`^(k+1) + `|` when `k` is even, or `\`^(k+2) + `|` when `k` is odd), so GFM's table row
+    ///   splitter never treats an embedded pipe—even after `\` inside a code span—as a cell delimiter.
+    /// - Any trailing odd backslash run is padded to even length so a cell ending in `\` cannot escape
+    ///   the closing `|` delimiter.
+    func escapeMarkdownCell(_ text: String) -> String {
+        let single = plain(text)
+        guard single.utf8.contains(where: { $0 == UInt8(ascii: "|") || $0 == UInt8(ascii: "\\") }) else {
+            return single
+        }
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(single.unicodeScalars.count + 8)
+        var backslashRun = 0
+        for scalar in single.unicodeScalars {
+            if scalar == "\\" {
+                backslashRun += 1
+                out.append("\\")
+            } else if scalar == "|" {
+                if backslashRun.isMultiple(of: 2) {
+                    out.append("\\")
+                } else {
+                    out.append("\\")
+                    out.append("\\")
+                }
+                out.append("|")
+                backslashRun = 0
+            } else {
+                backslashRun = 0
+                out.append(scalar)
+            }
+        }
+        if !backslashRun.isMultiple(of: 2) {
+            out.append("\\")
+        }
+        return String(out)
+    }
+
+    // MARK: - Untrusted Field Sanitization (CWE-150 / Markdown injection)
+
+    /// UTF-8 lead bytes that may start a scalar requiring sanitization: C0 controls, DEL,
+    /// 0xC2 (C1 controls incl. U+0085 NEL), 0xE2 (U+2028/U+2029 and bidi overrides U+202A-E / U+2066-9).
+    @inline(__always)
+    private static func plainTriggerByte(_ b: UInt8) -> Bool {
+        b < 0x20 || b == 0x7F || b == 0xC2 || b == 0xE2
+    }
+
+    /// Neutralizes an attacker-controlled string for single-line terminal / text output:
+    /// line terminators (CR, LF, VT, FF, TAB, U+0085, U+2028, U+2029) become a space; every other C0 control,
+    /// DEL, C1 control and bidi override is rendered as a visible escape (e.g. `\x1B`, `\u202E`), so no
+    /// raw control sequence (ANSI/OSC/BEL/BS) reaches the user's terminal and no layout line can be forged.
+    func plain(_ text: String) -> String {
+        guard text.utf8.contains(where: Self.plainTriggerByte) else { return text }
+        var out = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            switch v {
+            case 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029:
+                out.append(" ")
+            case 0x00..<0x20, 0x7F, 0x80...0x9F:
+                out.append(contentsOf: String(format: "\\x%02X", v).unicodeScalars)
+            case 0x202A...0x202E, 0x2066...0x2069, 0x200E, 0x200F:
+                out.append(contentsOf: String(format: "\\u%04X", v).unicodeScalars)
+            default:
+                out.append(scalar)
+            }
+        }
+        return String(out)
+    }
+
+    private static let markdownSpecialScalars: Set<Unicode.Scalar> = [
+        "\\", "`", "*", "_", "[", "]", "<", ">", "#", "~", "!", "&"
+    ]
+
+    /// Sanitizes an attacker-controlled string for inline Markdown text (headings, list items, quotes):
+    /// single-line (see `plain`) plus backslash-escaping of Markdown control characters.
+    func markdownInline(_ text: String) -> String {
+        let single = plain(text)
+        guard single.unicodeScalars.contains(where: { Self.markdownSpecialScalars.contains($0) }) else { return single }
+        var out = String.UnicodeScalarView()
+        for scalar in single.unicodeScalars {
+            if Self.markdownSpecialScalars.contains(scalar) { out.append("\\") }
+            out.append(scalar)
+        }
+        return String(out)
+    }
+
+    /// Renders an attacker-controlled string as a single-line CommonMark code span whose backtick fence is
+    /// longer than any backtick run inside the content, so embedded backticks cannot close the span.
+    func codeSpan(_ text: String) -> String {
+        let single = plain(text)
+        var longestRun = 0
+        var run = 0
+        for ch in single.utf8 {
+            if ch == UInt8(ascii: "`") { run += 1; longestRun = max(longestRun, run) } else { run = 0 }
+        }
+        let fence = String(repeating: "`", count: longestRun + 1)
+        let pad = (single.hasPrefix("`") || single.hasSuffix("`")) ? " " : ""
+        return fence + pad + single + pad + fence
     }
 }

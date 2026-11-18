@@ -355,6 +355,14 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             throw InstalledAppRegistryError.emptyApplicationList
         }
 
+        // 0. Concatenated XML plists (raw `instproxy Browse` stream dumps). `PropertyListSerialization`
+        //    silently parses only the FIRST document and ignores trailing bytes, so any data holding more
+        //    than one `</plist>` must take the chunked path, otherwise packets 2+ vanish from the audit.
+        if Self.containsMultiplePlistTerminators(data),
+           let chunked = parseConcatenatedPlistStream(data), !chunked.isEmpty {
+            return chunked
+        }
+
         // 1. Try PropertyList (XML or Binary)
         if let plistObj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) {
             let records = extractRecords(from: plistObj)
@@ -365,7 +373,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
         // 2. Try strongly-typed cached JSON or `pymobiledevice3 apps list` JSON
         if let cached = try? JSONDecoder().decode([InstalledAppRegistryRecord].self, from: data), !cached.isEmpty {
-            return cached
+            return deduplicate(cached)
         }
         if let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             let records = extractRecords(from: jsonObj)
@@ -375,26 +383,50 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         }
 
         // 3. Handle concatenated XML plists from raw `instproxy Browse` stream dumps
-        if let text = String(data: data, encoding: .utf8), text.contains("<plist") {
-            var aggregated: [InstalledAppRegistryRecord] = []
-            var searchRange = text.startIndex..<text.endIndex
-            while let startRange = text.range(of: "<?xml", range: searchRange) ?? text.range(of: "<plist", range: searchRange),
-                  let endRange = text.range(of: "</plist>", range: startRange.lowerBound..<text.endIndex) {
-                let chunk = String(text[startRange.lowerBound..<endRange.upperBound])
-                if let chunkData = chunk.data(using: .utf8),
-                   let plistObj = try? PropertyListSerialization.propertyList(from: chunkData, options: [], format: nil) {
-                    aggregated.append(contentsOf: extractRecords(from: plistObj))
-                }
-                searchRange = endRange.upperBound..<text.endIndex
-            }
-            if !aggregated.isEmpty {
-                return deduplicate(aggregated)
-            }
+        if let chunked = parseConcatenatedPlistStream(data), !chunked.isEmpty {
+            return chunked
         }
 
         throw InstalledAppRegistryError.invalidSnapshotFormat(
             WQLocale.pick(en: "Unrecognized snapshot data structure", zh: "未知的数据结构")
         )
+    }
+
+    private static let plistCloseMarker = Data("</plist>".utf8)
+
+    /// `true` when the raw data contains at least two `</plist>` terminators (concatenated documents).
+    static func containsMultiplePlistTerminators(_ data: Data) -> Bool {
+        guard let first = data.range(of: plistCloseMarker) else { return false }
+        return data.range(of: plistCloseMarker, in: first.upperBound..<data.endIndex) != nil
+    }
+
+    /// Splits a concatenated XML plist stream into individual documents, starting each chunk at whichever
+    /// start marker (`<?xml` or `<plist`) occurs FIRST, and aggregates the records of every chunk.
+    private func parseConcatenatedPlistStream(_ data: Data) -> [InstalledAppRegistryRecord]? {
+        guard let text = String(data: data, encoding: .utf8), text.contains("<plist") else { return nil }
+        var aggregated: [InstalledAppRegistryRecord] = []
+        var searchRange = text.startIndex..<text.endIndex
+        while true {
+            let xmlStart = text.range(of: "<?xml", range: searchRange)
+            let plistStart = text.range(of: "<plist", range: searchRange)
+            let startRange: Range<String.Index>
+            switch (xmlStart, plistStart) {
+            case let (x?, p?): startRange = x.lowerBound <= p.lowerBound ? x : p
+            case let (x?, nil): startRange = x
+            case let (nil, p?): startRange = p
+            case (nil, nil): return aggregated.isEmpty ? nil : deduplicate(aggregated)
+            }
+            guard let endRange = text.range(of: "</plist>", range: startRange.lowerBound..<text.endIndex) else {
+                break
+            }
+            let chunk = String(text[startRange.lowerBound..<endRange.upperBound])
+            if let chunkData = chunk.data(using: .utf8),
+               let plistObj = try? PropertyListSerialization.propertyList(from: chunkData, options: [], format: nil) {
+                aggregated.append(contentsOf: extractRecords(from: plistObj))
+            }
+            searchRange = endRange.upperBound..<text.endIndex
+        }
+        return aggregated.isEmpty ? nil : deduplicate(aggregated)
     }
 
     private func extractRecords(from rootObject: Any) -> [InstalledAppRegistryRecord] {
@@ -458,12 +490,28 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         return deduplicate(results)
     }
 
+    /// Collapses records sharing the same (whitespace-trimmed, case-sensitive) bundle ID.
+    /// Secure-by-default: on a collision the RISKIEST record is kept (higher risk tier, then more
+    /// indicators), so a clean duplicate can never shadow a malicious one.
     private func deduplicate(_ records: [InstalledAppRegistryRecord]) -> [InstalledAppRegistryRecord] {
-        var seen: Set<String> = []
+        var indexByBid: [String: Int] = [:]
         var unique: [InstalledAppRegistryRecord] = []
+        unique.reserveCapacity(records.count)
         for rec in records {
-            if seen.insert(rec.bundleId).inserted {
+            let key = rec.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let existingIdx = indexByBid[key] else {
+                indexByBid[key] = unique.count
                 unique.append(rec)
+                continue
+            }
+            let existing = unique[existingIdx]
+            if existing == rec { continue }
+            let a = evaluateRecord(existing)
+            let b = evaluateRecord(rec)
+            let aRank = a.riskTier.severityRank
+            let bRank = b.riskTier.severityRank
+            if bRank > aRank || (bRank == aRank && b.indicators.count > a.indicators.count) {
+                unique[existingIdx] = rec
             }
         }
         return unique
@@ -479,34 +527,61 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if record.profileValidated || record.booleanEntitlements["get-task-allow"] == true {
             return false
         }
-        if let signer = record.signerIdentity?.lowercased() {
+        let signer = record.signerIdentity?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let signer {
             if signer.contains("development") || signer.contains("developer") ||
                signer.contains("distribution") || signer.contains("enterprise") {
                 return false
             }
+            // Apple platform (OS) signature: only Apple can produce it.
             if signer == "software signing" {
                 return true
             }
         }
 
-        if record.bundlePath.hasPrefix("/Applications/") ||
-           record.bundlePath.hasPrefix("/System/") ||
-           record.bundlePath.hasPrefix("/Library/") ||
-           record.bundlePath.hasPrefix("/private/preboot/") {
+        // From here on, trust REQUIRES an Apple bundle identity: a `com.apple.*` ID alone is
+        // trivially spoofable by ad-hoc / TrollStore bundles, and a system path alone is shared by
+        // rootful-jailbreak apps (e.g. Filza in /Applications).
+        let lowerBid = record.bundleId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard lowerBid.hasPrefix("com.apple.") else {
+            return false
+        }
+
+        // Genuine Apple App Store signature (Apple-owned removable apps such as Shortcuts).
+        if signer == "apple iphone os application signing" {
             return true
         }
 
-        let lowerBid = record.bundleId.lowercased()
-        if lowerBid.hasPrefix("com.apple.") {
+        let appType = record.applicationType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if appType == "system" || ((appType == "internal" || appType == "hidden") && record.teamId == nil) {
             return true
         }
 
-        let appType = record.applicationType.lowercased()
-        if (appType == "internal" || appType == "hidden") && record.teamId == nil {
+        // Real (normalized: `.`/`..` resolved) system path for an Apple bundle.
+        let path = Self.standardizedAbsolutePath(record.bundlePath)
+        if path.hasPrefix("/Applications/") ||
+           path.hasPrefix("/System/") ||
+           path.hasPrefix("/private/preboot/") {
             return true
         }
 
         return false
+    }
+
+    /// Lexically resolves `.` / `..` / duplicate separators WITHOUT touching the file system
+    /// (unlike `NSString.standardizingPath`, whose `/private` handling depends on the host).
+    static func standardizedAbsolutePath(_ raw: String) -> String {
+        var stack: [Substring] = []
+        for comp in raw.split(separator: "/", omittingEmptySubsequences: true) {
+            switch comp {
+            case ".": continue
+            case "..": if !stack.isEmpty { stack.removeLast() }
+            default: stack.append(comp)
+            }
+        }
+        return "/" + stack.joined(separator: "/")
     }
 
     /// Identifies third-party sideloading signers/managers for zero-trust risk attribution (NEVER auto-whitelisted).

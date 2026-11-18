@@ -12,19 +12,27 @@ import Foundation
 // MARK: - 1. System OS Version Model
 
 /// Semantic OS version representation with branch-aware comparison.
+///
+/// Ordering and equality (`<`, `==`, `hash`) consider ONLY `major`/`minor`/`patch`, keeping the
+/// `Comparable` contract consistent (`27.2` == `27.2.0 (24C101)`). Pre-release metadata (`prerelease`)
+/// is evaluated separately at CVE boundaries where a fix landed mid-beta (e.g. worse_query in 27.3 beta 2).
 public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparable {
     public let major: Int
     public let minor: Int
     public let patch: Int
     public let build: String?
     public let rawString: String?
+    /// Normalized pre-release tag: `"beta<N>"`, `"beta"` (unnumbered/unparseable), `"rc"`, `"rc<N>"`,
+    /// `"alpha<N>"`, `"dev"`, or `nil` for GA builds.
+    public let prerelease: String?
 
-    public init(major: Int, minor: Int, patch: Int = 0, build: String? = nil, rawString: String? = nil) {
+    public init(major: Int, minor: Int, patch: Int = 0, build: String? = nil, rawString: String? = nil, prerelease: String? = nil) {
         self.major = major
         self.minor = minor
         self.patch = patch
         self.build = build
         self.rawString = rawString
+        self.prerelease = prerelease
     }
 
     public init(operatingSystemVersion: OperatingSystemVersion, build: String? = nil) {
@@ -33,9 +41,11 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
         self.patch = operatingSystemVersion.patchVersion
         self.build = build
         self.rawString = "\(operatingSystemVersion.majorVersion).\(operatingSystemVersion.minorVersion).\(operatingSystemVersion.patchVersion)"
+        self.prerelease = nil
     }
 
-    /// Parses version strings such as "26.2", "iOS 27.1", "26.7.2 (24B123)", "27.2.1-beta1"
+    /// Parses version strings such as "26.2", "iOS 27.1", "26.7.2 (24B123)", "27.2.1-beta1", "27.3b1",
+    /// "27.3 beta 1 (24D5001a)", "27.3.0-rc".
     public init?(string: String) {
         let pattern = #"(\d+)\.(\d+)(?:\.(\d+))?(?:[^\w]*\(([\w]+)\))?"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
@@ -48,6 +58,22 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
             return String(string[r])
         }
 
+        // Reject negative version numbers (e.g. "-27.3", " -27.3", "iOS -27.3", "27.-3.1", "−27.3")
+        // while preserving hyphenated label prefixes such as "iOS-27.3".
+        if let majorRange = Range(match.range(at: 1), in: string) {
+            let prefix = string[..<majorRange.lowerBound]
+            if prefix.hasSuffix("\u{2212}") {
+                return nil
+            }
+            if prefix.hasSuffix("-") {
+                let beforeMinus = prefix.dropLast().last
+                let hasAlphaPrefix = beforeMinus.map { $0.isASCII && $0.isLetter } ?? false
+                if !hasAlphaPrefix {
+                    return nil
+                }
+            }
+        }
+
         guard let majorStr = extract(group: 1), let major = Int(majorStr),
               let minorStr = extract(group: 2), let minor = Int(minorStr) else {
             return nil
@@ -56,11 +82,80 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
         let patch = extract(group: 3).flatMap { Int($0) } ?? 0
         let build = extract(group: 4)
 
+        // Pre-release tag: inspect the text right after the numeric core (before any build parenthetical).
+        let coreGroup = match.range(at: 3).location != NSNotFound ? 3 : 2
+        var remainder = ""
+        if let coreRange = Range(match.range(at: coreGroup), in: string) {
+            remainder = String(string[coreRange.upperBound...])
+        }
+        if remainder.hasPrefix(".-") || remainder.hasPrefix(".\u{2212}") {
+            return nil
+        }
+
         self.major = major
         self.minor = minor
         self.patch = patch
         self.build = build
         self.rawString = string
+        self.prerelease = SystemOSVersion.parsePrerelease(remainder)
+    }
+
+    /// Extracts a normalized pre-release tag from the text following the numeric version core.
+    /// Unrecognized-but-present beta markers normalize to `"beta"` (unnumbered), which callers treat
+    /// as the EARLIEST pre-release (fail-safe: never assumed to contain a mid-beta fix).
+    static func parsePrerelease(_ remainder: String) -> String? {
+        guard !remainder.isEmpty else { return nil }
+        let pattern = #"(?:^|[\s\-_.(])\s*(?:(?:developer|public)\s+)?(beta|seed|rc|alpha|dev|b|a)(?![A-Za-z])\s*[-_.]?\s*([0-9]+)?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let m = regex.firstMatch(in: remainder, range: NSRange(remainder.startIndex..., in: remainder)),
+              let tagRange = Range(m.range(at: 1), in: remainder) else {
+            // Any other mention of a pre-release keyword => unclassifiable beta (fail-safe).
+            let lower = remainder.lowercased()
+            if lower.contains("beta") || lower.contains("seed") || lower.contains("alpha") {
+                return "beta"
+            }
+            return nil
+        }
+        let tag = remainder[tagRange].lowercased()
+        var number: Int?
+        if let numRange = Range(m.range(at: 2), in: remainder) {
+            number = Int(remainder[numRange])
+            if number == nil { return tag == "rc" ? "rc" : "beta" } // overflow => unclassifiable
+        }
+        switch tag {
+        case "beta", "b", "seed":
+            if let n = number { return "beta\(n)" }
+            return "beta"
+        case "rc":
+            if let n = number { return "rc\(n)" }
+            return "rc"
+        case "alpha", "a":
+            if let n = number { return "alpha\(n)" }
+            return "alpha"
+        default:
+            return "dev"
+        }
+    }
+
+    /// Beta ordinal for pre-release builds: `nil` for GA / RC builds, `0` for unclassifiable or
+    /// pre-beta (alpha/dev) builds, `N` for "beta N".
+    public var betaOrdinal: Int? {
+        guard let tag = prerelease?.lowercased(), !tag.isEmpty else { return nil }
+        if tag.hasPrefix("rc") { return nil }
+        if tag.hasPrefix("beta") {
+            return Int(tag.dropFirst(4)) ?? 0
+        }
+        return 0
+    }
+
+    public static func == (lhs: SystemOSVersion, rhs: SystemOSVersion) -> Bool {
+        lhs.major == rhs.major && lhs.minor == rhs.minor && lhs.patch == rhs.patch
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(major)
+        hasher.combine(minor)
+        hasher.combine(patch)
     }
 
     public static func < (lhs: SystemOSVersion, rhs: SystemOSVersion) -> Bool {
@@ -221,7 +316,13 @@ public final class FirmwarePostureEngine: Sendable {
             } else if version.major == 26 {
                 return true
             } else if version.major == 27 {
-                return version < SystemOSVersion(major: 27, minor: 3, patch: 0)
+                if version < SystemOSVersion(major: 27, minor: 3, patch: 0) { return true }
+                // 27.3.0 pre-releases: only beta 2+ (and RC/GA) carry the fix. Beta 1 and any
+                // unclassifiable pre-release tag fail safe as EXPOSED.
+                if version.minor == 3, version.patch == 0, let beta = version.betaOrdinal, beta < 2 {
+                    return true
+                }
+                return false
             } else {
                 return false
             }
@@ -716,8 +817,8 @@ public final class FirmwarePostureEngine: Sendable {
                             zh: "扫描 IPA 中的 AudioMxd 越权特征"
                         ),
                         instructions: WQLocale.pick(
-                            en: "Run WQGuard static IPA analysis to detect unauthorized MediaExperience.framework linkage, CMSessionSetProperty symbols, or \(IOCTokenArmor.tAudioDaemon) XPC targeting.",
-                            zh: "使用 WQGuard 扫描本地 IPA，排查非法引用 MediaExperience.framework、CMSessionSetProperty 符号或访问 \(IOCTokenArmor.tAudioDaemon) 服务的可疑应用。"
+                            en: "Run WQGuard static IPA analysis to detect unauthorized \(IOCTokenArmor.tMediaExpFw) linkage, \(IOCTokenArmor.tCMSessionSetProp) symbols, or \(IOCTokenArmor.tAudioDaemon) XPC targeting.",
+                            zh: "使用 WQGuard 扫描本地 IPA，排查非法引用 \(IOCTokenArmor.tMediaExpFw)、\(IOCTokenArmor.tCMSessionSetProp) 符号或访问 \(IOCTokenArmor.tAudioDaemon) 服务的可疑应用。"
                         ),
                         category: .wqguardScan,
                         relatedCVEs: ["CVE-2026-65339"]
@@ -887,8 +988,8 @@ public final class FirmwarePostureEngine: Sendable {
                             zh: "拦截 BookRestore 与 MobileGestalt 篡改应用"
                         ),
                         instructions: WQLocale.pick(
-                            en: "Run WQGuard static IPA analysis before installing sideloaded packages to detect BookLibraryPrivate.framework, bookassetd/itunesstored XPC targeting, \(IOCTokenArmor.tBookSQLite), or MobileGestalt cache strings.",
-                            zh: "安装外部侧载包前通过 WQGuard 静态审查，拦截包含 BookLibraryPrivate.framework、bookassetd/itunesstored 交互、\(IOCTokenArmor.tBookSQLite) 或 MobileGestalt 缓存路径的越权包。"
+                            en: "Run WQGuard static IPA analysis before installing sideloaded packages to detect \(IOCTokenArmor.tBookPrivFw), bookassetd/itunesstored XPC targeting, \(IOCTokenArmor.tBookSQLite), or MobileGestalt cache strings.",
+                            zh: "安装外部侧载包前通过 WQGuard 静态审查，拦截包含 \(IOCTokenArmor.tBookPrivFw)、bookassetd/itunesstored 交互、\(IOCTokenArmor.tBookSQLite) 或 MobileGestalt 缓存路径的越权包。"
                         ),
                         category: .wqguardScan,
                         relatedCVEs: ["PoC:BookRestore"]

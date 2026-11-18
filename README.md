@@ -10,7 +10,7 @@
 [![Platform](https://img.shields.io/badge/Platform-iOS%2016.0%2B%20(iOS%2026.2%2B%20%2F%2027.x)%20%7C%20macOS-lightgrey.svg)]()
 [![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B%20Zero--Dependency-orange.svg)]()
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External%20Packages-informational.svg)]()
-[![Unit Tests](https://img.shields.io/badge/Adversarial%20Tests-750%20Passing-brightgreen.svg)]()
+[![Unit Tests](https://img.shields.io/badge/Adversarial%20Tests-800%20Passing-brightgreen.svg)]()
 [![Read-Only Invariant](https://img.shields.io/badge/Kernel%20I%2FO-O__RDONLY%20%7C%20O__NOFOLLOW-success.svg)](SECURITY.md)
 
 **[🇨🇳 简体中文](#简体中文) · [🇺🇸 English](#english) · [📥 下载 IPA 与护盾规则](https://github.com/Kianuni/WQGuard/releases/latest) · [🔒 安全不变量规范](SECURITY.md) · [📖 底层技术白皮书](USAGE_GUIDE.md)**
@@ -210,9 +210,9 @@ flowchart TD
 
 ### 7. 🧪 红蓝对抗测试体系与性能基准
 
-WQGuard 包含 **37 个 XCTest 测试套件、共计 750 项自动化单元与红蓝对抗测试**（`swift test` 全量执行耗时 `~20.8s`，100% 通过）：
+WQGuard 包含 **40 个 XCTest 测试套件、共计 800 项自动化单元与红蓝对抗测试**（`swift test` 全量执行耗时 `~32.5s`，100% 通过）：
 
-- **v1.3.0 内联系统调用与 2026 漏洞红蓝对抗回归（`V130FeatureUnitTests` / `AdversarialV130Round1SyscallTests` / `AdversarialV130Round2ExploitTests` / `AdversarialV130Round3SystemTests`）**：覆盖 ARM64 `svc #0x80` (`0xD4001001`) 元数据抗误报、自定义 RX 段、部分 FairPlay `cryptid=1` 逃逸检测、50,000 指令 DoS 性能基线、`AudioToolbox` / `AVFAudio` / `AURemoteIO` 模拟器零误报隔离、独立 `.appex` `AccessorySetupKit` 绕过审计、13 项 CVE 全分支边界（iOS 17.7–28.0）、`IOCTokenArmor` 实包自检（`WQGuard_v1.3.0.ipa` 零明文 IOC 残留且自审为 `KNOWN_TOOL`）及 `com.wqguard.app` 反木马冒用拦截。
+- **v1.3.1 六轮红蓝对抗回归套件（`V130FeatureUnitTests` 与 `AdversarialV130Round1`–`Round6`：`Round1SyscallTests` / `Round2ExploitTests` / `Round3SystemTests` / `Round4ParserFuzzTests` / `Round5EvasionTests` / `Round6SystemIOTests`）**：覆盖 ARM64 `svc #0x80` (`0xD4001001`) 元数据抗误报、自定义 RX 段与无节头代码洞穴、部分 FairPlay `cryptid=1` 逃逸检测、50,000 指令 DoS 性能基线、`AudioToolbox` / `AVFAudio` / `AURemoteIO` 模拟器零误报隔离、独立 `.appex` `AccessorySetupKit` 绕过审计、13 项 CVE 全分支边界（iOS 17.7–28.0）与 Beta/畸形版本号解析、ZIP/IPA 差异化伪造与确定性变异模糊测试（Mach-O / FAT / ZIP）、Markdown/JSON/终端注入防护、`installation_proxy` 大规模快照与并发压测、`IOCTokenArmor` 25 令牌实包自检（`WQGuard_v1.3.1.ipa` 零意外 IOC 残留且自审为 `KNOWN_TOOL`）及 `com.wqguard.app` 反木马冒用拦截。
 
 - **真实 Apple `codesign` CoreEntitlements DER 与 JavaScriptCore 实机引擎回归 (`SecurityAuditV121RegressionTests`)**：直接调用宿主机 `/usr/bin/clang`、`/usr/bin/codesign --generate-entitlement-der`、`/usr/bin/lipo` 与 `/usr/bin/strip -x` 生成真实 `0x70`/`0xb0` Slot 7 DER 遮蔽样本（含 XML `<false/>` 掩护 DER `true`）、`arm64`+`arm64e` 双切片 `__objc_methname` 剥离样本、独立 `PlugIns/*.appex` 与 `Extensions/*.appex` 越权小组件及 `<64B` 零声明 Deflate 炸弹，并在 macOS 原生 `JavaScriptCore` (`JSContext`) 中实跑 `brotli-guard.js` 校验大小写/重复头走私拦截与各代理端 `HTTP 403` 响应结构。
 - **畸形二进制与整数溢出模糊测试 (`MachOIntegerSafetyTests` / `AdversarialM2`)**：覆盖 `UInt32` `cryptoff + cryptsize` 环绕溢出、伪造 `65,536` 切片数的胖二进制头部炸弹、越界 `LC_SYMTAB` 字符串表偏移、截断的 `CSBlob` 索引槽与畸形 ASN.1 DER 长度字段，确保解析器永不触发 `EXC_BAD_ACCESS` 崩溃。
@@ -248,7 +248,7 @@ WQGuard/
 │   │   └── CLI/                           # 零依赖命令行参数解析器、TTY 进度渲染与执行器
 │   └── wqguard-cli/main.swift             # macOS 命令行工具入口
 ├── WQGuard/                               # iOS SwiftUI 客户端源码 (仪表盘/审计发现/IPA 审查/固件雷达/设置)
-├── Tests/WQGuardCoreTests/                # 750 项自动化单元、模糊、双语不变量与红蓝对抗测试套件 + 真实 codesign/JavaScriptCore 回归测试
+├── Tests/WQGuardCoreTests/                # 40 个套件 / 800 项自动化单元、模糊、双语不变量与六轮红蓝对抗测试 (Round 1–6) + 真实 codesign/JavaScriptCore 回归测试
 └── scripts/ipabuild.sh                    # 免开发者证书自动化构建与 Ad-Hoc DER 签名打包脚本
 ```
 
@@ -257,7 +257,7 @@ WQGuard/
 ### 9. 🚀 快速上手与命令行实战指南
 
 #### 9.1 iOS 手机端安装与扫描
-1. 前往 **[GitHub Releases](https://github.com/Kianuni/WQGuard/releases/latest)** 下载最新 `WQGuard_v1.3.0.ipa`，通过常用侧载安装方式导入手机（注：WQGuard 对所有第三方侧载签名器本身亦严格执行零信任审计，绝不暗开白名单；App 与核心引擎原生自适应简体中文 / English 双语）。
+1. 前往 **[GitHub Releases](https://github.com/Kianuni/WQGuard/releases/latest)** 下载最新 `WQGuard_v1.3.1.ipa`，通过常用侧载安装方式导入手机（注：WQGuard 对所有第三方侧载签名器本身亦严格执行零信任审计，绝不暗开白名单；App 与核心引擎原生自适应简体中文 / English 双语）。
 2. **全机已安装应用审计（点击首页「配置已安装扫描源」，方式 A / B 任选其一）**：
    - **方式 B（新手最简 · Mac 导出快照免 VPN）**：手机连 Mac 点信任，终端执行：
      ```bash
@@ -273,12 +273,12 @@ WQGuard/
 git clone https://github.com/Kianuni/WQGuard.git
 cd WQGuard
 
-# 运行全量 750 项红蓝对抗与只读不变量测试
+# 运行全量 800 项红蓝对抗与只读不变量测试（40 个 XCTest 套件）
 swift test
 
 # 编译 Release 版命令行工具并打包免签名 iOS IPA
 swift build -c release --product wqguard-cli
-./scripts/ipabuild.sh --clean -o build/WQGuard_v1.3.0.ipa
+./scripts/ipabuild.sh --clean -o build/WQGuard_v1.3.1.ipa
 ```
 
 ```bash
@@ -340,7 +340,7 @@ $ .build/release/wqguard-cli --export-shield ./WQGuard-Brotli-Shield.module
 
 - **Strict Zero Trust on Third-Party Sideloading Tools**: Built-in whitelisting matches **only `WQGuard` itself** (`com.wqguard.app` with exact App Group ownership + read-only self-scan signature subset verification). Third-party sideload signers, certificate managers, and loopback debuggers (`Feather`, `SideStore`, `AltStore`, `ESign`, `GBox`, `Scarlet`, `LocalDevVPN`, `StikDebug`, `TrollStore`) are **never auto-whitelisted**, surfacing objectively as `Caution` (`🟠`) or `High Risk` (`🔴`) even when App Groups are omitted.
 - **100% On-Device · Zero Telemetry**: Zero analytics SDKs and zero external network calls. Pairing files, registry snapshots, and queued `.ipa` packages remain strictly inside WQGuard's local sandbox (`Application Support/WQGuardRegistry/`), and `LocalDevVPN` communicates exclusively over fail-closed certificate-pinned local loopback with the device's own `lockdownd`.
-- **Zero-Exploit & Strict Physical Read-Only (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)**: Never invokes sandbox exploits, never follows symbolic links (`lstat` + `readlink` non-recursive forensics), maps binaries read-only (`PROT_READ`), releases Seatbelt handles via RAII (`ScopedSandboxToken`), and wipes temporary `.ipa` / `.tipa` unpack directories (`wqguard_ipa_<UUID>/`) via `defer` — continuously verified by **750 automated unit & adversarial tests across 37 XCTest suites** (including real Apple `codesign --generate-entitlement-der`, `JavaScriptCore` `brotli-guard.js` execution, ARM64 `svc #0x80` & 2026 exploit regression suites, `IOCTokenArmor` real-IPA self-audit, and full-stack bilingual localization checks). See [SECURITY.md](SECURITY.md) for full details.
+- **Zero-Exploit & Strict Physical Read-Only (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)**: Never invokes sandbox exploits, never follows symbolic links (`lstat` + `readlink` non-recursive forensics), maps binaries read-only (`PROT_READ`), releases Seatbelt handles via RAII (`ScopedSandboxToken`), and wipes temporary `.ipa` / `.tipa` unpack directories (`wqguard_ipa_<UUID>/`) via `defer` — continuously verified by **800 automated unit & adversarial tests across 40 XCTest suites** (including 6 rounds of v1.3.1 red-team adversarial suites `Round 1–6`, real Apple `codesign --generate-entitlement-der`, `JavaScriptCore` `brotli-guard.js` execution, ARM64 `svc #0x80` & 2026 exploit regression suites, deterministic Mach-O/ZIP fuzzers, `IOCTokenArmor` real-IPA self-audit, and full-stack bilingual localization checks). See [SECURITY.md](SECURITY.md) for full details.
 
 ---
 
@@ -358,18 +358,18 @@ $ .build/release/wqguard-cli --export-shield ./WQGuard-Brotli-Shield.module
 
 ### 5. 🚀 Quick Start & CLI Usage
 
-Download **`WQGuard_v1.3.0.ipa`** from **[GitHub Releases](https://github.com/Kianuni/WQGuard/releases/latest)** or build from source on macOS 14+ / Xcode 16+ / Swift 5.9+:
+Download **`WQGuard_v1.3.1.ipa`** from **[GitHub Releases](https://github.com/Kianuni/WQGuard/releases/latest)** or build from source on macOS 14+ / Xcode 16+ / Swift 5.9+:
 
 ```bash
 git clone https://github.com/Kianuni/WQGuard.git
 cd WQGuard
 
-# Run all 750 unit & adversarial read-only tests
+# Run all 800 unit & adversarial read-only tests across 40 XCTest suites
 swift test
 
 # Build release CLI & ad-hoc DER-signed iOS IPA
 swift build -c release --product wqguard-cli
-./scripts/ipabuild.sh --clean -o build/WQGuard_v1.3.0.ipa
+./scripts/ipabuild.sh --clean -o build/WQGuard_v1.3.1.ipa
 
 # Audit an IPA/TIPA, evaluate firmware CVEs, or export any proxy client shield
 .build/release/wqguard-cli --ipa /path/to/app.ipa --format markdown -o report.md

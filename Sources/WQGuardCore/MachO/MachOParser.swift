@@ -144,7 +144,7 @@ public struct BinaryReader: Sendable {
     public var count: Int { data.count }
 
     public init(data: Data) {
-        self.data = data
+        self.data = data.startIndex == 0 ? data : Data(data)
     }
 
     @inlinable
@@ -210,7 +210,8 @@ public struct BinaryReader: Sendable {
 
     public func subdata(offset: Int, length: Int) -> Data? {
         guard inRange(offset: offset, length: length) else { return nil }
-        return data.subdata(in: offset..<(offset + length))
+        let start = data.startIndex + offset
+        return data.subdata(in: start..<(start + length))
     }
 }
 
@@ -464,7 +465,7 @@ public struct MachOFile: Sendable {
         self.flags = flags
         self.is64Bit = is64Bit
         self.isSwapped = isSwapped
-        self.sliceData = sliceData
+        self.sliceData = sliceData.startIndex == 0 ? sliceData : Data(sliceData)
         self.slicesInContainer = slicesInContainer
         self.segments = segments
         self.encryptionInfo = encryptionInfo
@@ -502,7 +503,7 @@ public struct MachOFile: Sendable {
     }
 
     public var linksContainermanager: Bool {
-        linksDylib(named: "libsystem_containermanager")
+        linksDylib(named: IOCTokenArmor.tContainerMgrPrefix)
     }
 
     public func linksDylib(named name: String) -> Bool {
@@ -544,7 +545,8 @@ public struct MachOFile: Sendable {
     public var codeSignatureData: Data? {
         guard let cs = codeSignature else { return nil }
         guard UInt64(cs.dataoff) + UInt64(cs.datasize) <= UInt64(sliceData.count) else { return nil }
-        return sliceData.subdata(in: Int(cs.dataoff)..<Int(cs.dataoff + cs.datasize))
+        let start = sliceData.startIndex + Int(cs.dataoff)
+        return sliceData.subdata(in: start..<(start + Int(cs.datasize)))
     }
 
     /// Extracts Objective-C selector strings from unencrypted `__objc_methname` sections
@@ -600,10 +602,26 @@ public struct MachOFile: Sendable {
         "__entitlements", "__info_plist", "__dof_"
     ]
 
-    private static func shouldScanSectionForDirectSyscalls(_ sect: MachOSection, in segment: MachOSegment) -> Bool {
-        let sectType = sect.flags & UInt32(SECTION_TYPE)
-        if sectType == UInt32(S_ZEROFILL) || sectType == UInt32(S_GB_ZEROFILL) {
-            return false
+    private static func isZerofillInsideSegmentFilesize(_ sect: MachOSection, in segment: MachOSegment, sliceSize: Int) -> Bool {
+        guard sect.size > 0, segment.fileSize > 0 else { return false }
+        let (segEnd, segOv) = segment.fileOffset.addingReportingOverflow(segment.fileSize)
+        guard !segOv else { return false }
+        let sectStart = UInt64(sect.offset)
+        let (sectEnd, sectOv) = sectStart.addingReportingOverflow(sect.size)
+        guard !sectOv else { return false }
+        return sectStart >= segment.fileOffset && sectEnd <= segEnd && sectEnd <= UInt64(sliceSize)
+    }
+
+    private static func shouldScanSectionForDirectSyscalls(_ sect: MachOSection, in segment: MachOSegment, sliceSize: Int) -> Bool {
+        let rawSectType = sect.flags & UInt32(SECTION_TYPE)
+        let sectType: UInt32
+        if rawSectType == UInt32(S_ZEROFILL) || rawSectType == UInt32(S_GB_ZEROFILL) {
+            guard isZerofillInsideSegmentFilesize(sect, in: segment, sliceSize: sliceSize) else {
+                return false
+            }
+            sectType = UInt32(S_REGULAR)
+        } else {
+            sectType = rawSectType
         }
 
         let instructionAttrsMask = UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS)
@@ -617,14 +635,20 @@ public struct MachOFile: Sendable {
         }
 
         let hasExecuteProt = (segment.initialProtection & 0x04) != 0
-        guard hasExecuteProt && sectType == UInt32(S_REGULAR) else {
+        guard hasExecuteProt else {
             return false
         }
 
-        return !excludedCustomRXSectionPrefixes.contains { name.hasPrefix($0) }
+        if segment.name == "__TEXT" {
+            guard sectType == UInt32(S_REGULAR) else {
+                return false
+            }
+            return !excludedCustomRXSectionPrefixes.contains { name.hasPrefix($0) }
+        }
+        return true
     }
 
-    /// Scans unencrypted ARM64/ARM64_32 executable sections for inline `svc #0x80` (`0xD400_1001`) instructions.
+    /// Scans unencrypted ARM64/ARM64_32 executable sections and uncovered executable segment bytes for inline `svc #0x80` (`0xD400_1001`) instructions.
     public func scanDirectSyscalls(maxSampleSites: Int = 16) -> (totalCount: Int, sampleSites: [DirectSyscallSite]) {
         guard cpuType == CPU_TYPE_ARM64 || cpuType == CPU_TYPE_ARM64_32 else {
             return (0, [])
@@ -644,9 +668,41 @@ public struct MachOFile: Sendable {
         let sampleLimit = max(0, maxSampleSites)
         var totalCount = 0
         var sampleSites: [DirectSyscallSite] = []
+        let headerSize = is64Bit ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+        let commandsEnd = min(sliceData.count, headerSize + Int(sizeofcmds))
+
+        func scanWordRange(start: Int, sizeInt: Int, segName: String, sectName: String, baseVA: UInt64) {
+            guard sizeInt >= 4 else { return }
+            for relOff in stride(from: 0, through: sizeInt - 4, by: 4) {
+                let wordOffset = start + relOff
+                if let er = encRange {
+                    let wordRange = wordOffset..<(wordOffset + 4)
+                    if wordRange.overlaps(er) {
+                        continue
+                    }
+                }
+
+                guard let insn = reader.readUInt32(at: wordOffset, swapped: isSwapped) else {
+                    continue
+                }
+
+                if insn == 0xD400_1001 {
+                    totalCount += 1
+                    if sampleSites.count < sampleLimit {
+                        sampleSites.append(DirectSyscallSite(
+                            segmentName: segName,
+                            sectionName: sectName,
+                            fileOffset: wordOffset,
+                            virtualAddress: baseVA &+ UInt64(relOff),
+                            immediate: 0x0080
+                        ))
+                    }
+                }
+            }
+        }
 
         for seg in segments {
-            for sect in seg.sections where Self.shouldScanSectionForDirectSyscalls(sect, in: seg) {
+            for sect in seg.sections where Self.shouldScanSectionForDirectSyscalls(sect, in: seg, sliceSize: sliceData.count) {
                 guard let start = Int(exactly: sect.offset),
                       let sizeInt = Int(exactly: sect.size),
                       sizeInt >= 4,
@@ -655,32 +711,64 @@ public struct MachOFile: Sendable {
                       sizeInt <= sliceData.count - start else {
                     continue
                 }
+                scanWordRange(start: start, sizeInt: sizeInt, segName: seg.name, sectName: sect.sectionName, baseVA: sect.address)
+            }
 
-                for relOff in stride(from: 0, through: sizeInt - 4, by: 4) {
-                    let wordOffset = start + relOff
-                    if let er = encRange {
-                        let wordRange = wordOffset..<(wordOffset + 4)
-                        if wordRange.overlaps(er) {
-                            continue
-                        }
-                    }
+            // Also scan executable segment file bytes [fileOffset, fileOffset + fileSize) not covered by any section header
+            // (defeating header-padding code caves and nsects=0 executable segments while respecting metadata sections).
+            if (seg.initialProtection & 0x04) != 0 && seg.fileSize > 0 && seg.fileOffset < UInt64(sliceData.count) {
+                let segStart = Int(seg.fileOffset)
+                let (rawSegEnd, segOv) = seg.fileOffset.addingReportingOverflow(seg.fileSize)
+                let clampedEnd64 = segOv ? UInt64(sliceData.count) : min(rawSegEnd, UInt64(sliceData.count))
+                let segEnd = Int(clampedEnd64)
+                guard segEnd - segStart >= 4 else { continue }
 
-                    guard let insn = reader.readUInt32(at: wordOffset, swapped: isSwapped) else {
+                var covered: [(Int, Int)] = []
+                if segStart < commandsEnd {
+                    covered.append((segStart, min(segEnd, commandsEnd)))
+                }
+                for sect in seg.sections {
+                    let rawType = sect.flags & UInt32(SECTION_TYPE)
+                    let isZF = (rawType == UInt32(S_ZEROFILL) || rawType == UInt32(S_GB_ZEROFILL))
+                    if isZF && !Self.isZerofillInsideSegmentFilesize(sect, in: seg, sliceSize: sliceData.count) {
                         continue
                     }
-
-                    if insn == 0xD400_1001 {
-                        totalCount += 1
-                        if sampleSites.count < sampleLimit {
-                            sampleSites.append(DirectSyscallSite(
-                                segmentName: seg.name,
-                                sectionName: sect.sectionName,
-                                fileOffset: wordOffset,
-                                virtualAddress: sect.address &+ UInt64(relOff),
-                                immediate: 0x0080
-                            ))
-                        }
+                    guard sect.size > 0, UInt64(sect.offset) < UInt64(segEnd) else { continue }
+                    let cStart = max(segStart, Int(sect.offset))
+                    let (rawCEnd, cOv) = UInt64(sect.offset).addingReportingOverflow(sect.size)
+                    let cEnd = cOv ? segEnd : Int(min(rawCEnd, UInt64(segEnd)))
+                    if cEnd > cStart {
+                        covered.append((cStart, cEnd))
                     }
+                }
+                covered.sort { $0.0 < $1.0 }
+
+                func scanGap(_ gapStart: Int, _ gapEnd: Int) {
+                    guard gapEnd - gapStart >= 4 else { return }
+                    let rem = (gapStart - segStart) % 4
+                    let alignedStart = rem == 0 ? gapStart : gapStart + (4 - rem)
+                    guard alignedStart <= gapEnd - 4 else { return }
+                    let gapVA = seg.vmAddress &+ UInt64(alignedStart - segStart)
+                    scanWordRange(
+                        start: alignedStart,
+                        sizeInt: gapEnd - alignedStart,
+                        segName: seg.name,
+                        sectName: "__unsectioned",
+                        baseVA: gapVA
+                    )
+                }
+
+                var cursor = segStart
+                for (ivStart, ivEnd) in covered {
+                    if ivStart > cursor {
+                        scanGap(cursor, ivStart)
+                    }
+                    if ivEnd > cursor {
+                        cursor = ivEnd
+                    }
+                }
+                if cursor < segEnd {
+                    scanGap(cursor, segEnd)
                 }
             }
         }
@@ -745,7 +833,8 @@ public final class MachOParser: Sendable {
 
     /// Parses ALL architecture slices embedded in a Universal FAT or Thin Mach-O binary so secondary
     /// slices (e.g., `arm64e` shadowed behind a clean `arm64` slice) cannot evade static inspection.
-    public static func parseAllSlices(data: Data) throws -> [MachOFile] {
+    public static func parseAllSlices(data rawInput: Data) throws -> [MachOFile] {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
         guard data.count >= 4 else {
             throw MachOParserError.fileTooSmall(actual: data.count, minimum: 4)
         }
@@ -793,7 +882,8 @@ public final class MachOParser: Sendable {
     }
 
     /// Parses a Mach-O binary from raw Data (supports Thin 32-bit, Thin 64-bit, and Universal FAT).
-    public static func parse(data: Data, preferredCpuType: cpu_type_t? = nil) throws -> MachOFile {
+    public static func parse(data rawInput: Data, preferredCpuType: cpu_type_t? = nil) throws -> MachOFile {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
         guard data.count >= 4 else {
             throw MachOParserError.fileTooSmall(actual: data.count, minimum: 4)
         }
@@ -832,7 +922,8 @@ public final class MachOParser: Sendable {
     }
 
     /// Lists all architecture slices embedded in a binary without decoding load commands.
-    public static func listSlices(in data: Data) throws -> [MachOSliceInfo] {
+    public static func listSlices(in rawInput: Data) throws -> [MachOSliceInfo] {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
         guard data.count >= 4 else {
             throw MachOParserError.fileTooSmall(actual: data.count, minimum: 4)
         }
@@ -876,12 +967,14 @@ public final class MachOParser: Sendable {
     }
 
     /// Extracts raw slice Data from a Universal FAT or Thin binary for a specified slice.
-    public static func extractSlice(from data: Data, slice: MachOSliceInfo) throws -> Data {
+    public static func extractSlice(from rawInput: Data, slice: MachOSliceInfo) throws -> Data {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
         guard slice.offset <= UInt64(data.count),
               slice.size <= UInt64(data.count) - slice.offset else {
             throw MachOParserError.sliceOutOfBounds(offset: slice.offset, size: slice.size, total: data.count)
         }
-        return data.subdata(in: Int(slice.offset)..<Int(slice.offset + slice.size))
+        let start = data.startIndex + Int(slice.offset)
+        return data.subdata(in: start..<(start + Int(slice.size)))
     }
 
     // MARK: - Internal Helpers

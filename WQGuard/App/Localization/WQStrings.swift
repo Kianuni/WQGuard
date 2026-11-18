@@ -771,9 +771,9 @@ public enum WQStrings {
 
     // Threat Indicators
     public static let indicatorMapZh: [String: String] = [
-        "container_query_create": "私有容器查询创建调用 (containermanagerd 跨沙盒利用入口)",
-        "container_copy_sandbox_token": "私有沙盒扩展令牌签发请求 (绕过系统访问控制)",
-        "libsystem_containermanager.dylib": "引用私有容器管理器动态库",
+        IOCTokenArmor.tCqCreate: "私有容器查询创建调用 (containermanagerd 跨沙盒利用入口)",
+        IOCTokenArmor.tCqCopyToken: "私有沙盒扩展令牌签发请求 (绕过系统访问控制)",
+        IOCTokenArmor.tContainerMgrDylib: "引用私有容器管理器动态库",
         "com.apple.containermanagerd": "直接 XPC 访问容器管理守护进程",
         "fsgetpath": "底层 APFS Inode 路径暴力破解枚举调用",
         "escaping_symlink": "共享容器内异常逃逸符号链接 (S_ISLNK 指向外部路径)",

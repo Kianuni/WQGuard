@@ -9,13 +9,13 @@
 import Foundation
 
 /// Runtime XOR-0x5A IOC token armor preventing scanner binary self-triggering on `__TEXT,__cstring`.
-internal enum IOCTokenArmor {
+public enum IOCTokenArmor {
     // Dynamic Foundation call prevents LLVM -O WMO IPSCCP from constant-folding back into __cstring,
     // while remaining 100% Sendable and deterministic (PID is always > 0).
     private static let xorKey: UInt8 = ProcessInfo.processInfo.processIdentifier > -1 ? 0x5A : 0x00
 
     @inline(never)
-    internal static func decode(_ encoded: [UInt8]) -> String {
+    public static func decode(_ encoded: [UInt8]) -> String {
         var out = [UInt8]()
         out.reserveCapacity(encoded.count)
         for b in encoded {
@@ -25,15 +25,34 @@ internal enum IOCTokenArmor {
     }
 
     // Short identifier names ensure __swift5_reflstr / symbol tables never contain IOC substrings:
-    internal static var tAudioDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x37, 0x22, 0x3E]) }
-    internal static var tCoreMediaDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x39, 0x35, 0x28, 0x3F, 0x37, 0x3F, 0x3E, 0x33, 0x3B, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x37, 0x22, 0x3E]) }
-    internal static var tBookDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x38, 0x35, 0x35, 0x31, 0x3B, 0x29, 0x29, 0x3F, 0x2E, 0x3E]) }
-    internal static var tStoreDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x33, 0x2E, 0x2F, 0x34, 0x3F, 0x29, 0x29, 0x2E, 0x35, 0x28, 0x3F, 0x3E]) }
-    internal static var tStorePrivPrefix: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x33, 0x2E, 0x2F, 0x34, 0x3F, 0x29, 0x29, 0x2E, 0x35, 0x28, 0x3F, 0x3E, 0x74, 0x2A, 0x28, 0x33, 0x2C, 0x3B, 0x2E, 0x3F]) }
-    internal static var tBookSQLite: String { decode([0x18, 0x16, 0x1E, 0x3B, 0x2E, 0x3B, 0x38, 0x3B, 0x29, 0x3F, 0x17, 0x3B, 0x34, 0x3B, 0x3D, 0x3F, 0x28, 0x74, 0x29, 0x2B, 0x36, 0x33, 0x2E, 0x3F]) }
-    internal static var tDownloadsSQLite: String { decode([0x3E, 0x35, 0x2D, 0x34, 0x36, 0x35, 0x3B, 0x3E, 0x29, 0x74, 0x68, 0x62, 0x74, 0x29, 0x2B, 0x36, 0x33, 0x2E, 0x3F, 0x3E, 0x38]) }
-    internal static var tGestaltPlist: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x17, 0x35, 0x38, 0x33, 0x36, 0x3F, 0x1D, 0x3F, 0x29, 0x2E, 0x3B, 0x36, 0x2E, 0x74, 0x2A, 0x36, 0x33, 0x29, 0x2E]) }
-    internal static var tGestaltGroup: String { decode([0x29, 0x23, 0x29, 0x2E, 0x3F, 0x37, 0x3D, 0x28, 0x35, 0x2F, 0x2A, 0x74, 0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x37, 0x35, 0x38, 0x33, 0x36, 0x3F, 0x3D, 0x3F, 0x29, 0x2E, 0x3B, 0x36, 0x2E, 0x39, 0x3B, 0x39, 0x32, 0x3F]) }
+    public static var tAudioDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x37, 0x22, 0x3E]) }
+    public static var tCoreMediaDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x39, 0x35, 0x28, 0x3F, 0x37, 0x3F, 0x3E, 0x33, 0x3B, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x37, 0x22, 0x3E]) }
+    public static var tBookDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x38, 0x35, 0x35, 0x31, 0x3B, 0x29, 0x29, 0x3F, 0x2E, 0x3E]) }
+    public static var tStoreDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x33, 0x2E, 0x2F, 0x34, 0x3F, 0x29, 0x29, 0x2E, 0x35, 0x28, 0x3F, 0x3E]) }
+    public static var tStorePrivPrefix: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x33, 0x2E, 0x2F, 0x34, 0x3F, 0x29, 0x29, 0x2E, 0x35, 0x28, 0x3F, 0x3E, 0x74, 0x2A, 0x28, 0x33, 0x2C, 0x3B, 0x2E, 0x3F]) }
+    public static var tBookSQLite: String { decode([0x18, 0x16, 0x1E, 0x3B, 0x2E, 0x3B, 0x38, 0x3B, 0x29, 0x3F, 0x17, 0x3B, 0x34, 0x3B, 0x3D, 0x3F, 0x28, 0x74, 0x29, 0x2B, 0x36, 0x33, 0x2E, 0x3F]) }
+    public static var tDownloadsSQLite: String { decode([0x3E, 0x35, 0x2D, 0x34, 0x36, 0x35, 0x3B, 0x3E, 0x29, 0x74, 0x68, 0x62, 0x74, 0x29, 0x2B, 0x36, 0x33, 0x2E, 0x3F, 0x3E, 0x38]) }
+    public static var tGestaltPlist: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x17, 0x35, 0x38, 0x33, 0x36, 0x3F, 0x1D, 0x3F, 0x29, 0x2E, 0x3B, 0x36, 0x2E, 0x74, 0x2A, 0x36, 0x33, 0x29, 0x2E]) }
+    public static var tGestaltGroup: String { decode([0x29, 0x23, 0x29, 0x2E, 0x3F, 0x37, 0x3D, 0x28, 0x35, 0x2F, 0x2A, 0x74, 0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x37, 0x35, 0x38, 0x33, 0x36, 0x3F, 0x3D, 0x3F, 0x29, 0x2E, 0x3B, 0x36, 0x2E, 0x39, 0x3B, 0x39, 0x32, 0x3F]) }
+
+    // Private frameworks, symbols, and containermanager C-string needles armored against self-scan:
+    public static var tMediaExpFw: String { decode([0x17, 0x3F, 0x3E, 0x33, 0x3B, 0x1F, 0x22, 0x2A, 0x3F, 0x28, 0x33, 0x3F, 0x34, 0x39, 0x3F, 0x74, 0x3C, 0x28, 0x3B, 0x37, 0x3F, 0x2D, 0x35, 0x28, 0x31]) }
+    public static var tBookPrivFw: String { decode([0x18, 0x35, 0x35, 0x31, 0x16, 0x33, 0x38, 0x28, 0x3B, 0x28, 0x23, 0x0A, 0x28, 0x33, 0x2C, 0x3B, 0x2E, 0x3F, 0x74, 0x3C, 0x28, 0x3B, 0x37, 0x3F, 0x2D, 0x35, 0x28, 0x31]) }
+    public static var tCMSessionSetProp: String { decode([0x19, 0x17, 0x09, 0x3F, 0x29, 0x29, 0x33, 0x35, 0x34, 0x09, 0x3F, 0x2E, 0x0A, 0x28, 0x35, 0x2A, 0x3F, 0x28, 0x2E, 0x23]) }
+    public static var tAudioSessionSetCMProp: String { decode([0x1B, 0x2F, 0x3E, 0x33, 0x35, 0x09, 0x3F, 0x29, 0x29, 0x33, 0x35, 0x34, 0x09, 0x3F, 0x2E, 0x19, 0x17, 0x0A, 0x28, 0x35, 0x2A, 0x3F, 0x28, 0x2E, 0x23]) }
+    public static var tContainerMgrDylib: String { decode([0x36, 0x33, 0x38, 0x29, 0x23, 0x29, 0x2E, 0x3F, 0x37, 0x05, 0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x37, 0x3B, 0x34, 0x3B, 0x3D, 0x3F, 0x28, 0x74, 0x3E, 0x23, 0x36, 0x33, 0x38]) }
+    public static var tContainerMgrPrefix: String { decode([0x36, 0x33, 0x38, 0x29, 0x23, 0x29, 0x2E, 0x3F, 0x37, 0x05, 0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x37, 0x3B, 0x34, 0x3B, 0x3D, 0x3F, 0x28]) }
+    public static var tCqCreate: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x39, 0x28, 0x3F, 0x3B, 0x2E, 0x3F]) }
+    public static var tCqSetGroups: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x29, 0x3F, 0x2E, 0x05, 0x3D, 0x28, 0x35, 0x2F, 0x2A, 0x05, 0x33, 0x3E, 0x3F, 0x34, 0x2E, 0x33, 0x3C, 0x33, 0x3F, 0x28, 0x29]) }
+    public static var tCqSetPart: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x35, 0x2A, 0x3F, 0x28, 0x3B, 0x2E, 0x33, 0x35, 0x34, 0x05, 0x29, 0x3F, 0x2E, 0x05, 0x2A, 0x3B, 0x28, 0x2E]) }
+    public static var tCqSetFlags: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x35, 0x2A, 0x3F, 0x28, 0x3B, 0x2E, 0x33, 0x35, 0x34, 0x05, 0x29, 0x3F, 0x2E, 0x05, 0x3C, 0x36, 0x3B, 0x3D, 0x29]) }
+    public static var tCqCopyToken: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x39, 0x35, 0x2A, 0x23, 0x05, 0x29, 0x3B, 0x34, 0x3E, 0x38, 0x35, 0x22, 0x05, 0x2E, 0x35, 0x31, 0x3F, 0x34]) }
+    public static var tSbxConsume: String { decode([0x29, 0x3B, 0x34, 0x3E, 0x38, 0x35, 0x22, 0x05, 0x3F, 0x22, 0x2E, 0x3F, 0x34, 0x29, 0x33, 0x35, 0x34, 0x05, 0x39, 0x35, 0x34, 0x29, 0x2F, 0x37, 0x3F]) }
+    public static var tCqSingleResult: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x3D, 0x3F, 0x2E, 0x05, 0x29, 0x33, 0x34, 0x3D, 0x36, 0x3F, 0x05, 0x28, 0x3F, 0x29, 0x2F, 0x36, 0x2E]) }
+    public static var tCqIterSync: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x33, 0x2E, 0x3F, 0x28, 0x3B, 0x2E, 0x3F, 0x05, 0x28, 0x3F, 0x29, 0x2F, 0x36, 0x2E, 0x29, 0x05, 0x29, 0x23, 0x34, 0x39]) }
+    public static var tCqSetClass: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x29, 0x3F, 0x2E, 0x05, 0x39, 0x36, 0x3B, 0x29, 0x29]) }
+    public static var tCqFree: String { decode([0x39, 0x35, 0x34, 0x2E, 0x3B, 0x33, 0x34, 0x3F, 0x28, 0x05, 0x2B, 0x2F, 0x3F, 0x28, 0x23, 0x05, 0x3C, 0x28, 0x3F, 0x3F]) }
+    public static var tSbxRelease: String { decode([0x29, 0x3B, 0x34, 0x3E, 0x38, 0x35, 0x22, 0x05, 0x3F, 0x22, 0x2E, 0x3F, 0x34, 0x29, 0x33, 0x35, 0x34, 0x05, 0x28, 0x3F, 0x36, 0x3F, 0x3B, 0x29, 0x3F]) }
 }
 
 /// Centralized catalog of exploit signatures, dylibs, symbols, strings, and behavioral rules.
@@ -79,14 +98,14 @@ public enum SignatureCatalog {
     }
     
     // MARK: - 1. Dynamic Libraries
-    public static let targetDylibName = "libsystem_containermanager.dylib"
+    public static let targetDylibName = IOCTokenArmor.tContainerMgrDylib
     public static let dylibRules: [String: Rule] = [
-        "libsystem_containermanager.dylib": Rule(
+        IOCTokenArmor.tContainerMgrDylib: Rule(
             id: "DYLIB_CONTAINERMANAGER",
-            pattern: "libsystem_containermanager.dylib",
+            pattern: IOCTokenArmor.tContainerMgrDylib,
             category: "Dylib Reference",
-            description: "Direct linkage to private libsystem_containermanager.dylib, used for containermanagerd IPC/token acquisition",
-            descriptionZh: "直接链接私有容器管理器动态库 libsystem_containermanager.dylib，用于向 containermanagerd 发起跨沙盒查询与令牌获取",
+            description: "Direct linkage to private \(IOCTokenArmor.tContainerMgrDylib), used for containermanagerd IPC/token acquisition",
+            descriptionZh: "直接链接私有容器管理器动态库 \(IOCTokenArmor.tContainerMgrDylib)，用于向 containermanagerd 发起跨沙盒查询与令牌获取",
             severity: .highRisk,
             defaultLocation: "LC_LOAD_DYLIB"
         )
@@ -94,102 +113,102 @@ public enum SignatureCatalog {
     
     // MARK: - 2. Private containermanager APIs
     public static let privateContainerSymbols: [String: Rule] = [
-        "container_query_create": Rule(
+        IOCTokenArmor.tCqCreate: Rule(
             id: "SYM_QUERY_CREATE",
-            pattern: "container_query_create",
+            pattern: IOCTokenArmor.tCqCreate,
             category: "Private API Symbol",
             description: "Private containermanager API used to allocate container query objects",
-            descriptionZh: "引用私有 containermanager 接口 container_query_create，用于构造跨容器查询对象",
+            descriptionZh: "引用私有 containermanager 接口 \(IOCTokenArmor.tCqCreate)，用于构造跨容器查询对象",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_query_set_group_identifiers": Rule(
+        IOCTokenArmor.tCqSetGroups: Rule(
             id: "SYM_SET_GROUP_IDENTIFIERS",
-            pattern: "container_query_set_group_identifiers",
+            pattern: IOCTokenArmor.tCqSetGroups,
             category: "Private API Symbol",
             description: "Private API setting target App Group identifier in container query",
-            descriptionZh: "引用私有接口 container_query_set_group_identifiers 设置目标共享容器群组标识",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqSetGroups) 设置目标共享容器群组标识",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_query_operation_set_part": Rule(
+        IOCTokenArmor.tCqSetPart: Rule(
             id: "SYM_SET_PART",
-            pattern: "container_query_operation_set_part",
+            pattern: IOCTokenArmor.tCqSetPart,
             category: "Private API Symbol",
             description: "Private API setting container part (e.g. part=3 for Library/Caches)",
-            descriptionZh: "引用私有接口 container_query_operation_set_part 指定容器子路径（例如 part=3 指向 Library/Caches）",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqSetPart) 指定容器子路径（例如 part=3 指向 Library/Caches）",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_query_operation_set_flags": Rule(
+        IOCTokenArmor.tCqSetFlags: Rule(
             id: "SYM_SET_FLAGS",
-            pattern: "container_query_operation_set_flags",
+            pattern: IOCTokenArmor.tCqSetFlags,
             category: "Private API Symbol",
             description: "Private API setting query operation flags (0x0000008000000000ULL / 0x0000000800000000ULL)",
-            descriptionZh: "引用私有接口 container_query_operation_set_flags 配置底层容器查询标志位",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqSetFlags) 配置底层容器查询标志位",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_copy_sandbox_token": Rule(
+        IOCTokenArmor.tCqCopyToken: Rule(
             id: "SYM_COPY_SANDBOX_TOKEN",
-            pattern: "container_copy_sandbox_token",
+            pattern: IOCTokenArmor.tCqCopyToken,
             category: "Private API Symbol",
             description: "Private API retrieving issued Seatbelt sandbox token from containermanagerd result",
-            descriptionZh: "引用私有接口 container_copy_sandbox_token 提取 containermanagerd 签发的跨沙盒访问令牌",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqCopyToken) 提取 containermanagerd 签发的跨沙盒访问令牌",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "sandbox_extension_consume": Rule(
+        IOCTokenArmor.tSbxConsume: Rule(
             id: "SYM_SANDBOX_EXTENSION_CONSUME",
-            pattern: "sandbox_extension_consume",
+            pattern: IOCTokenArmor.tSbxConsume,
             category: "Private API Symbol",
             description: "Darwin Seatbelt API consuming sandbox extension token to acquire kernel path privileges",
-            descriptionZh: "调用 Darwin Seatbelt 消费接口 sandbox_extension_consume 激活内核路径读写特权",
+            descriptionZh: "调用 Darwin Seatbelt 消费接口 \(IOCTokenArmor.tSbxConsume) 激活内核路径读写特权",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_query_get_single_result": Rule(
+        IOCTokenArmor.tCqSingleResult: Rule(
             id: "SYM_GET_SINGLE_RESULT",
-            pattern: "container_query_get_single_result",
+            pattern: IOCTokenArmor.tCqSingleResult,
             category: "Private API Symbol",
             description: "Private API dispatching sync query to containermanagerd and returning container result",
-            descriptionZh: "引用私有接口 container_query_get_single_result 向 containermanagerd 发起同步容器查询",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqSingleResult) 向 containermanagerd 发起同步容器查询",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_query_iterate_results_sync": Rule(
+        IOCTokenArmor.tCqIterSync: Rule(
             id: "SYM_ITERATE_RESULTS_SYNC",
-            pattern: "container_query_iterate_results_sync",
+            pattern: IOCTokenArmor.tCqIterSync,
             category: "Private API Symbol",
             description: "Private API synchronously iterating results from containermanagerd",
-            descriptionZh: "引用私有接口 container_query_iterate_results_sync 同步遍历容器查询结果",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqIterSync) 同步遍历容器查询结果",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_query_set_class": Rule(
+        IOCTokenArmor.tCqSetClass: Rule(
             id: "SYM_SET_CLASS",
-            pattern: "container_query_set_class",
+            pattern: IOCTokenArmor.tCqSetClass,
             category: "Private API Symbol",
             description: "Private API setting container class (e.g. class=7 for group data)",
-            descriptionZh: "引用私有接口 container_query_set_class 指定目标容器类别（如 class=7）",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqSetClass) 指定目标容器类别（如 class=7）",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "container_query_free": Rule(
+        IOCTokenArmor.tCqFree: Rule(
             id: "SYM_QUERY_FREE",
-            pattern: "container_query_free",
+            pattern: IOCTokenArmor.tCqFree,
             category: "Private API Symbol",
             description: "Private API freeing container query resources",
-            descriptionZh: "引用私有接口 container_query_free 释放容器查询句柄",
+            descriptionZh: "引用私有接口 \(IOCTokenArmor.tCqFree) 释放容器查询句柄",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "sandbox_extension_release": Rule(
+        IOCTokenArmor.tSbxRelease: Rule(
             id: "SYM_SANDBOX_EXTENSION_RELEASE",
-            pattern: "sandbox_extension_release",
+            pattern: IOCTokenArmor.tSbxRelease,
             category: "Private API Symbol",
             description: "Darwin Seatbelt API releasing sandbox extension handle",
-            descriptionZh: "调用 Darwin Seatbelt 接口 sandbox_extension_release 释放沙盒扩展令牌句柄",
+            descriptionZh: "调用 Darwin Seatbelt 接口 \(IOCTokenArmor.tSbxRelease) 释放沙盒扩展令牌句柄",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         )
@@ -326,42 +345,42 @@ public enum SignatureCatalog {
     // NOTE: Never add AudioToolbox.framework, AVFAudio.framework, AudioOutputUnitStart, or AURemoteIO
     // to prevent false positives on legitimate sideloaded emulators/games (Delta, RetroArch, PPSSPP).
     public static let standaloneExploitDylibRules: [String: Rule] = [
-        "MediaExperience.framework": Rule(
+        IOCTokenArmor.tMediaExpFw: Rule(
             id: "DYLIB_AUDIOMXD_MEDIAEXPERIENCE",
-            pattern: "CVE-2026-65339:MediaExperience.framework",
+            pattern: "CVE-2026-65339:\(IOCTokenArmor.tMediaExpFw)",
             category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
-            description: "Direct linkage to private MediaExperience.framework, used to communicate with audiomxd and bypass microphone TCC privacy controls (CVE-2026-65339).",
-            descriptionZh: "直接链接私有框架 MediaExperience.framework，可用于与 audiomxd 通信并绕过麦克风 TCC 隐私授权保护 (CVE-2026-65339)。",
+            description: "Direct linkage to private \(IOCTokenArmor.tMediaExpFw), used to communicate with audiomxd and bypass microphone TCC privacy controls (CVE-2026-65339).",
+            descriptionZh: "直接链接私有框架 \(IOCTokenArmor.tMediaExpFw)，可用于与 audiomxd 通信并绕过麦克风 TCC 隐私授权保护 (CVE-2026-65339)。",
             severity: .highRisk,
             defaultLocation: "LC_LOAD_DYLIB"
         ),
-        "BookLibraryPrivate.framework": Rule(
+        IOCTokenArmor.tBookPrivFw: Rule(
             id: "DYLIB_BOOKRESTORE_PRIVATE",
-            pattern: "BookRestore:BookLibraryPrivate.framework",
+            pattern: "BookRestore:\(IOCTokenArmor.tBookPrivFw)",
             category: "BookRestore / bl_sbx Escape",
-            description: "Direct linkage to private BookLibraryPrivate.framework, associated with BookRestore / bl_sbx bookassetd sandbox escape chains.",
-            descriptionZh: "直接链接私有框架 BookLibraryPrivate.framework，常见于 BookRestore / bl_sbx 图书守护进程沙盒逃逸利用链。",
+            description: "Direct linkage to private \(IOCTokenArmor.tBookPrivFw), associated with BookRestore / bl_sbx bookassetd sandbox escape chains.",
+            descriptionZh: "直接链接私有框架 \(IOCTokenArmor.tBookPrivFw)，常见于 BookRestore / bl_sbx 图书守护进程沙盒逃逸利用链。",
             severity: .highRisk,
             defaultLocation: "LC_LOAD_DYLIB"
         )
     ]
 
     public static let standaloneExploitSymbolRules: [String: Rule] = [
-        "CMSessionSetProperty": Rule(
+        IOCTokenArmor.tCMSessionSetProp: Rule(
             id: "SYM_CMSESSION_SET_PROPERTY",
-            pattern: "CVE-2026-65339:CMSessionSetProperty",
+            pattern: "CVE-2026-65339:\(IOCTokenArmor.tCMSessionSetProp)",
             category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
-            description: "Imports private MediaExperience API CMSessionSetProperty, associated with CVE-2026-65339 audiomxd microphone TCC bypass.",
-            descriptionZh: "导入私有 MediaExperience 接口 CMSessionSetProperty，涉及 CVE-2026-65339 audiomxd 麦克风隐私绕过攻击向量。",
+            description: "Imports private MediaExperience API \(IOCTokenArmor.tCMSessionSetProp), associated with CVE-2026-65339 audiomxd microphone TCC bypass.",
+            descriptionZh: "导入私有 MediaExperience 接口 \(IOCTokenArmor.tCMSessionSetProp)，涉及 CVE-2026-65339 audiomxd 麦克风隐私绕过攻击向量。",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         ),
-        "AudioSessionSetCMProperty": Rule(
+        IOCTokenArmor.tAudioSessionSetCMProp: Rule(
             id: "SYM_AUDIOSESSION_SET_CM_PROPERTY",
-            pattern: "CVE-2026-65339:AudioSessionSetCMProperty",
+            pattern: "CVE-2026-65339:\(IOCTokenArmor.tAudioSessionSetCMProp)",
             category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
-            description: "Imports private MediaExperience API AudioSessionSetCMProperty, associated with CVE-2026-65339 audiomxd microphone TCC bypass.",
-            descriptionZh: "导入私有 MediaExperience 接口 AudioSessionSetCMProperty，涉及 CVE-2026-65339 audiomxd 麦克风隐私绕过攻击向量。",
+            description: "Imports private MediaExperience API \(IOCTokenArmor.tAudioSessionSetCMProp), associated with CVE-2026-65339 audiomxd microphone TCC bypass.",
+            descriptionZh: "导入私有 MediaExperience 接口 \(IOCTokenArmor.tAudioSessionSetCMProp)，涉及 CVE-2026-65339 audiomxd 麦克风隐私绕过攻击向量。",
             severity: .highRisk,
             defaultLocation: "LC_SYMTAB"
         )

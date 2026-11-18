@@ -78,7 +78,8 @@ public final class MachOScanner: @unchecked Sendable {
     // MARK: - Mach-O Parsing (Delegated to MachOParser)
     
     /// Parses load commands, symbols, Objective-C selectors, and string tables across all slices in raw Mach-O data.
-    public func parseMachO(data: Data) throws -> ParsedBinaryDetails {
+    public func parseMachO(data rawInput: Data) throws -> ParsedBinaryDetails {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
         let slices = try MachOParser.shared.parseAllSlices(data: data)
         return parseMachO(files: slices, rawData: data)
     }
@@ -139,9 +140,18 @@ public final class MachOScanner: @unchecked Sendable {
                 ".com.apple.mobile_container_manager.metadata.plist",
                 ".csstore",
                 "com.apple.LaunchServices-",
-                "libsystem_containermanager.dylib"
+                SignatureCatalog.targetDylibName
             ]
             for extra in SignatureCatalog.standaloneExploitCandidateStrings where !candidateStrings.contains(extra) {
+                candidateStrings.append(extra)
+            }
+            for extra in SignatureCatalog.standaloneExploitDylibRules.keys.sorted() where !candidateStrings.contains(extra) {
+                candidateStrings.append(extra)
+            }
+            for extra in SignatureCatalog.standaloneExploitSymbolRules.keys.sorted() where !candidateStrings.contains(extra) {
+                candidateStrings.append(extra)
+            }
+            for extra in SignatureCatalog.privateContainerSymbols.keys.sorted() where !candidateStrings.contains(extra) {
                 candidateStrings.append(extra)
             }
             
@@ -186,10 +196,19 @@ public final class MachOScanner: @unchecked Sendable {
             return SignatureCatalog.pathEnumerationSymbols[cleanSym] ?? SignatureCatalog.pathEnumerationSymbols[sym]
         }
         let hasDirectSyscalls = details.directSyscallCount > 0
+        let hasDlopenImport = details.symbols.contains { sym in
+            let clean = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
+            return clean == "dlopen" || sym.contains("dlopen")
+        }
+        let hasDlsymImport = details.symbols.contains { sym in
+            let clean = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
+            return clean == "dlsym" || sym.contains("dlsym")
+        }
+        let hasDynamicLoadingImports = hasDlopenImport && hasDlsymImport
 
         var standaloneDylibMatches: [(rule: SignatureCatalog.Rule, dylib: String)] = []
+        let sortedDylibRules = SignatureCatalog.standaloneExploitDylibRules.sorted { $0.key < $1.key }
         if !details.isFairPlayEncrypted || context.installChannel != .appStore {
-            let sortedDylibRules = SignatureCatalog.standaloneExploitDylibRules.sorted { $0.key < $1.key }
             for dylib in details.linkedDylibs {
                 for (pattern, rule) in sortedDylibRules {
                     if dylib.contains(pattern) || dylib.hasSuffix(pattern) {
@@ -201,6 +220,7 @@ public final class MachOScanner: @unchecked Sendable {
 
         var standaloneSymbolMatches: [(rule: SignatureCatalog.Rule, symbol: String)] = []
         var standaloneStringMatches: [(rule: SignatureCatalog.Rule, pattern: String)] = []
+        var standaloneCStringMatches: [(rule: SignatureCatalog.Rule, pattern: String)] = []
         if !details.isFairPlayEncrypted {
             for sym in details.symbols {
                 let cleanSym = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
@@ -217,6 +237,27 @@ public final class MachOScanner: @unchecked Sendable {
                     }
                 }
             }
+
+            // Detect private frameworks / symbols resolved dynamically via dlopen(path) + dlsym(name) C-strings
+            if hasDynamicLoadingImports {
+                let sortedSymbolRules = SignatureCatalog.standaloneExploitSymbolRules.sorted { $0.key < $1.key }
+                for str in details.textStrings {
+                    for (pattern, rule) in sortedDylibRules {
+                        if str.contains(pattern),
+                           !standaloneDylibMatches.contains(where: { $0.rule.pattern == rule.pattern }),
+                           !standaloneCStringMatches.contains(where: { $0.rule.pattern == rule.pattern }) {
+                            standaloneCStringMatches.append((rule: rule, pattern: pattern))
+                        }
+                    }
+                    for (symKey, rule) in sortedSymbolRules {
+                        if str.contains(symKey),
+                           !standaloneSymbolMatches.contains(where: { $0.rule.pattern == rule.pattern }),
+                           !standaloneCStringMatches.contains(where: { $0.rule.pattern == rule.pattern }) {
+                            standaloneCStringMatches.append((rule: rule, pattern: symKey))
+                        }
+                    }
+                }
+            }
         }
 
         let hasStandaloneExploits = !standalonePathEnumMatches.isEmpty
@@ -224,6 +265,7 @@ public final class MachOScanner: @unchecked Sendable {
             || !standaloneDylibMatches.isEmpty
             || !standaloneSymbolMatches.isEmpty
             || !standaloneStringMatches.isEmpty
+            || !standaloneCStringMatches.isEmpty
         
         // 1. Layer 1 Gating Check (only fast-paths when both App Groups AND all App-Group-independent exploits are absent)
         let gating = EntitlementGating.evaluate(hasAppGroups: hasAppGroups, appGroups: context.appGroups)
@@ -297,6 +339,11 @@ public final class MachOScanner: @unchecked Sendable {
             appendUniqueIndicator(match.rule.toIndicator(at: "__TEXT: \(match.pattern)"))
             matchedSymbols.append(match.rule.pattern)
         }
+
+        for match in standaloneCStringMatches {
+            appendUniqueIndicator(match.rule.toIndicator(at: "__TEXT,__cstring: \(match.pattern)"))
+            matchedSymbols.append(match.rule.pattern)
+        }
         
         // 2. Scan Linked Dylibs (requires App Group precondition)
         if !gating.isGatedOut {
@@ -366,6 +413,26 @@ public final class MachOScanner: @unchecked Sendable {
                     }
                 }
             }
+
+            // Dynamic C-string resolution of containermanager dylib / symbols via dlopen + dlsym
+            if dynamicLoadingDetected && !details.isFairPlayEncrypted {
+                let sortedContainerDylibRules = SignatureCatalog.dylibRules.sorted { $0.key < $1.key }
+                let sortedContainerSymRules = SignatureCatalog.privateContainerSymbols.sorted { $0.key < $1.key }
+                for str in details.textStrings {
+                    for (pattern, rule) in sortedContainerDylibRules {
+                        if str.contains(pattern) && !matchedSymbols.contains(pattern) {
+                            appendUniqueIndicator(rule.toIndicator(at: "__TEXT,__cstring: \(pattern)"))
+                            matchedSymbols.append(pattern)
+                        }
+                    }
+                    for (symKey, rule) in sortedContainerSymRules {
+                        if str.contains(symKey) && !matchedSymbols.contains(rule.pattern) {
+                            appendUniqueIndicator(rule.toIndicator(at: "__TEXT,__cstring: \(symKey)"))
+                            matchedSymbols.append(rule.pattern)
+                        }
+                    }
+                }
+            }
         }
         
         // Check Path Leak Combination: fsgetpath / container_object_get_path + /Containers/Data/ or /Containers/Shared/
@@ -410,7 +477,8 @@ public final class MachOScanner: @unchecked Sendable {
         
         // 5. Evaluate Behavioral Tuple:
         // cryptid == 0 + application-groups + (dlopen && dlsym) + (symlink || sandbox_extension_consume || fsgetpath)
-        let hasSandboxConsume = matchedSymbols.contains("sandbox_extension_consume") || details.symbols.contains { $0.contains("sandbox_extension_consume") }
+        let sbxConsumeSym = IOCTokenArmor.tSbxConsume
+        let hasSandboxConsume = matchedSymbols.contains(sbxConsumeSym) || details.symbols.contains { $0.contains(sbxConsumeSym) }
         if details.cryptid == 0 && !gating.isGatedOut && dynamicLoadingDetected && (symlinkDetected || hasSandboxConsume || pathEnumerationDetected) {
             let alreadyHasExplicitExploit = indicators.contains { $0.severity == .highRisk && $0.category == "Private API Symbol" }
             if !alreadyHasExplicitExploit {

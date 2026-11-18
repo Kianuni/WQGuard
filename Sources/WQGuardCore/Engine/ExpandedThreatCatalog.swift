@@ -609,15 +609,16 @@ public enum ExpandedThreatCatalog {
 
         // Binary checks on unencrypted images (never flag AudioToolbox/AVFAudio/AURemoteIO)
         if cryptid == 0 {
-            if let mediaRule = SignatureCatalog.standaloneExploitDylibRules["MediaExperience.framework"] {
-                for dylib in linkedDylibs where dylib.contains("MediaExperience.framework") {
+            let mediaFwToken = IOCTokenArmor.tMediaExpFw
+            if let mediaRule = SignatureCatalog.standaloneExploitDylibRules[mediaFwToken] {
+                for dylib in linkedDylibs where dylib.contains(mediaFwToken) {
                     if emittedSignatures.insert(mediaRule.pattern).inserted {
                         indicators.append(mediaRule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
                     }
                 }
             }
 
-            let targetSymbolKeys = ["CMSessionSetProperty", "AudioSessionSetCMProperty"]
+            let targetSymbolKeys = [IOCTokenArmor.tCMSessionSetProp, IOCTokenArmor.tAudioSessionSetCMProp]
             for targetKey in targetSymbolKeys {
                 guard let rule = SignatureCatalog.standaloneExploitSymbolRules[targetKey] else { continue }
                 for sym in symbols {
@@ -683,8 +684,9 @@ public enum ExpandedThreatCatalog {
 
         // Binary dylib & string checks on unencrypted images
         if cryptid == 0 {
-            if let bookRule = SignatureCatalog.standaloneExploitDylibRules["BookLibraryPrivate.framework"] {
-                for dylib in linkedDylibs where dylib.contains("BookLibraryPrivate.framework") {
+            let bookFwToken = IOCTokenArmor.tBookPrivFw
+            if let bookRule = SignatureCatalog.standaloneExploitDylibRules[bookFwToken] {
+                for dylib in linkedDylibs where dylib.contains(bookFwToken) {
                     if emittedSignatures.insert(bookRule.pattern).inserted {
                         indicators.append(bookRule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
                     }
@@ -770,6 +772,182 @@ public enum ExpandedThreatCatalog {
                     ))
                 }
             }
+        }
+
+        return indicators
+    }
+
+    /// Parses boolean or numeric (0/1) entitlement scalars from XML Slot 5 / DER Slot 7 dictionaries.
+    /// Returns `nil` for non-boolean values (e.g., container identifier strings).
+    private static func parseEntitlementBool(_ val: Any?) -> Bool? {
+        guard let val else { return nil }
+        if let boolVal = val as? Bool {
+            return boolVal
+        }
+        if let intVal = val as? Int {
+            return intVal != 0
+        }
+        if let int64Val = val as? Int64 {
+            return int64Val != 0
+        }
+        if let uint64Val = val as? UInt64 {
+            return uint64Val != 0
+        }
+        if let int32Val = val as? Int32 {
+            return int32Val != 0
+        }
+        if let numVal = val as? NSNumber {
+            return numVal.int64Value != 0 || numVal.doubleValue != 0.0
+        }
+        return nil
+    }
+
+    private static func extractNonEmptyEntitlementStrings(_ val: Any?) -> [String] {
+        guard let val else { return [] }
+        if let strArr = val as? [String] {
+            return strArr
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        if let anyArr = val as? [Any] {
+            return anyArr
+                .compactMap { $0 as? String }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        if let single = val as? String {
+            let trimmed = single.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? [] : [trimmed]
+        }
+        return []
+    }
+
+    /// 10. Shared evaluator for sandbox-escape, platform-privilege, TCC bypass, and wildcard keychain entitlements
+    /// across `.ipa` archives (`IPAPackageScanner`) and `.app` bundles (`SecurityPipeline`).
+    public static func evaluateDangerousEntitlements(
+        bundleId: String,
+        installChannel: InstallChannel,
+        entitlements: [String: Any],
+        hasUnencryptedBinary: Bool = false,
+        location: String = "CSBlob Entitlements"
+    ) -> [ThreatIndicator] {
+        var indicators: [ThreatIndicator] = []
+        let trimmedBundleId = bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isTrustedAppleApp = trimmedBundleId.hasPrefix("com.apple.") && installChannel == .appStore && !hasUnencryptedBinary
+        guard !isTrustedAppleApp else {
+            return []
+        }
+
+        let sandboxEscapeRules: [(key: String, expectedBool: Bool, allowNonEmptyCollection: Bool, descEn: String, descZh: String)] = [
+            (
+                "com.apple.private.security.no-container",
+                true,
+                false,
+                "Declares no-container entitlement, permitting direct cross-sandbox read/write access to other applications' data.",
+                "声明了无容器隔离私有权限 (no-container)，可直接跨沙盒读写全机应用数据。"
+            ),
+            (
+                "com.apple.private.security.no-sandbox",
+                true,
+                false,
+                "Declares no-sandbox entitlement, bypassing iOS Seatbelt sandbox confinement completely.",
+                "声明了关闭 Seatbelt 沙盒私有权限 (no-sandbox)，完全脱离 iOS 沙盒隔离控制。"
+            ),
+            (
+                "com.apple.private.security.container-required",
+                false,
+                false,
+                "Explicitly disables container enforcement (container-required=false), enabling unsandboxed execution.",
+                "显式关闭了容器强制约束 (container-required=false)，具备沙盒逃逸执行能力。"
+            ),
+            (
+                "com.apple.private.MobileContainerManager.allowed",
+                true,
+                true,
+                "Declares direct private MobileContainerManager daemon privilege for querying or manipulating containers across applications.",
+                "声明了 MobileContainerManager 私有守护进程直连特权，可跨应用查询或操作容器。"
+            ),
+            (
+                "com.apple.private.security.storage.AppDataContainers",
+                true,
+                true,
+                "Declares internal Apple AppDataContainers cross-application filesystem access entitlement.",
+                "声明了 Apple 内部跨应用数据容器直接访问权限 (AppDataContainers)。"
+            )
+        ]
+
+        for rule in sandboxEscapeRules {
+            guard let rawVal = entitlements[rule.key] else { continue }
+            let matchedBool = (parseEntitlementBool(rawVal) == rule.expectedBool)
+            let matchedCollection = rule.allowNonEmptyCollection && !extractNonEmptyEntitlementStrings(rawVal).isEmpty
+            if matchedBool || matchedCollection {
+                indicators.append(ThreatIndicator(
+                    signature: rule.key,
+                    description: WQLocale.pick(en: rule.descEn, zh: rule.descZh),
+                    category: "Sandbox Escape Entitlement",
+                    location: location,
+                    severity: .highRisk
+                ))
+            }
+        }
+
+        if parseEntitlementBool(entitlements["platform-application"]) == true && !trimmedBundleId.hasPrefix("com.apple.") {
+            indicators.append(ThreatIndicator(
+                signature: "platform-application",
+                description: WQLocale.pick(
+                    en: "Third-party application declares Apple system platform privilege (platform-application=true).",
+                    zh: "第三方应用声明了 Apple 平台级系统应用特权 (platform-application=true)。"
+                ),
+                category: "Privilege Escalation Entitlement",
+                location: location,
+                severity: .highRisk
+            ))
+        } else if parseEntitlementBool(entitlements["platform-application"]) == true && (installChannel != .appStore || hasUnencryptedBinary) {
+            indicators.append(ThreatIndicator(
+                signature: "platform-application",
+                description: WQLocale.pick(
+                    en: "Sideloaded or unencrypted package declares Apple system platform privilege (platform-application=true).",
+                    zh: "侧载或未加密软件包声明了 Apple 平台级系统应用特权 (platform-application=true)。"
+                ),
+                category: "Privilege Escalation Entitlement",
+                location: location,
+                severity: .highRisk
+            ))
+        }
+
+        let tccKeys = ["com.apple.private.tcc.allow", "com.apple.private.tcc.allow-prompting"]
+        for tccKey in tccKeys {
+            guard let rawVal = entitlements[tccKey] else { continue }
+            let services = extractNonEmptyEntitlementStrings(rawVal)
+            let boolActive = (parseEntitlementBool(rawVal) == true)
+            if !services.isEmpty || boolActive {
+                let detail = services.isEmpty ? tccKey : services.joined(separator: ", ")
+                indicators.append(ThreatIndicator(
+                    signature: tccKey,
+                    description: WQLocale.pick(
+                        en: "Declares private TCC privacy bypass entitlement \(tccKey) (\(detail)), enabling access to protected user data without standard TCC consent.",
+                        zh: "声明了私有 TCC 隐私免授权特权 \(tccKey) (\(detail))，可绕过标准系统授权弹窗访问受保护隐私数据。"
+                    ),
+                    category: "TCC Privacy Bypass",
+                    location: location,
+                    severity: .highRisk
+                ))
+            }
+        }
+
+        let keychainGroups = extractNonEmptyEntitlementStrings(entitlements["keychain-access-groups"])
+        if keychainGroups.contains("*") || keychainGroups.contains(where: { $0.hasSuffix(".*") }) {
+            let joined = keychainGroups.joined(separator: ", ")
+            indicators.append(ThreatIndicator(
+                signature: "keychain-access-groups(*)",
+                description: WQLocale.pick(
+                    en: "Declares wildcard keychain access groups (\(joined)), exposing cross-application credentials and private keys.",
+                    zh: "声明了通配符钥匙串访问组 (\(joined))，可跨应用读取 Keychain 敏感登录凭证与私钥。"
+                ),
+                category: "Keychain Credential Exposure",
+                location: location,
+                severity: .highRisk
+            ))
         }
 
         return indicators
