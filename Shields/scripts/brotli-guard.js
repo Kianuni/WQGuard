@@ -7,29 +7,30 @@
  */
 (function () {
   var headers = ($response && $response.headers) || {};
-  var ceValues = [];
+  var encValues = [];
   var keys = Object.keys(headers);
   for (var i = 0; i < keys.length; i++) {
     var k = keys[i];
-    if (String(k).toLowerCase() === "content-encoding") {
+    var lk = String(k).trim().toLowerCase();
+    if (lk === "content-encoding" || lk === "transfer-encoding") {
       var v = headers[k];
       if (Array.isArray(v)) {
-        ceValues.push(v.join(", "));
+        encValues.push(v.join(", "));
       } else if (v !== undefined && v !== null) {
-        ceValues.push(String(v));
+        encValues.push(String(v));
       }
     }
   }
-  var rawCE = ceValues.join(", ");
-  var hasBrotli = /(^|[,\s])br($|[,\s;])/i.test(rawCE);
+  var rawEnc = encValues.join(", ");
+  var hasBrotli = /(^|[^A-Za-z0-9_.-])((?:x-)?(?:br|brotli|dcb|sbr))($|[^A-Za-z0-9_.-])/i.test(rawEnc);
 
   if (!hasBrotli) {
     $done({});
     return;
   }
 
-  // Quantumult X (`script-response-header` environment exposes `$task` and `$prefs`)
-  if (typeof $task !== "undefined" || typeof $prefs !== "undefined") {
+  // Quantumult X (`script-response-header` environment exposes `$task` / `$prefs` without Surge/Loon `$httpClient` / `$loon`)
+  if ((typeof $task !== "undefined" || typeof $prefs !== "undefined") && typeof $loon === "undefined" && typeof $httpClient === "undefined") {
     $done({
       status: "HTTP/1.1 403 Forbidden",
       headers: {

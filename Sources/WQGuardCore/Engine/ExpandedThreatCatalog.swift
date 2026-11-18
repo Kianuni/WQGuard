@@ -64,21 +64,21 @@ public enum ExpandedThreatCatalog {
         ImpersonatedBrand(
             name: "OKX",
             bundleIdPatterns: ["com.okex.ios", "com.okinc.okx", "com.okx.ios"],
-            displayNames: ["okx", "欧易"],
+            displayNames: ["okx", "欧易", "歐易"],
             description: "加密货币交易所，钓鱼包通常伪装为企业版以盗取登录令牌与资金",
             descriptionEn: "Crypto exchange app; phishing builds pose as enterprise apps to steal login tokens and funds"
         ),
         ImpersonatedBrand(
             name: "Binance",
             bundleIdPatterns: ["com.binance.binance", "com.binance.ios"],
-            displayNames: ["binance", "币安"],
+            displayNames: ["binance", "币安", "幣安"],
             description: "全球最大加密资产平台，非法分发包极高概率为账户凭证嗅探木马",
             descriptionEn: "Global crypto exchange; unofficial sideload builds are very likely credential-stealing trojans"
         ),
         ImpersonatedBrand(
             name: "TokenPocket",
             bundleIdPatterns: ["vip.mytokenpocket", "tokenpocket"],
-            displayNames: ["tokenpocket", "tp钱包"],
+            displayNames: ["tokenpocket", "tp钱包", "tp錢包"],
             description: "多链移动钱包，侧载伪装常用于自动签名恶意合约",
             descriptionEn: "Multi-chain mobile wallet; sideloaded clones are often used to auto-sign malicious contracts"
         ),
@@ -99,7 +99,7 @@ public enum ExpandedThreatCatalog {
         ImpersonatedBrand(
             name: "Telegram",
             bundleIdPatterns: ["org.telegram.messenger", "org.telegram.telegram-ios"],
-            displayNames: ["telegram", "纸飞机", "tg"],
+            displayNames: ["telegram", "纸飞机", "紙飛機", "tg"],
             description: "加密通讯软件，非官方重打包包常内嵌会话历史记录上传后门",
             descriptionEn: "Encrypted messenger; unofficial repackages often embed session token and chat exfiltration backdoors"
         )
@@ -107,17 +107,17 @@ public enum ExpandedThreatCatalog {
 
     // MARK: - 2. Private Photos Bypass Signatures
     public static let photosFrameworks: Set<String> = [
-        "PhotoLibraryServices.framework",
-        "AssetsLibraryServices.framework"
+        IOCTokenArmor.tPhotoLibFw,
+        IOCTokenArmor.tAssetsLibFw
     ]
 
     public static let photosSymbols: Set<String> = [
-        "PLPhotoLibrary",
-        "_OBJC_CLASS_$_PLPhotoLibrary",
-        "-[PLPhotoLibrary",
-        "+[PLPhotoLibrary",
-        "PhotoLibraryServices",
-        "systemPhotoLibrary",
+        IOCTokenArmor.tPLPhotoLib,
+        "_OBJC_CLASS_$_\(IOCTokenArmor.tPLPhotoLib)",
+        "-[\(IOCTokenArmor.tPLPhotoLib)",
+        "+[\(IOCTokenArmor.tPLPhotoLib)",
+        IOCTokenArmor.tPhotoLibSvc,
+        IOCTokenArmor.tSysPhotoLib,
         "sharedPhotoLibrary"
     ]
 
@@ -143,6 +143,7 @@ public enum ExpandedThreatCatalog {
         "libsubstitute",
         "ElleKit",
         "libhooker",
+        "FridaGadget",
         "Shadow",
         "Choicy"
     ]
@@ -164,12 +165,12 @@ public enum ExpandedThreatCatalog {
     ]
 
     public static let pasteboardSymbols: Set<String> = [
-        "UIPasteboard",
-        "generalPasteboard",
-        "UIPasteboardNameGeneral",
-        "_OBJC_CLASS_$_UIPasteboard",
-        "-[UIPasteboard string]",
-        "-[UIPasteboard strings]"
+        IOCTokenArmor.tUIPasteboard,
+        IOCTokenArmor.tGenPasteboard,
+        "\(IOCTokenArmor.tUIPasteboard)NameGeneral",
+        "_OBJC_CLASS_$_\(IOCTokenArmor.tUIPasteboard)",
+        "-[\(IOCTokenArmor.tUIPasteboard) string]",
+        "-[\(IOCTokenArmor.tUIPasteboard) strings]"
     ]
 
     // MARK: - Evaluators
@@ -183,10 +184,11 @@ public enum ExpandedThreatCatalog {
     ) -> [ThreatIndicator] {
         var indicators: [ThreatIndicator] = []
 
-        // Framework checks
+        // Framework checks (case-insensitive for case-altered filesystem or re-linked paths)
         for dylib in linkedDylibs {
+            let lowerDylib = dylib.lowercased()
             for fw in photosFrameworks {
-                if dylib.contains(fw) {
+                if lowerDylib.contains(fw.lowercased()) {
                     indicators.append(ThreatIndicator(
                         signature: fw,
                         description: WQLocale.pick(
@@ -202,7 +204,7 @@ public enum ExpandedThreatCatalog {
         }
 
         // Symbol checks
-        let privateSelectorsOnly: Set<String> = ["systemPhotoLibrary"]
+        let privateSelectorsOnly: Set<String> = [IOCTokenArmor.tSysPhotoLib]
         for sym in symbols {
             for targetSym in photosSymbols where targetSym != "sharedPhotoLibrary" {
                 let matched = privateSelectorsOnly.contains(targetSym) ? (sym == targetSym || sym.contains(" \(targetSym)]")) : sym.contains(targetSym)
@@ -290,19 +292,77 @@ public enum ExpandedThreatCatalog {
         return indicators
     }
 
+    private static let confusableScalarToASCII: [UInt32: Character] = [
+        // Latin Extended / IPA visual lookalikes not folded by NFKC
+        0x0131: "i", 0x0141: "L", 0x0142: "l", 0x0261: "g", 0x026A: "i",
+        // Cyrillic uppercase -> Latin uppercase (preserves CamelCase splits like "МеtаМаsk")
+        0x0410: "A", 0x0412: "B", 0x0421: "C", 0x0415: "E", 0x0405: "S", 0x0406: "I",
+        0x0408: "J", 0x041A: "K", 0x041C: "M", 0x041D: "H", 0x041E: "O", 0x0420: "P",
+        0x0422: "T", 0x0425: "X", 0x0423: "Y", 0x04C0: "I", 0x050C: "G", 0x051C: "W",
+        // Cyrillic lowercase -> Latin lowercase
+        0x0430: "a", 0x0435: "e", 0x0455: "s", 0x0456: "i", 0x0458: "j", 0x043A: "k",
+        0x043C: "m", 0x043E: "o", 0x0440: "p", 0x0441: "c", 0x0442: "t", 0x0443: "y",
+        0x0445: "x", 0x04BB: "h", 0x04CF: "l", 0x0501: "d", 0x051D: "w",
+        // Greek uppercase & lowercase confusables
+        0x0391: "A", 0x0392: "B", 0x0395: "E", 0x0396: "Z", 0x0397: "H", 0x0399: "I",
+        0x039A: "K", 0x039C: "M", 0x039D: "N", 0x039F: "O", 0x03A1: "P", 0x03A4: "T",
+        0x03A5: "Y", 0x03A7: "X",
+        0x03B1: "a", 0x03B5: "e", 0x03B9: "i", 0x03BA: "k", 0x03BD: "v", 0x03BF: "o",
+        0x03C1: "p", 0x03C4: "t", 0x03C5: "u", 0x03C7: "x",
+        // Armenian confusables commonly abused in wallet phishing
+        0x054D: "U", 0x0555: "O", 0x0570: "h", 0x0578: "n", 0x057D: "u", 0x0584: "p", 0x0585: "o"
+    ]
+
+    /// Strips zero-width/format/variation-selector characters, applies NFKC normalization (folding fullwidth/mathematical Latin),
+    /// and maps Cyrillic/Greek/Armenian/Latin-Extended visual homoglyphs to ASCII while leaving CJK characters untouched.
+    public static func foldConfusablesToASCII(_ input: String) -> String {
+        let strippedScalars = input.unicodeScalars.filter { scalar in
+            let v = scalar.value
+            if v == 0x00AD || (v >= 0x200B && v <= 0x200F) || (v >= 0x2060 && v <= 0x206F)
+                || (v >= 0xFE00 && v <= 0xFE0F) || v == 0xFEFF || (v >= 0xE0100 && v <= 0xE01EF) {
+                return false
+            }
+            return scalar.properties.generalCategory != .format
+        }
+        let nfkc = String(String.UnicodeScalarView(strippedScalars)).precomposedStringWithCompatibilityMapping
+        var out: [Character] = []
+        out.reserveCapacity(nfkc.count)
+        for scalar in nfkc.unicodeScalars {
+            if let mapped = confusableScalarToASCII[scalar.value] {
+                out.append(mapped)
+            } else if scalar.properties.generalCategory != .nonspacingMark {
+                out.append(Character(scalar))
+            }
+        }
+        return String(out)
+    }
+
     /// Extracts lowercase ASCII brand tokens from an original-case display name, splitting on:
     /// - Non-ASCII boundaries (e.g. `"WeChat多开"` -> `"WeChat"`),
     /// - Punctuation / whitespace,
     /// - CamelCase transitions (`"TelegramX"` -> `"telegram"`, `"x"`; `"MetaMaskWallet"` -> `"meta"`, `"mask"`, `"wallet"`, `"metamask"`),
-    /// - Acronym-to-word transitions (`"OKXWallet"` -> `"okx"`, `"wallet"`; `"TGPro"` -> `"tg"`, `"pro"`).
+    /// - Acronym-to-word transitions (`"OKXWallet"` -> `"okx"`, `"wallet"`; `"TGPro"` -> `"tg"`, `"pro"`),
+    /// as well as NFKC/homoglyph-folded visual lookalikes (`"МеtаМаsk"`, `"ＭｅｔａＭａｓｋ"`).
     public static func extractBrandTokens(from rawDisplayName: String) -> Set<String> {
-        var tokens: Set<String> = []
-        let asciiWords = rawDisplayName.split { !$0.isASCII || (!$0.isLetter && !$0.isNumber) }
+        var tokens = extractASCIIBrandTokensSinglePass(from: rawDisplayName)
+        let folded = foldConfusablesToASCII(rawDisplayName)
+        if folded != rawDisplayName {
+            tokens.formUnion(extractASCIIBrandTokensSinglePass(from: folded))
+        }
+        return tokens
+    }
 
+    private static func extractASCIIBrandTokensSinglePass(from text: String) -> Set<String> {
+        var tokens: Set<String> = []
+        let asciiWords = text.split { !$0.isASCII || (!$0.isLetter && !$0.isNumber) }
+
+        var lowerWords: [String] = []
         for wordSub in asciiWords {
             let chars = Array(wordSub)
             guard !chars.isEmpty else { continue }
-            tokens.insert(String(chars).lowercased())
+            let wholeLower = String(chars).lowercased()
+            tokens.insert(wholeLower)
+            lowerWords.append(wholeLower)
 
             var subTokens: [String] = []
             var current: [Character] = [chars[0]]
@@ -332,6 +392,15 @@ public enum ExpandedThreatCatalog {
                 }
             }
         }
+        // Include adjacent separated-word bigrams >= 6 chars (e.g. "Meta Mask" / "Meta-Mask" -> "metamask", "Token Pocket" -> "tokenpocket")
+        if lowerWords.count >= 2 {
+            for i in 0..<(lowerWords.count - 1) {
+                let joined = lowerWords[i] + lowerWords[i + 1]
+                if joined.count >= 6 {
+                    tokens.insert(joined)
+                }
+            }
+        }
 
         return tokens
     }
@@ -349,9 +418,10 @@ public enum ExpandedThreatCatalog {
         }
 
         var indicators: [ThreatIndicator] = []
-        let rawBid = (bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let rawBid = foldConfusablesToASCII((bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)).lowercased()
         let trimmedOrigName = (displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let rawName = trimmedOrigName.lowercased()
+        let foldedName = foldConfusablesToASCII(trimmedOrigName).lowercased()
         let asciiTokens = extractBrandTokens(from: trimmedOrigName)
 
         for brand in targetBrands {
@@ -361,14 +431,14 @@ public enum ExpandedThreatCatalog {
                     || rawBid.contains("." + pat + ".")
                     || rawBid.hasSuffix("." + pat)
             }
-            let matchName = !rawName.isEmpty && brand.displayNames.contains { pat in
+            let matchName = (!rawName.isEmpty || !foldedName.isEmpty) && brand.displayNames.contains { pat in
                 let isASCII = pat.unicodeScalars.allSatisfy { $0.isASCII }
                 if isASCII && !pat.contains(" ") {
                     // Single-word ASCII brand/alias (e.g., "tg", "okx", "telegram", "metamask"): require exact word/camel token boundary
                     // so substrings inside unrelated words ("NetGuard", "PostgREST", "GitGraph", "ZeroTrust") never false-positive.
-                    return rawName == pat || asciiTokens.contains(pat)
+                    return rawName == pat || foldedName == pat || asciiTokens.contains(pat)
                 }
-                return rawName == pat || rawName.contains(pat)
+                return rawName == pat || rawName.contains(pat) || foldedName == pat || foldedName.contains(pat)
             }
 
             if matchBid || matchName {
@@ -396,10 +466,11 @@ public enum ExpandedThreatCatalog {
         var flaggedFiles: Set<String> = []
 
         for dylib in linkedDylibs {
+            let lowerDylib = dylib.lowercased()
             var matchedKnownHooker = false
-            // Check for explicit hooking frameworks
+            // Check for explicit hooking frameworks (case-insensitive)
             for hooker in knownHookingFrameworks {
-                if dylib.contains(hooker) {
+                if lowerDylib.contains(hooker.lowercased()) {
                     indicators.append(ThreatIndicator(
                         signature: hooker,
                         description: WQLocale.pick(
@@ -417,7 +488,6 @@ public enum ExpandedThreatCatalog {
                 continue
             }
 
-            let lowerDylib = dylib.lowercased()
             let filename = (dylib as NSString).lastPathComponent.lowercased()
             guard !filename.isEmpty else { continue }
 
@@ -425,6 +495,8 @@ public enum ExpandedThreatCatalog {
             let isInSideloadTweakFolder =
                 lowerDylib.hasPrefix("@executable_path/dylibs/") ||
                 lowerDylib.hasPrefix("@executable_path/dynamiclibraries/") ||
+                lowerDylib.hasPrefix("@loader_path/dylibs/") ||
+                lowerDylib.hasPrefix("@loader_path/dynamiclibraries/") ||
                 lowerDylib.contains("/dylibs/") ||
                 lowerDylib.contains("/dynamiclibraries/")
 
@@ -444,8 +516,8 @@ public enum ExpandedThreatCatalog {
                 continue
             }
 
-            // Check non-system @executable_path/ or @rpath/ tweaks
-            if dylib.hasPrefix("@executable_path/") || dylib.hasPrefix("@rpath/") {
+            // Check non-system @executable_path/, @loader_path/, or @rpath/ tweaks
+            if lowerDylib.hasPrefix("@executable_path/") || lowerDylib.hasPrefix("@loader_path/") || lowerDylib.hasPrefix("@rpath/") {
                 for pattern in suspiciousTweakPatterns {
                     if filename.contains(pattern) {
                         if flaggedFiles.insert(filename).inserted {
@@ -477,8 +549,9 @@ public enum ExpandedThreatCatalog {
     ) -> ThreatIndicator? {
         // App must have persistent background mode and be unencrypted
         guard cryptid == 0 else { return nil }
-        let hasPersistentMode = backgroundModes.contains { backgroundModesRequiringInspection.contains($0) }
-        guard hasPersistentMode else { return nil }
+        let normalizedModes = backgroundModes.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        let matchedModes = normalizedModes.filter { backgroundModesRequiringInspection.contains($0) }
+        guard !matchedModes.isEmpty else { return nil }
 
         // Binary references UIPasteboard
         let hasPasteboard = symbols.contains { sym in
@@ -486,7 +559,7 @@ public enum ExpandedThreatCatalog {
         }
 
         if hasPasteboard {
-            let modesStr = backgroundModes.filter { backgroundModesRequiringInspection.contains($0) }.joined(separator: ", ")
+            let modesStr = matchedModes.joined(separator: ", ")
             return ThreatIndicator(
                 signature: "UIBackgroundModes(\(modesStr))+UIPasteboard",
                 description: WQLocale.pick(
@@ -502,7 +575,7 @@ public enum ExpandedThreatCatalog {
         return nil
     }
 
-    /// 6. Inspects system configuration profiles for fake supervision in 100% read-only mode.
+    /// 6. Inspects system configuration profiles for fake supervision in 100% read-only mode (strict O_NOFOLLOW).
     public static func evaluateSupervision(
         containerRoot: URL
     ) -> [ThreatIndicator] {
@@ -513,38 +586,70 @@ public enum ExpandedThreatCatalog {
             .appendingPathComponent("ConfigurationProfiles")
             .appendingPathComponent("CloudConfigurationDetails.plist")
 
-        guard FileManager.default.fileExists(atPath: cloudConfigURL.path) else {
-            return []
-        }
-
-        // 100% read-only inspection
-        guard let data = try? Data(contentsOf: cloudConfigURL, options: .mappedIfSafe),
-              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
-            return []
-        }
-
-        if let isSupervised = plist["IsSupervised"] as? Bool, isSupervised {
-            indicators.append(ThreatIndicator(
-                signature: "CloudConfigurationDetails.IsSupervised=true",
-                description: WQLocale.pick(
-                    en: "HIGH RISK: Spoofed corporate supervision state (IsSupervised == true) detected. On un-enrolled retail devices this can cause an Infinite Setup Assistant Loop or unauthorized MDM policy enforcement.",
-                    zh: "高危告警：检测到当前设备处于伪装企业受监管状态 (IsSupervised == true)。零售设备若未授权注册 Apple Business Manager，将引发无限设置向导死锁（Infinite Setup Assistant Loop）或被第三方 MDM 远程下发恶意策略。"
-                ),
-                category: "Fake Supervision / Rogue Profile",
-                location: cloudConfigURL.path,
-                severity: .highRisk
-            ))
-        } else {
-            indicators.append(ThreatIndicator(
-                signature: "CloudConfigurationDetails.plist (Residual)",
-                description: WQLocale.pick(
-                    en: "Residual non-standard CloudConfigurationDetails.plist file detected, which may trigger configuration validation errors.",
-                    zh: "检测到系统残留的非标准 CloudConfigurationDetails.plist 文件。可能导致后续系统配置文件校验报错。"
-                ),
-                category: "Fake Supervision / Rogue Profile",
-                location: cloudConfigURL.path,
-                severity: .caution
-            ))
+        switch ContainerScanner.readBoundedRegularFileNoFollow(
+            rootURL: containerRoot,
+            relativeComponents: [
+                "systemgroup.com.apple.configurationprofiles",
+                "Library",
+                "ConfigurationProfiles",
+                "CloudConfigurationDetails.plist"
+            ]
+        ) {
+        case .success(let maybeData):
+            guard let data = maybeData,
+                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+                return []
+            }
+            let isSupervised = (plist["IsSupervised"] as? Bool == true) ||
+                ((plist["IsSupervised"] as? NSNumber)?.int64Value ?? 0) != 0
+            if isSupervised {
+                indicators.append(ThreatIndicator(
+                    signature: "CloudConfigurationDetails.IsSupervised=true",
+                    description: WQLocale.pick(
+                        en: "HIGH RISK: Spoofed corporate supervision state (IsSupervised == true) detected. On un-enrolled retail devices this can cause an Infinite Setup Assistant Loop or unauthorized MDM policy enforcement.",
+                        zh: "高危告警：检测到当前设备处于伪装企业受监管状态 (IsSupervised == true)。零售设备若未授权注册 Apple Business Manager，将引发无限设置向导死锁（Infinite Setup Assistant Loop）或被第三方 MDM 远程下发恶意策略。"
+                    ),
+                    category: "Fake Supervision / Rogue Profile",
+                    location: cloudConfigURL.path,
+                    severity: .highRisk
+                ))
+            } else {
+                indicators.append(ThreatIndicator(
+                    signature: "CloudConfigurationDetails.plist (Residual)",
+                    description: WQLocale.pick(
+                        en: "Residual non-standard CloudConfigurationDetails.plist file detected, which may trigger configuration validation errors.",
+                        zh: "检测到系统残留的非标准 CloudConfigurationDetails.plist 文件。可能导致后续系统配置文件校验报错。"
+                    ),
+                    category: "Fake Supervision / Rogue Profile",
+                    location: cloudConfigURL.path,
+                    severity: .caution
+                ))
+            }
+        case .failure(let hazard):
+            switch hazard {
+            case .symlinkDetected(let symPath):
+                indicators.append(ThreatIndicator(
+                    signature: "CloudConfigurationDetails.SymlinkHazard",
+                    description: WQLocale.pick(
+                        en: "HIGH RISK: ConfigurationProfiles supervision path '\(symPath)' has been replaced with a symbolic link, indicating symlink redirect tampering.",
+                        zh: "高危告警：监管配置路径 '\(symPath)' 被替换为符号链接，存在跨容器符号链接重定向篡改风险。"
+                    ),
+                    category: "Fake Supervision / Rogue Profile",
+                    location: symPath,
+                    severity: .highRisk
+                ))
+            case .specialFileDetected(let specPath):
+                indicators.append(ThreatIndicator(
+                    signature: "CloudConfigurationDetails.SpecialFileHazard",
+                    description: WQLocale.pick(
+                        en: "Non-regular or oversized file detected at '\(specPath)' inside ConfigurationProfiles.",
+                        zh: "在 ConfigurationProfiles 路径 '\(specPath)' 检测到非常规特殊文件或超大文件。"
+                    ),
+                    category: "Fake Supervision / Rogue Profile",
+                    location: specPath,
+                    severity: .caution
+                ))
+            }
         }
 
         return indicators
@@ -610,8 +715,9 @@ public enum ExpandedThreatCatalog {
         // Binary checks on unencrypted images (never flag AudioToolbox/AVFAudio/AURemoteIO)
         if cryptid == 0 {
             let mediaFwToken = IOCTokenArmor.tMediaExpFw
+            let lowerMediaFw = mediaFwToken.lowercased()
             if let mediaRule = SignatureCatalog.standaloneExploitDylibRules[mediaFwToken] {
-                for dylib in linkedDylibs where dylib.contains(mediaFwToken) {
+                for dylib in linkedDylibs where dylib.lowercased().contains(lowerMediaFw) {
                     if emittedSignatures.insert(mediaRule.pattern).inserted {
                         indicators.append(mediaRule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
                     }
@@ -685,8 +791,9 @@ public enum ExpandedThreatCatalog {
         // Binary dylib & string checks on unencrypted images
         if cryptid == 0 {
             let bookFwToken = IOCTokenArmor.tBookPrivFw
+            let lowerBookFw = bookFwToken.lowercased()
             if let bookRule = SignatureCatalog.standaloneExploitDylibRules[bookFwToken] {
-                for dylib in linkedDylibs where dylib.contains(bookFwToken) {
+                for dylib in linkedDylibs where dylib.lowercased().contains(lowerBookFw) {
                     if emittedSignatures.insert(bookRule.pattern).inserted {
                         indicators.append(bookRule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
                     }
@@ -714,39 +821,48 @@ public enum ExpandedThreatCatalog {
         infoPlist: [String: Any],
         entitlements: [String: Any],
         installChannel: InstallChannel,
-        cryptid: UInt32
+        cryptid: UInt32,
+        codeSignatureTrust: CodeSignatureTrustDisposition = .appleAppStoreVerified,
+        hasMissingCodeSignature: Bool = false
     ) -> [ThreatIndicator] {
-        guard installChannel != .appStore else {
-            return []
-        }
+        let effectiveEntChannel: InstallChannel = (installChannel == .appStore && hasMissingCodeSignature)
+            ? .developerSideloaded
+            : installChannel
 
         var indicators: [ThreatIndicator] = []
 
         // 1. Private AccessorySetupKit entitlements on non-App Store builds
-        let matchedAccessoryEntKeys = entitlements.keys.sorted().filter { key in
-            if isExplicitFalseOrZeroEntitlementValue(entitlements[key]) {
-                return false
+        if effectiveEntChannel != .appStore {
+            let matchedAccessoryEntKeys = entitlements.keys.sorted().filter { key in
+                if isExplicitFalseOrZeroEntitlementValue(entitlements[key]) {
+                    return false
+                }
+                return key.hasPrefix("com.apple.private.accessorysetupkit")
             }
-            return key.hasPrefix("com.apple.private.accessorysetupkit")
-        }
-        if !matchedAccessoryEntKeys.isEmpty {
-            let joined = matchedAccessoryEntKeys.joined(separator: ", ")
-            indicators.append(ThreatIndicator(
-                signature: "CVE-2026-84493:PrivateAccessoryEntitlement",
-                description: WQLocale.pick(
-                    en: "Declares restricted Apple private AccessorySetupKit entitlement (\(joined)) on non-App Store build, enabling Bluetooth pairing TCC bypass (CVE-2026-84493).",
-                    zh: "非 App Store 应用声明了 Apple 私有 AccessorySetupKit 特权 (\(joined))，可绕过蓝牙配对 TCC 隐私授权检查 (CVE-2026-84493)。"
-                ),
-                category: "AccessorySetupKit Bluetooth TCC Bypass (CVE-2026-84493)",
-                location: "CSBlob Entitlements",
-                severity: .highRisk
-            ))
+            if !matchedAccessoryEntKeys.isEmpty {
+                let joined = matchedAccessoryEntKeys.joined(separator: ", ")
+                indicators.append(ThreatIndicator(
+                    signature: "CVE-2026-84493:PrivateAccessoryEntitlement",
+                    description: WQLocale.pick(
+                        en: "Declares restricted Apple private AccessorySetupKit entitlement (\(joined)) on non-App Store build, enabling Bluetooth pairing TCC bypass (CVE-2026-84493).",
+                        zh: "非 App Store 应用声明了 Apple 私有 AccessorySetupKit 特权 (\(joined))，可绕过蓝牙配对 TCC 隐私授权检查 (CVE-2026-84493)。"
+                    ),
+                    category: "AccessorySetupKit Bluetooth TCC Bypass (CVE-2026-84493)",
+                    location: "CSBlob Entitlements",
+                    severity: .highRisk
+                ))
+            }
         }
 
-        // 2. Unencrypted non-App Store binaries invoking AccessorySetupKit without required Info.plist keys
-        if cryptid == 0 {
-            let linksAccessorySetup = linkedDylibs.contains { $0.contains("AccessorySetupKit.framework") }
-            let usesAccessorySession = symbols.contains { $0.contains("ASAccessorySession") }
+        // 2. Non-App Store or cryptographically unverified binaries invoking AccessorySetupKit without required Info.plist keys
+        let canInspectAccessoryLinkage = (effectiveEntChannel != .appStore && cryptid == 0)
+            || hasMissingCodeSignature
+            || (codeSignatureTrust != .appleAppStoreVerified)
+        if canInspectAccessoryLinkage {
+            let accFwLower = IOCTokenArmor.tAccSetupFw.lowercased()
+            let accSessSym = IOCTokenArmor.tASAccSess
+            let linksAccessorySetup = linkedDylibs.contains { $0.lowercased().contains(accFwLower) }
+            let usesAccessorySession = symbols.contains { $0.contains(accSessSym) }
 
             if linksAccessorySetup || usesAccessorySession {
                 let btUsageDesc = (infoPlist["NSBluetoothAlwaysUsageDescription"] as? String)?
@@ -763,8 +879,8 @@ public enum ExpandedThreatCatalog {
                     indicators.append(ThreatIndicator(
                         signature: "CVE-2026-84493:AccessorySetupKitBypass",
                         description: WQLocale.pick(
-                            en: "Uses AccessorySetupKit / ASAccessorySession while omitting required Info.plist declarations (NSBluetoothAlwaysUsageDescription and non-empty NSAccessorySetupKitSupports), matching CVE-2026-84493 silent Bluetooth TCC bypass.",
-                            zh: "应用调用了 AccessorySetupKit / ASAccessorySession 但缺失必须的 Info.plist 声明（NSBluetoothAlwaysUsageDescription 或非空 NSAccessorySetupKitSupports），符合 CVE-2026-84493 静默蓝牙 TCC 隐私绕过特征。"
+                            en: "Uses AccessorySetupKit / \(accSessSym) while omitting required Info.plist declarations (NSBluetoothAlwaysUsageDescription and non-empty NSAccessorySetupKitSupports), matching CVE-2026-84493 silent Bluetooth TCC bypass.",
+                            zh: "应用调用了 AccessorySetupKit / \(accSessSym) 但缺失必须的 Info.plist 声明（NSBluetoothAlwaysUsageDescription 或非空 NSAccessorySetupKitSupports），符合 CVE-2026-84493 静默蓝牙 TCC 隐私绕过特征。"
                         ),
                         category: "AccessorySetupKit Bluetooth TCC Bypass (CVE-2026-84493)",
                         location: "Info.plist + Mach-O",
@@ -833,10 +949,6 @@ public enum ExpandedThreatCatalog {
     ) -> [ThreatIndicator] {
         var indicators: [ThreatIndicator] = []
         let trimmedBundleId = bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isTrustedAppleApp = trimmedBundleId.hasPrefix("com.apple.") && installChannel == .appStore && !hasUnencryptedBinary
-        guard !isTrustedAppleApp else {
-            return []
-        }
 
         let sandboxEscapeRules: [(key: String, expectedBool: Bool, allowNonEmptyCollection: Bool, descEn: String, descZh: String)] = [
             (
@@ -891,7 +1003,7 @@ public enum ExpandedThreatCatalog {
             }
         }
 
-        if parseEntitlementBool(entitlements["platform-application"]) == true && !trimmedBundleId.hasPrefix("com.apple.") {
+        if parseEntitlementBool(entitlements["platform-application"]) == true && !trimmedBundleId.lowercased().hasPrefix("com.apple.") {
             indicators.append(ThreatIndicator(
                 signature: "platform-application",
                 description: WQLocale.pick(

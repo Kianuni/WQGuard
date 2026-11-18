@@ -83,6 +83,7 @@ final class M1AdversarialChallengeTests: XCTestCase {
 
     /// Challenge: Mixed App Groups where candidate provides an authorized App Group
     /// PLUS an unauthorized rogue App Group.
+    /// MUST be rejected (`allSatisfy` prevents piggybacking victim App Groups onto custom rules).
     func testAntiSpoofing_MixedAppGroups_ContainsAuthorizedAndUnauthorized() {
         let result = engine.isWhitelisted(
             bundleId: "com.jbdotparty.Erosion",
@@ -90,9 +91,11 @@ final class M1AdversarialChallengeTests: XCTestCase {
             matchedSignatures: ["container_query_create"]
         )
 
-        // Verifying behavior: App possesses the legitimate App Group along with another
-        XCTAssertTrue(result.isWhitelisted)
-        XCTAssertEqual(result.toolName, "Erosion")
+        XCTAssertFalse(
+            result.isWhitelisted,
+            "CRITICAL: Piggybacked unauthorized App Group 'group.com.evil.exploit' must NOT be whitelisted under Erosion"
+        )
+        XCTAssertNil(result.toolName)
     }
 
     /// Challenge: Suffix hijacking on WQGuard self-identity rule.

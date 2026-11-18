@@ -86,7 +86,12 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
     }
 
     public static func parse(from url: URL) throws -> LockdownPairingFile {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let data: Data
+        do {
+            data = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: url, maxBytes: 4 * 1024 * 1024)
+        } catch {
+            throw LockdownClientError.invalidPairingFile(error.localizedDescription)
+        }
         let stem = url.deletingPathExtension().lastPathComponent
         return try parse(data: data, fallbackUDID: stem.isEmpty ? nil : stem)
     }
@@ -306,15 +311,20 @@ public struct LocalNetworkSubnetDiagnosis: Sendable, Equatable {
                 foundWifiIP = ipStr
                 foundWifiMask = entry.ifa_netmask.flatMap { ipv4String(from: $0) } ?? "255.255.255.0"
             } else if name.hasPrefix("utun") {
-                // Prefer non-Carrier-Grade-NAT / non-system-push utun if multiple exist, especially 10.7.x or LAN-matching utun
-                let isLikelyLocalDevVPN = ipStr.hasPrefix("10.7.") || ipStr.hasPrefix("192.168.") || ipStr.hasPrefix("172.") || foundUtunLocal == nil
+                // Only accept strictly local/private/CGNAT utun interfaces; never adopt a commercial VPN's public peer IP
+                guard LockdownInstProxyClient.isAllowedLocalHost(ipStr) else { continue }
+                let isLikelyLocalDevVPN = ipStr.hasPrefix("10.7.")
+                    || ipStr.hasPrefix("192.168.")
+                    || LockdownInstProxyClient.isRFC1918Block172(ipStr)
+                    || foundUtunLocal == nil
                 if isLikelyLocalDevVPN {
                     foundUtunName = name
                     foundUtunLocal = ipStr
                     if let dst = entry.ifa_dstaddr,
                        dst.pointee.sa_family == sa_family_t(AF_INET),
                        let peer = ipv4String(from: dst),
-                       peer != ipStr && peer != "0.0.0.0" {
+                       peer != ipStr && peer != "0.0.0.0",
+                       LockdownInstProxyClient.isAllowedLocalHost(peer) {
                         foundUtunPeer = peer
                     }
                 }
@@ -428,6 +438,131 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
 
     public init() {}
 
+    // MARK: - Zero-Outbound-Network Numeric Local Host Guard
+
+    internal static func isRFC1918Block172(_ rawHost: String) -> Bool {
+        var addr4 = in_addr()
+        guard inet_pton(AF_INET, rawHost, &addr4) == 1 else { return false }
+        let u32 = UInt32(bigEndian: addr4.s_addr)
+        return (u32 & 0xFFF0_0000) == 0xAC10_0000
+    }
+
+    /// Enforces the strict zero-outbound-internet invariant (`SECURITY.md`):
+    /// permits ONLY numeric loopback, RFC1918 private, link-local, CGNAT/LocalDevVPN, or IPv6 ULA literals
+    /// (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `169.254.0.0/16`,
+    /// `::1`, `fe80::/10`, `fc00::/7`), rejecting all DNS hostnames, public IPs, and IPv4-mapped IPv6 literals.
+    public static func isAllowedLocalHost(_ rawHost: String) -> Bool {
+        (try? validateAllowedLocalHost(rawHost)) != nil
+    }
+
+    public static func validateAllowedLocalHost(_ rawHost: String) throws -> String {
+        let trimmed = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains(where: { $0.isWhitespace || $0 == "\0" || $0 == "/" }) else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Rejected non-local or malformed Lockdown host '\(rawHost)': only numeric local/private IP literals are permitted (zero outbound network / zero DNS).",
+                zh: "已拦截非本地或格式非法的 Lockdown 地址 '\(rawHost)'：仅允许纯数字本地/私网 IP 字面量（零外发网络 / 零 DNS 查询）。"
+            ))
+        }
+
+        let unbracketed: String
+        if trimmed.hasPrefix("[") || trimmed.hasSuffix("]") {
+            guard trimmed.hasPrefix("["), trimmed.hasSuffix("]"), trimmed.count > 2 else {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Malformed bracketed IPv6 literal '\(rawHost)'.",
+                    zh: "IPv6 括号字面量格式错误 '\(rawHost)'。"
+                ))
+            }
+            unbracketed = String(trimmed.dropFirst().dropLast())
+        } else {
+            unbracketed = trimmed
+        }
+
+        // 1. Numeric IPv4 literal check (`inet_pton` strictly rejects octal/hex/short-form/DNS names)
+        if !unbracketed.contains(":") {
+            var addr4 = in_addr()
+            guard inet_pton(AF_INET, unbracketed, &addr4) == 1 else {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Rejected non-numeric or external host '\(rawHost)': DNS resolution and public IPs are forbidden.",
+                    zh: "已拒绝非数字域名或外部主机 '\(rawHost)'：严禁发起 DNS 解析或连接公网 IP。"
+                ))
+            }
+            let u32 = UInt32(bigEndian: addr4.s_addr)
+            let isLoopback = (u32 & 0xFF00_0000) == 0x7F00_0000 && u32 != 0x7F00_0000 && u32 != 0x7FFF_FFFF
+            let is10 = (u32 & 0xFF00_0000) == 0x0A00_0000
+            let is172 = (u32 & 0xFFF0_0000) == 0xAC10_0000
+            let is192 = (u32 & 0xFFFF_0000) == 0xC0A8_0000
+            let isCGNAT = (u32 & 0xFFC0_0000) == 0x6440_0000
+            let isLinkLocal = (u32 & 0xFFFF_0000) == 0xA9FE_0000
+            guard isLoopback || is10 || is172 || is192 || isCGNAT || isLinkLocal else {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Rejected public or reserved IPv4 host '\(rawHost)': only local/VPN/private subnets are permitted.",
+                    zh: "已拒绝公网或保留网段 IPv4 地址 '\(rawHost)'：仅允许本机/本地 VPN/局域网私网地址。"
+                ))
+            }
+            return unbracketed
+        }
+
+        // 2. Numeric IPv6 literal check (`::1`, `fe80::/10` with optional safe `%ifname`, `fc00::/7`)
+        let parts = unbracketed.split(separator: "%", omittingEmptySubsequences: false)
+        guard parts.count == 1 || parts.count == 2 else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Malformed IPv6 zone literal '\(rawHost)'.",
+                zh: "IPv6 作用域字面量格式错误 '\(rawHost)'。"
+            ))
+        }
+        let ipv6AddrPart = String(parts[0])
+        let zonePart: String? = parts.count == 2 ? String(parts[1]) : nil
+        if let zone = zonePart {
+            let validZone = !zone.isEmpty && zone.count <= 16 && zone.utf8.allSatisfy { b in
+                (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+                    || (b >= 0x30 && b <= 0x39) || b == 0x2E || b == 0x5F || b == 0x2D
+            }
+            guard validZone else {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Invalid IPv6 interface zone in '\(rawHost)'.",
+                    zh: "IPv6 网卡作用域标识符无效 '\(rawHost)'。"
+                ))
+            }
+        }
+
+        var addr6 = in6_addr()
+        guard inet_pton(AF_INET6, ipv6AddrPart, &addr6) == 1 else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Rejected non-numeric IPv6 literal '\(rawHost)'.",
+                zh: "已拒绝非法的 IPv6 字面量 '\(rawHost)'。"
+            ))
+        }
+        let octets = withUnsafeBytes(of: addr6) { Array($0) }
+        guard octets.count == 16 else {
+            throw LockdownClientError.protocolError("Invalid IPv6 address buffer")
+        }
+        let isV6Loopback = octets[0..<15].allSatisfy({ $0 == 0 }) && octets[15] == 1 && zonePart == nil
+        let isV6LinkLocal = octets[0] == 0xFE && (octets[1] & 0xC0) == 0x80
+        let isV6ULA = (octets[0] & 0xFE) == 0xFC && zonePart == nil
+        guard isV6Loopback || isV6LinkLocal || isV6ULA else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Rejected global or IPv4-mapped IPv6 host '\(rawHost)': only ::1, fe80::/10, and fc00::/7 are permitted.",
+                zh: "已拒绝公网或映射型 IPv6 地址 '\(rawHost)'：仅允许 ::1、fe80::/10 与 fc00::/7。"
+            ))
+        }
+        return unbracketed
+    }
+
+    internal static func makeNumericNWHost(_ rawHost: String) throws -> NWEndpoint.Host {
+        let validated = try validateAllowedLocalHost(rawHost)
+        if !validated.contains(":"), let v4 = IPv4Address(validated) {
+            return .ipv4(v4)
+        }
+        if let v6 = IPv6Address(validated) {
+            return .ipv6(v6)
+        }
+        throw LockdownClientError.protocolError(WQLocale.pick(
+            en: "Failed to construct numeric network endpoint for '\(rawHost)'.",
+            zh: "无法为 '\(rawHost)' 构建纯数字网络端点。"
+        ))
+    }
+
     // MARK: - Public Entry Point
 
     /// Connects to `lockdownd` over LocalDevVPN (default `10.7.0.1`, plus auto-detected Wi-Fi subnet / `utun` peer),
@@ -438,14 +573,14 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         allowInteractiveConsentWait: Bool = true
     ) async throws -> [InstalledAppRegistryRecord] {
         return try await Task.detached(priority: .userInitiated) { [self] in
-            let tlsOptions = try self.createTLSOptions(from: pairing)
             let cleanPreferred = preferredHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            let primaryHost = cleanPreferred.isEmpty ? "10.7.0.1" : cleanPreferred
+            let primaryHost = try Self.validateAllowedLocalHost(cleanPreferred.isEmpty ? "10.7.0.1" : cleanPreferred)
+            let tlsOptions = try self.createTLSOptions(from: pairing)
             let diagnosis = LocalNetworkSubnetDiagnosis.inspect(configuredHost: primaryHost)
 
             // Fast-fail in <0.5s when no active `utun` VPN tunnel exists on the device, preventing
             // 15-25s UI freezes when the user runs an offline snapshot scan while LocalDevVPN is disconnected.
-            if diagnosis.utunInterface == nil && primaryHost != "127.0.0.1" {
+            if diagnosis.utunInterface == nil && primaryHost != "127.0.0.1" && primaryHost != "::1" {
                 if let quickFD = try? Self.connectPOSIXSocket(host: primaryHost, port: Self.lockdownPort, timeoutMs: 450) {
                     Darwin.close(quickFD)
                 } else {
@@ -468,8 +603,9 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             for maybeHost in rawCandidates {
                 if let h = maybeHost?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !h.isEmpty,
-                   !candidateHosts.contains(h) {
-                    candidateHosts.append(h)
+                   let canonical = try? Self.validateAllowedLocalHost(h),
+                   !candidateHosts.contains(canonical) {
+                    candidateHosts.append(canonical)
                 }
             }
 
@@ -554,7 +690,9 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
     /// polling every 350ms so execution resumes immediately the moment the user taps "Allow".
     private static func warmUpLocalNetworkPermission(host: String, port: UInt16, allowConsentWait: Bool) {
         guard host != "127.0.0.1",
+              host != "::1",
               !UserDefaults.standard.bool(forKey: localNetworkWarmedKey),
+              let nwHost = try? makeNumericNWHost(host),
               let nwPort = NWEndpoint.Port(rawValue: port) else {
             return
         }
@@ -562,7 +700,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         tcp.connectionTimeout = 2
         let params = NWParameters(tls: nil, tcp: tcp)
         let queue = DispatchQueue(label: "com.wqguard.localnet.warmup")
-        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
+        let conn = NWConnection(host: nwHost, port: nwPort, using: params)
 
         let readyOrFailSema = DispatchSemaphore(value: 0)
         let waitingFlag = LockedBox<Bool>(false)
@@ -607,10 +745,10 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
 
     // MARK: - Step 1 & 2: Lockdown Session & StartService
 
-    private func negotiateInstallationProxyPort(
+    func negotiateInstallationProxyPort(
         rawSocketFD: Int32,
         pairing: LockdownPairingFile,
-        tlsOptions: NWProtocolTLS.Options
+        tlsOptions: NWProtocolTLS.Options?
     ) throws -> (port: UInt16, enableSSL: Bool) {
         var socketTransferredToRelay = false
         defer {
@@ -626,7 +764,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             throw LockdownClientError.protocolError(WQLocale.pick(en: "Unexpected QueryType response", zh: "非预期的 QueryType 响应"))
         }
 
-        // 2. StartSession
+        // 2. StartSession (mandatory STARTTLS: reject plaintext downgrade / MITM strip attacks)
         let startSessionReq: [String: Any] = [
             "Request": "StartSession",
             "HostID": pairing.hostID,
@@ -640,55 +778,81 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         }
 
         let enableSessionSSL = (sessionResp["EnableSessionSSL"] as? Bool) ?? false
+        guard enableSessionSSL else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Refused unencrypted StartSession (EnableSessionSSL=false): possible STARTTLS downgrade attack",
+                zh: "拒绝未加密的 StartSession 会话 (EnableSessionSSL=false)：疑似 STARTTLS 降级攻击"
+            ))
+        }
+        guard let tlsOptions else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Missing TLS client options for StartSession",
+                zh: "缺少 StartSession TLS 客户端安全配置"
+            ))
+        }
+
         let startServiceReq: [String: Any] = [
             "Request": "StartService",
             "Service": "com.apple.mobile.installation_proxy",
             "Label": "WQGuard"
         ]
 
-        let serviceResp: [String: Any]
-        if enableSessionSSL {
-            // Extend socket timeout before handing over to TLS loopback relay
-            var relayTV = timeval(tv_sec: 30, tv_usec: 0)
-            setsockopt(rawSocketFD, SOL_SOCKET, SO_RCVTIMEO, &relayTV, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(rawSocketFD, SOL_SOCKET, SO_SNDTIMEO, &relayTV, socklen_t(MemoryLayout<timeval>.size))
+        // Extend socket timeout before handing over to TLS loopback relay
+        var relayTV = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(rawSocketFD, SOL_SOCKET, SO_RCVTIMEO, &relayTV, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(rawSocketFD, SOL_SOCKET, SO_SNDTIMEO, &relayTV, socklen_t(MemoryLayout<timeval>.size))
 
-            let relay = try LocalSocketTLSRelay(upstreamFD: rawSocketFD)
-            socketTransferredToRelay = true
-            defer { relay.stop() }
+        let relay = try LocalSocketTLSRelay(upstreamFD: rawSocketFD)
+        socketTransferredToRelay = true
+        defer { relay.stop() }
 
-            let conn = try SyncNWChannel.connect(host: "127.0.0.1", port: relay.localPort, tlsOptions: tlsOptions)
-            defer { conn.close() }
+        let conn = try SyncNWChannel.connect(host: "127.0.0.1", port: relay.localPort, tlsOptions: tlsOptions)
+        defer { conn.close() }
 
-            try conn.sendPlist(startServiceReq)
-            serviceResp = try conn.receivePlist()
-        } else {
-            try Self.writePlistPacket(startServiceReq, toFD: rawSocketFD, step: "StartService")
-            serviceResp = try Self.readPlistPacket(fromFD: rawSocketFD, step: "StartService")
-        }
+        try conn.sendPlist(startServiceReq)
+        let serviceResp = try conn.receivePlist()
 
         if let err = serviceResp["Error"] as? String {
             throw LockdownClientError.serviceStartFailed(err)
         }
-        guard let portNum = serviceResp["Port"] as? NSNumber, portNum.uint16Value > 0 else {
+        guard let portNum = serviceResp["Port"] as? NSNumber else {
+            throw LockdownClientError.serviceStartFailed(WQLocale.pick(en: "No valid service port returned", zh: "未返回有效的服务端口号"))
+        }
+        let portInt = portNum.int64Value
+        guard portInt >= 1, portInt <= 65_535, Double(portInt) == portNum.doubleValue else {
             throw LockdownClientError.serviceStartFailed(WQLocale.pick(en: "No valid service port returned", zh: "未返回有效的服务端口号"))
         }
         let enableServiceSSL = (serviceResp["EnableServiceSSL"] as? Bool) ?? false
-        return (portNum.uint16Value, enableServiceSSL)
+        guard enableServiceSSL else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Refused unencrypted installation_proxy service (EnableServiceSSL=false): possible TLS downgrade attack",
+                zh: "拒绝未加密的 installation_proxy 服务通道 (EnableServiceSSL=false)：疑似 TLS 降级攻击"
+            ))
+        }
+        return (UInt16(portInt), true)
     }
 
     // MARK: - Step 3: `com.apple.mobile.installation_proxy` Browse
 
-    private func browseApplications(
+    private static let maxBrowsePackets = 4_096
+    private static let maxBrowseRecords = 32_768
+
+    func browseApplications(
         host: String,
         port: UInt16,
         useTLS: Bool,
-        tlsOptions: NWProtocolTLS.Options
+        tlsOptions: NWProtocolTLS.Options?
     ) throws -> [InstalledAppRegistryRecord] {
+        guard useTLS, let verifiedTLSOptions = tlsOptions else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Refused unencrypted installation_proxy Browse session: TLS pinning is mandatory",
+                zh: "拒绝未加密的 installation_proxy Browse 会话：强制要求 TLS 证书固定"
+            ))
+        }
         let conn = try SyncNWChannel.connect(
             host: host,
             port: port,
-            tlsOptions: useTLS ? tlsOptions : nil
+            tlsOptions: verifiedTLSOptions
         )
         defer { conn.close() }
 
@@ -723,8 +887,15 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         try conn.sendPlist(browseReq)
 
         var records: [InstalledAppRegistryRecord] = []
-        var seen: Set<String> = []
+        var packetCount = 0
         while true {
+            packetCount += 1
+            guard packetCount <= Self.maxBrowsePackets else {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "instproxy Browse exceeded maximum packet quota (\(Self.maxBrowsePackets))",
+                    zh: "instproxy Browse 响应包数量超出安全上限 (\(Self.maxBrowsePackets))"
+                ))
+            }
             let packet = try conn.receivePlist()
             if let err = packet["Error"] as? String {
                 throw LockdownClientError.protocolError(WQLocale.pick(
@@ -734,8 +905,13 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             }
             if let list = packet["CurrentList"] as? [[String: Any]] {
                 for item in list {
-                    if let rec = InstalledAppRegistryRecord.fromDictionary(item),
-                       seen.insert(rec.bundleId).inserted {
+                    if let rec = InstalledAppRegistryRecord.fromDictionary(item) {
+                        guard records.count < Self.maxBrowseRecords else {
+                            throw LockdownClientError.protocolError(WQLocale.pick(
+                                en: "instproxy Browse exceeded maximum record quota (\(Self.maxBrowseRecords))",
+                                zh: "instproxy Browse 应用记录数超出安全上限 (\(Self.maxBrowseRecords))"
+                            ))
+                        }
                         records.append(rec)
                     }
                 }
@@ -745,12 +921,12 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                 break
             }
         }
-        return records
+        return InstalledAppRegistryScanner.shared.deduplicate(records)
     }
 
     // MARK: - Security.framework TLS Identity Setup
 
-    private func createTLSOptions(from pairing: LockdownPairingFile) throws -> NWProtocolTLS.Options {
+    internal func createTLSOptions(from pairing: LockdownPairingFile) throws -> NWProtocolTLS.Options {
         guard let certRef = SecCertificateCreateWithData(nil, pairing.hostCertificateDER as CFData) else {
             throw LockdownClientError.invalidPairingFile(WQLocale.pick(
                 en: "Invalid HostCertificate X.509 DER format",
@@ -787,34 +963,44 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         sec_protocol_options_set_local_identity(secOpts, nwIdentity)
         sec_protocol_options_set_min_tls_protocol_version(secOpts, .TLSv12)
 
+        let hostCertDER = SecCertificateCopyData(certRef) as Data
+        let hostPubKeyData: Data? = SecCertificateCopyKey(certRef).flatMap { SecKeyCopyExternalRepresentation($0, nil) as Data? }
         let expectedDeviceDER = pairing.deviceCertificateDER
-        let expectedRootDER = pairing.rootCertificateDER
-        let anchorCerts: [SecCertificate] = [expectedRootDER, expectedDeviceDER]
-            .compactMap { $0 }
-            .compactMap { SecCertificateCreateWithData(nil, $0 as CFData) }
+        let expectedRootCert: SecCertificate? = pairing.rootCertificateDER.flatMap {
+            SecCertificateCreateWithData(nil, $0 as CFData)
+        }
 
         let verifyQueue = DispatchQueue(label: "com.wqguard.lockdown.tlsverify")
         sec_protocol_options_set_verify_block(secOpts, { _, trust, completion in
             let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-
-            // Pin the TLS-authenticated leaf certificate (`chain[0]`) directly against the pairing file's
-            // `DeviceCertificate` DER bytes because `lockdownd` generates long-lived device certificates that omit
-            // standard WebPKI X.509v3 extensions; if `DeviceCertificate` is absent and only `RootCertificate` is
-            // present, trust must be proven cryptographically via `SecTrustEvaluateWithError` below (never `.contains`
-            // on unverified intermediate/trailing chain entries).
-            if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
-               let leafCert = chain.first {
-                let leafDER = SecCertificateCopyData(leafCert) as Data
-                if let devDER = expectedDeviceDER, leafDER == devDER {
-                    completion(true)
-                    return
-                }
+            guard let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+                  let leafCert = chain.first else {
+                completion(false)
+                return
             }
 
-            if !anchorCerts.isEmpty {
+            let leafDER = SecCertificateCopyData(leafCert) as Data
+            let leafPubKeyData: Data? = SecCertificateCopyKey(leafCert).flatMap { SecKeyCopyExternalRepresentation($0, nil) as Data? }
+
+            // Block reflection / MITM impersonation using HostCertificate + HostPrivateKey from the pairing record itself
+            if leafDER == hostCertDER || (hostPubKeyData != nil && leafPubKeyData == hostPubKeyData) {
+                completion(false)
+                return
+            }
+
+            // When DeviceCertificate is present in the pairing record, strictly pin chain[0] to exact DeviceCertificate DER bytes
+            // (never falling through to RootCertificate, which also signed HostCertificate).
+            if let devDER = expectedDeviceDER {
+                completion(leafDER == devDER)
+                return
+            }
+
+            // Fallback ONLY when DeviceCertificate is omitted and RootCertificate is present
+            if let rootCert = expectedRootCert {
+                _ = SecTrustSetNetworkFetchAllowed(secTrust, false)
                 let x509Policy = SecPolicyCreateBasicX509()
                 SecTrustSetPolicies(secTrust, x509Policy)
-                SecTrustSetAnchorCertificates(secTrust, anchorCerts as CFArray)
+                SecTrustSetAnchorCertificates(secTrust, [rootCert] as CFArray)
                 SecTrustSetAnchorCertificatesOnly(secTrust, true)
                 if SecTrustEvaluateWithError(secTrust, nil) {
                     completion(true)
@@ -919,26 +1105,25 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                     return candidate
                 }
             }
-            if let first = array.first {
-                return unsafeBitCast(first as AnyObject, to: SecIdentity.self)
-            }
         }
 
-        throw LockdownClientError.identityImportFailed(allStatus)
+        throw LockdownClientError.identityImportFailed(allStatus == errSecSuccess ? errSecItemNotFound : allStatus)
     }
 
     // MARK: - Low-Level POSIX Socket Helpers (4-byte Big-Endian Length + XML Plist)
 
     private static func connectPOSIXSocket(host: String, port: UInt16, timeoutMs: Int32) throws -> Int32 {
+        let validatedHost = try validateAllowedLocalHost(host)
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
         hints.ai_protocol = IPPROTO_TCP
+        hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV
 
         var res: UnsafeMutablePointer<addrinfo>?
         let portStr = String(port)
-        guard getaddrinfo(host, portStr, &hints, &res) == 0, let firstAddr = res else {
-            throw LockdownClientError.lockdownUnreachable(host)
+        guard getaddrinfo(validatedHost, portStr, &hints, &res) == 0, let firstAddr = res else {
+            throw LockdownClientError.lockdownUnreachable(validatedHost)
         }
         defer { freeaddrinfo(res) }
 
@@ -985,7 +1170,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         return fd
     }
 
-    fileprivate static func writePlistPacket(_ dict: [String: Any], toFD fd: Int32, step: String = "Lockdown") throws {
+    static func writePlistPacket(_ dict: [String: Any], toFD fd: Int32, step: String = "Lockdown") throws {
         let plistData = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
         var lengthBE = UInt32(plistData.count).bigEndian
         var packet = Data(bytes: &lengthBE, count: 4)
@@ -1017,7 +1202,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         }
     }
 
-    fileprivate static func readPlistPacket(fromFD fd: Int32, step: String = "Lockdown") throws -> [String: Any] {
+    static func readPlistPacket(fromFD fd: Int32, step: String = "Lockdown") throws -> [String: Any] {
         let header = try readExactBytes(count: 4, fromFD: fd, step: step)
         let length = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         guard length > 0, length <= 64 * 1024 * 1024 else {
@@ -1190,13 +1375,20 @@ private final class SyncNWChannel: @unchecked Sendable {
     }
 
     static func connect(host: String, port: UInt16, tlsOptions: NWProtocolTLS.Options?) throws -> SyncNWChannel {
+        guard let verifiedTLS = tlsOptions else {
+            throw LockdownClientError.protocolError(WQLocale.pick(
+                en: "Refused unencrypted SyncNWChannel connection: TLS options are mandatory",
+                zh: "拒绝未加密的 SyncNWChannel 连接：强制要求 TLS 安全选项"
+            ))
+        }
+        let nwHost = try LockdownInstProxyClient.makeNumericNWHost(host)
         let tcp = NWProtocolTCP.Options()
         tcp.connectionTimeout = 5
-        let params = NWParameters(tls: tlsOptions, tcp: tcp)
+        let params = NWParameters(tls: verifiedTLS, tcp: tcp)
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw LockdownClientError.protocolError(WQLocale.pick(en: "Invalid port: \(port)", zh: "无效端口号: \(port)"))
         }
-        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
+        let conn = NWConnection(host: nwHost, port: nwPort, using: params)
         let channel = SyncNWChannel(connection: conn)
 
         let sema = DispatchSemaphore(value: 0)

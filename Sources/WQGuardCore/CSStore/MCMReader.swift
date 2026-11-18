@@ -151,6 +151,10 @@ public final class MCMReader: Sendable {
             throw MCMReaderError.symlinkEncountered(path: path)
         }
 
+        guard (st.st_mode & S_IFMT) == S_IFREG else {
+            throw MCMReaderError.corruptedPlist(reason: "Metadata plist path is not a regular file.")
+        }
+
         guard st.st_size > 0 else {
             throw MCMReaderError.emptyData(path: path)
         }
@@ -159,8 +163,8 @@ public final class MCMReader: Sendable {
             throw MCMReaderError.fileTooLarge(size: st.st_size, maxAllowed: Self.maxPlistBytes)
         }
 
-        // Open strictly with O_RDONLY | O_NOFOLLOW | O_CLOEXEC
-        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        // Open strictly with O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC and verify fstat inode/regular-file identity
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else {
             let err = errno
             if err == EACCES || err == EPERM {
@@ -172,9 +176,34 @@ public final class MCMReader: Sendable {
         }
         defer { close(fd) }
 
-        var buffer = [UInt8](repeating: 0, count: Int(st.st_size))
-        let bytesRead = read(fd, &buffer, Int(st.st_size))
-        guard bytesRead == Int(st.st_size) else {
+        var fst = stat()
+        guard fstat(fd, &fst) == 0,
+              (fst.st_mode & S_IFMT) == S_IFREG,
+              fst.st_dev == st.st_dev,
+              fst.st_ino == st.st_ino,
+              fst.st_size == st.st_size else {
+            throw MCMReaderError.corruptedPlist(reason: "Metadata file changed or is non-regular during read.")
+        }
+
+        let expectedCount = Int(st.st_size)
+        var buffer = [UInt8](repeating: 0, count: expectedCount)
+        var totalRead = 0
+        while totalRead < expectedCount {
+            let n = buffer.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress?.advanced(by: totalRead) else { return -1 }
+                return Darwin.read(fd, base, expectedCount - totalRead)
+            }
+            if n > 0 {
+                totalRead += n
+            } else if n == 0 {
+                break
+            } else if errno == EINTR {
+                continue
+            } else {
+                throw MCMReaderError.corruptedPlist(reason: "Incomplete file read from disk.")
+            }
+        }
+        guard totalRead == expectedCount else {
             throw MCMReaderError.corruptedPlist(reason: "Incomplete file read from disk.")
         }
 
@@ -186,6 +215,9 @@ public final class MCMReader: Sendable {
     public func parseMetadata(data: Data, containerURL: URL? = nil) throws -> MCMMetadata {
         guard !data.isEmpty else {
             throw MCMReaderError.emptyData(path: containerURL?.path ?? "")
+        }
+        guard Int64(data.count) <= Self.maxPlistBytes else {
+            throw MCMReaderError.fileTooLarge(size: Int64(data.count), maxAllowed: Self.maxPlistBytes)
         }
 
         var format = PropertyListSerialization.PropertyListFormat.xml

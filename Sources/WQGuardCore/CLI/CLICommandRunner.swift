@@ -43,10 +43,15 @@ public enum CLICommandRunner: Sendable {
             return 0
         }
 
-        // 3. Whitelist Registration
+        // 3. Scoped Whitelist Registration (restored via defer so CLI invocations never pollute WhitelistEngine.shared)
+        var priorToolsByName: [String: WhitelistedTool?] = [:]
         for bundleId in config.whitelistedBundleIDs {
+            let ruleName = "CLI-Whitelist-\(bundleId)"
+            if priorToolsByName[ruleName] == nil {
+                priorToolsByName[ruleName] = WhitelistEngine.shared.tool(named: ruleName)
+            }
             let tool = WhitelistedTool(
-                name: "CLI-Whitelist-\(bundleId)",
+                name: ruleName,
                 allowedBundleIds: [bundleId],
                 allowedAppGroups: [],
                 expectedSignatures: [],
@@ -56,8 +61,66 @@ public enum CLICommandRunner: Sendable {
             )
             WhitelistEngine.shared.registerCustomTool(tool)
         }
+        defer {
+            for (ruleName, prior) in priorToolsByName {
+                if let saved = prior {
+                    WhitelistEngine.shared.registerCustomTool(saved)
+                } else {
+                    WhitelistEngine.shared.removeTool(named: ruleName)
+                }
+            }
+        }
 
         let startTime = Date()
+
+        func stripTrailingSlashes(_ rawPath: String) -> String {
+            guard rawPath.count > 1 else { return rawPath }
+            var s = rawPath
+            while s.count > 1 && s.hasSuffix("/") {
+                s.removeLast()
+            }
+            return s
+        }
+
+        func verifySafeOutputDestination(_ destURL: URL) -> String? {
+            let cleanPath = stripTrailingSlashes(destURL.path)
+            var st = stat()
+            if lstat(cleanPath, &st) == 0 {
+                let mode = st.st_mode & S_IFMT
+                if mode == S_IFLNK {
+                    return "refusing to overwrite symbolic link at '\(cleanPath)'"
+                }
+                if mode != S_IFREG {
+                    return "output path '\(cleanPath)' exists and is not a regular file"
+                }
+            }
+            return nil
+        }
+
+        func writeSafeCLIOutput(_ content: String, to rawPath: String) throws -> URL {
+            let rawDestURL = URL(fileURLWithPath: rawPath)
+            let rawParent = stripTrailingSlashes(rawDestURL.deletingLastPathComponent().path)
+            let effectiveDestURL: URL
+            if rawParent == "/tmp" {
+                effectiveDestURL = URL(fileURLWithPath: "/private/tmp").appendingPathComponent(rawDestURL.lastPathComponent)
+            } else if rawParent == "/var" {
+                effectiveDestURL = URL(fileURLWithPath: "/private/var").appendingPathComponent(rawDestURL.lastPathComponent)
+            } else {
+                effectiveDestURL = rawDestURL
+            }
+            if let unsafeReason = verifySafeOutputDestination(effectiveDestURL) {
+                throw NSError(domain: "WQGuardCLI", code: 2, userInfo: [NSLocalizedDescriptionKey: unsafeReason])
+            }
+            let parentURL = effectiveDestURL.deletingLastPathComponent()
+            let cleanParent = stripTrailingSlashes(parentURL.path)
+            var pSt = stat()
+            if lstat(cleanParent, &pSt) == 0 && (pSt.st_mode & S_IFMT) == S_IFLNK {
+                throw NSError(domain: "WQGuardCLI", code: 2, userInfo: [NSLocalizedDescriptionKey: "refusing to write through symbolic link directory '\(cleanParent)'"])
+            }
+            try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
+            try IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(Data(content.utf8), to: effectiveDestURL)
+            return URL(fileURLWithPath: stripTrailingSlashes(rawDestURL.path))
+        }
 
         // 4. Surge & Multi-Client Shield Export
         if let surgePath = config.exportSurgePath {
@@ -69,10 +132,7 @@ public enum CLICommandRunner: Sendable {
                     stderr.write(Data(msg.utf8))
                     return 2
                 }
-                let destURL = URL(fileURLWithPath: surgePath)
-                let dir = destURL.deletingLastPathComponent()
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                try content.write(to: destURL, atomically: true, encoding: .utf8)
+                let destURL = try writeSafeCLIOutput(content, to: surgePath)
                 let confirm = "[+] Exported Surge shield to \(destURL.path)\n"
                 stderr.write(Data(confirm.utf8))
             } catch {
@@ -92,10 +152,7 @@ public enum CLICommandRunner: Sendable {
                     stderr.write(Data(msg.utf8))
                     return 2
                 }
-                let destURL = URL(fileURLWithPath: shieldPath)
-                let dir = destURL.deletingLastPathComponent()
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                try content.write(to: destURL, atomically: true, encoding: .utf8)
+                let destURL = try writeSafeCLIOutput(content, to: shieldPath)
                 let confirm = "[+] Exported \(platform.shortTitleEn) shield to \(destURL.path)\n"
                 stderr.write(Data(confirm.utf8))
             } catch {
@@ -127,9 +184,22 @@ public enum CLICommandRunner: Sendable {
 
         // 6.1 IPA Scanning
         if let ipaPath = config.ipaPath {
-            let url = URL(fileURLWithPath: ipaPath)
-            guard FileManager.default.fileExists(atPath: url.path) else {
+            let cleanIpaPath = stripTrailingSlashes(ipaPath)
+            let url = URL(fileURLWithPath: cleanIpaPath)
+            var ipaStat = stat()
+            guard lstat(cleanIpaPath, &ipaStat) == 0 else {
                 let msg = "\(CLIError.fileNotFound(ipaPath).localizedDescription)\n"
+                stderr.write(Data(msg.utf8))
+                return 2
+            }
+            let ipaMode = ipaStat.st_mode & S_IFMT
+            if ipaMode == S_IFLNK {
+                let msg = "wqguard-cli error: refusing to follow symbolic link target '\(ipaPath)'\n"
+                stderr.write(Data(msg.utf8))
+                return 2
+            }
+            guard ipaMode == S_IFREG else {
+                let msg = "wqguard-cli error: IPA target '\(ipaPath)' is not a regular file\n"
                 stderr.write(Data(msg.utf8))
                 return 2
             }
@@ -147,65 +217,183 @@ public enum CLICommandRunner: Sendable {
             }
         }
 
-        // 6.2 Container Scanning
+        // 6.2 Container / Bundle / Framework / Binary / Extensionless-IPA / Unpacked-Payload Target Scanning (handles `wqguard-cli scan <target>` and `-c <path>`)
         if let containerPath = config.containerPath {
-            let url = URL(fileURLWithPath: containerPath)
-            guard FileManager.default.fileExists(atPath: url.path) else {
+            let cleanContainerPath = stripTrailingSlashes(containerPath)
+            let url = URL(fileURLWithPath: cleanContainerPath)
+            var targetStat = stat()
+            guard lstat(cleanContainerPath, &targetStat) == 0 else {
                 let msg = "\(CLIError.fileNotFound(containerPath).localizedDescription)\n"
                 stderr.write(Data(msg.utf8))
                 return 2
             }
-            var containerResults: [ContainerScanResult] = []
 
-            // Disambiguate single container vs App Group parent directory:
-            // A single container directly contains `Library`, `Library/Caches`, or `.com.apple.mobile_container_manager.metadata.plist`.
-            // Use POSIX lstat to avoid following escaping symlinks or failing on broken link targets.
-            var st = stat()
-            let hasLibrary = lstat(url.appendingPathComponent("Library").path, &st) == 0
-            let hasCaches = lstat(url.appendingPathComponent("Library/Caches").path, &st) == 0
-            let hasMetadata = lstat(url.appendingPathComponent(MCMReader.metadataFilename).path, &st) == 0
-            let isSingleContainer = hasLibrary || hasCaches || hasMetadata
-
-            if isSingleContainer {
-                if let single = try? ContainerScanner.shared.scanContainer(at: url) {
-                    containerResults = [single]
-                }
-            } else if let results = try? ContainerScanner.shared.scanAppGroupContainers(at: url), !results.isEmpty {
-                containerResults = results
-            } else if let single = try? ContainerScanner.shared.scanContainer(at: url) {
-                containerResults = [single]
+            let targetMode = targetStat.st_mode & S_IFMT
+            if targetMode == S_IFLNK {
+                let msg = "wqguard-cli error: refusing to follow symbolic link target '\(containerPath)'\n"
+                stderr.write(Data(msg.utf8))
+                return 2
             }
-            for res in containerResults {
-                let bundleId = res.metadata?.identifier ?? res.containerURL.lastPathComponent
-                let appGroups = res.metadata?.identifier != nil ? [res.metadata!.identifier] : []
-                let riskTier: RiskTier = res.indicators.contains(where: { $0.severity == .highRisk }) ? .highRisk :
-                    (res.indicators.contains(where: { $0.severity == .caution }) ? .caution : .safe)
-                let finding = ScanFinding(
-                    bundleId: bundleId,
-                    displayName: res.containerURL.lastPathComponent,
-                    version: "1.0",
-                    teamId: nil,
-                    executablePath: nil,
-                    bundlePath: res.containerURL.path,
-                    installChannel: .developerSideloaded,
-                    riskTier: riskTier,
-                    isWhitelisted: false,
-                    indicators: res.indicators,
-                    evidence: AuditEvidence(
-                        matchedSymbols: [],
-                        linkedDylibs: [],
-                        hasAppGroups: !appGroups.isEmpty,
-                        appGroups: appGroups,
-                        installChannel: .developerSideloaded,
-                        cryptid: 0,
-                        isFairPlayEncrypted: false,
-                        escapingSymlinks: res.escapingSymlinks,
-                        dynamicLoadingPresent: false,
-                        pathEnumerationPresent: false,
-                        remediationGuidance: res.isClean ? "Container clean." : "Investigate escaping symlinks or malformed metadata."
-                    )
+            let isDirectoryTarget = (targetMode == S_IFDIR)
+            let isRegularTarget = (targetMode == S_IFREG)
+            guard isDirectoryTarget || isRegularTarget else {
+                let msg = "wqguard-cli error: target '\(containerPath)' is a special non-regular file (mode=\(targetStat.st_mode))\n"
+                stderr.write(Data(msg.utf8))
+                return 2
+            }
+
+            let ext = url.pathExtension.lowercased()
+            var probeStat = stat()
+            let hasBundlePlist: Bool = isDirectoryTarget && (
+                lstat(url.appendingPathComponent("Info.plist").path, &probeStat) == 0 ||
+                lstat(url.appendingPathComponent("Contents/Info.plist").path, &probeStat) == 0 ||
+                lstat(url.appendingPathComponent("Resources/Info.plist").path, &probeStat) == 0 ||
+                lstat(url.appendingPathComponent("Versions/Current/Resources/Info.plist").path, &probeStat) == 0 ||
+                lstat(url.appendingPathComponent("Versions/A/Resources/Info.plist").path, &probeStat) == 0
+            )
+            let isBundleDirectoryTarget = isDirectoryTarget && (
+                ext == "app" || ext == "appex" || ext == "xpc" || ext == "framework" || ext == "xcframework" || ext == "bundle" ||
+                (hasBundlePlist &&
+                 lstat(url.appendingPathComponent(MCMReader.metadataFilename).path, &probeStat) != 0 &&
+                 lstat(url.appendingPathComponent("Library").path, &probeStat) != 0)
+            )
+
+            if isRegularTarget && (ext == "ipa" || ext == "tipa") {
+                do {
+                    findings.append(try IPAPackageScanner.shared.scan(ipaURL: url))
+                } catch {
+                    let msg = "wqguard-cli error: failed to scan IPA '\(containerPath)': \(error.localizedDescription)\n"
+                    stderr.write(Data(msg.utf8))
+                    return 2
+                }
+            } else if isBundleDirectoryTarget {
+                do {
+                    findings.append(try SecurityPipeline.shared.scanBundle(at: url))
+                } catch {
+                    let msg = "wqguard-cli error: failed to scan bundle '\(containerPath)': \(error.localizedDescription)\n"
+                    stderr.write(Data(msg.utf8))
+                    return 2
+                }
+            } else if isRegularTarget {
+                let (prefix, fileSize) = IPAPackageScanner.readMachOHeaderPrefix(of: url)
+                let isZipMagic = prefix.count >= 4 && (
+                    (prefix[0] == 0x50 && prefix[1] == 0x4B && prefix[2] == 0x03 && prefix[3] == 0x04) ||
+                    (prefix[0] == 0x50 && prefix[1] == 0x4B && prefix[2] == 0x05 && prefix[3] == 0x06)
                 )
-                findings.append(finding)
+                if isZipMagic {
+                    do {
+                        findings.append(try IPAPackageScanner.shared.scan(ipaURL: url))
+                    } catch {
+                        let msg = "wqguard-cli error: failed to scan ZIP/IPA archive '\(containerPath)': \(error.localizedDescription)\n"
+                        stderr.write(Data(msg.utf8))
+                        return 2
+                    }
+                } else if IPAPackageScanner.isMachOOrFatMagic(prefix, fileSize: fileSize) {
+                    do {
+                        findings.append(try SecurityPipeline.shared.scanBinary(at: url))
+                    } catch {
+                        let msg = "wqguard-cli error: failed to scan Mach-O binary '\(containerPath)': \(error.localizedDescription)\n"
+                        stderr.write(Data(msg.utf8))
+                        return 2
+                    }
+                } else {
+                    let msg = "wqguard-cli error: target '\(containerPath)' is not a container directory, app bundle, IPA archive, or Mach-O binary (mode=\(targetStat.st_mode))\n"
+                    stderr.write(Data(msg.utf8))
+                    return 2
+                }
+            } else {
+                var st = stat()
+                let hasLibrary = lstat(url.appendingPathComponent("Library").path, &st) == 0
+                let hasCaches = lstat(url.appendingPathComponent("Library/Caches").path, &st) == 0
+                let hasMetadata = lstat(url.appendingPathComponent(MCMReader.metadataFilename).path, &st) == 0
+                let isSingleContainer = hasLibrary || hasCaches || hasMetadata || url.path.contains("configurationprofiles")
+
+                let hasChildContainerMarkers: Bool = {
+                    guard !isSingleContainer, let dp = opendir(url.path) else { return false }
+                    defer { closedir(dp) }
+                    while let ent = readdir(dp) {
+                        let name = withUnsafeBytes(of: ent.pointee.d_name) { raw -> String in
+                            String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+                        }
+                        if name == "." || name == ".." { continue }
+                        let childURL = url.appendingPathComponent(name)
+                        var cst = stat()
+                        guard lstat(childURL.path, &cst) == 0, (cst.st_mode & S_IFMT) == S_IFDIR else { continue }
+                        var mst = stat()
+                        if lstat(childURL.appendingPathComponent("Library").path, &mst) == 0 ||
+                           lstat(childURL.appendingPathComponent(MCMReader.metadataFilename).path, &mst) == 0 ||
+                           name.contains("configurationprofiles") {
+                            return true
+                        }
+                    }
+                    return false
+                }()
+
+                // If the directory is neither a single container nor an App Group parent directory (e.g. unpacked `Payload/` or
+                // batch audit directory containing `.app`/`.appex`/`.xpc`/`.framework`/`.xcframework`/`.ipa` targets), scan all packages inside it.
+                let nestedPackageTargets: [URL] = (!isSingleContainer && !hasChildContainerMarkers)
+                    ? Self.discoverNestedPackageTargetsNoFollow(in: url)
+                    : []
+
+                if !nestedPackageTargets.isEmpty {
+                    for pkgURL in nestedPackageTargets {
+                        let pkgExt = pkgURL.pathExtension.lowercased()
+                        do {
+                            if pkgExt == "ipa" || pkgExt == "tipa" {
+                                findings.append(try IPAPackageScanner.shared.scan(ipaURL: pkgURL))
+                            } else {
+                                findings.append(try SecurityPipeline.shared.scanBundle(at: pkgURL))
+                            }
+                        } catch {
+                            let msg = "wqguard-cli error: failed to scan '\(pkgURL.path)': \(error.localizedDescription)\n"
+                            stderr.write(Data(msg.utf8))
+                            return 2
+                        }
+                    }
+                } else {
+                    var containerResults: [ContainerScanResult] = []
+                    if isSingleContainer {
+                        if let single = try? ContainerScanner.shared.scanContainer(at: url) {
+                            containerResults = [single]
+                        }
+                    } else if let results = try? ContainerScanner.shared.scanAppGroupContainers(at: url), !results.isEmpty {
+                        containerResults = results
+                    } else if let single = try? ContainerScanner.shared.scanContainer(at: url) {
+                        containerResults = [single]
+                    }
+                    for res in containerResults {
+                        let bundleId = res.metadata?.identifier ?? res.containerURL.lastPathComponent
+                        let appGroups = res.metadata?.identifier != nil ? [res.metadata!.identifier] : []
+                        let riskTier: RiskTier = res.indicators.contains(where: { $0.severity == .highRisk }) ? .highRisk :
+                            (res.indicators.contains(where: { $0.severity == .caution }) ? .caution : .safe)
+                        let finding = ScanFinding(
+                            bundleId: bundleId,
+                            displayName: res.containerURL.lastPathComponent,
+                            version: "1.0",
+                            teamId: nil,
+                            executablePath: nil,
+                            bundlePath: res.containerURL.path,
+                            installChannel: .developerSideloaded,
+                            riskTier: riskTier,
+                            isWhitelisted: false,
+                            indicators: res.indicators,
+                            evidence: AuditEvidence(
+                                matchedSymbols: [],
+                                linkedDylibs: [],
+                                hasAppGroups: !appGroups.isEmpty,
+                                appGroups: appGroups,
+                                installChannel: .developerSideloaded,
+                                cryptid: 0,
+                                isFairPlayEncrypted: false,
+                                escapingSymlinks: res.escapingSymlinks,
+                                dynamicLoadingPresent: false,
+                                pathEnumerationPresent: false,
+                                remediationGuidance: res.isClean ? "Container clean." : "Investigate escaping symlinks or malformed metadata."
+                            )
+                        )
+                        findings.append(finding)
+                    }
+                }
             }
         }
 
@@ -215,8 +403,11 @@ public enum CLICommandRunner: Sendable {
             var extraBundleURLs: [URL] = []
             if let snap = csSnapshot {
                 let candidatePaths = Set(snap.discoveredAppBundles).union(snap.bundlePaths.values)
-                for path in candidatePaths.sorted() where FileManager.default.fileExists(atPath: path) {
-                    extraBundleURLs.append(URL(fileURLWithPath: path))
+                for path in candidatePaths.sorted() {
+                    var cst = stat()
+                    if lstat(stripTrailingSlashes(path), &cst) == 0, (cst.st_mode & S_IFMT) == S_IFDIR {
+                        extraBundleURLs.append(URL(fileURLWithPath: path))
+                    }
                 }
             }
             do {
@@ -282,10 +473,9 @@ public enum CLICommandRunner: Sendable {
         // Deliver Output
         if !outputString.isEmpty {
             if let outPath = config.outPath {
-                let outURL = URL(fileURLWithPath: outPath)
                 do {
-                    try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try outputString.write(to: outURL, atomically: true, encoding: .utf8)
+                    let outData = outputString.hasSuffix("\n") ? outputString : (outputString + "\n")
+                    let outURL = try writeSafeCLIOutput(outData, to: outPath)
                     let confirm = "[+] Report written to \(outURL.path)\n"
                     stderr.write(Data(confirm.utf8))
                 } catch {
@@ -314,6 +504,60 @@ public enum CLICommandRunner: Sendable {
         return hasHighRisk ? 1 : 0
     }
 
+    private static func discoverNestedPackageTargetsNoFollow(in rootURL: URL, maxDepth: Int = 4, maxEntries: Int = 4096) -> [URL] {
+        let bundleExts: Set<String> = ["app", "appex", "xpc", "framework", "xcframework", "bundle"]
+        let archiveExts: Set<String> = ["ipa", "tipa"]
+        var discovered: [URL] = []
+        var visitedEntries = 0
+
+        func walk(dirURL: URL, depth: Int) {
+            guard depth <= maxDepth, visitedEntries < maxEntries, let dp = opendir(dirURL.path) else { return }
+            defer { closedir(dp) }
+            var names: [String] = []
+            while let ent = readdir(dp) {
+                let name = withUnsafeBytes(of: ent.pointee.d_name) { raw -> String in
+                    String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+                }
+                if name != "." && name != ".." && name != ".DS_Store" {
+                    names.append(name)
+                }
+            }
+            names.sort()
+            for name in names {
+                if visitedEntries >= maxEntries { break }
+                visitedEntries += 1
+                let childURL = dirURL.appendingPathComponent(name)
+                var cst = stat()
+                guard lstat(childURL.path, &cst) == 0 else { continue }
+                let mode = cst.st_mode & S_IFMT
+                if name == ".git" && mode == S_IFDIR {
+                    var gitHeadLst = stat()
+                    if lstat(childURL.appendingPathComponent("HEAD").path, &gitHeadLst) == 0 {
+                        continue
+                    }
+                }
+                if name.hasPrefix("._") && mode == S_IFREG && IPAPackageScanner.isGenuineAppleDoubleMetadataFile(at: childURL) {
+                    continue
+                }
+                let ext = childURL.pathExtension.lowercased()
+                if mode == S_IFREG && archiveExts.contains(ext) {
+                    discovered.append(childURL)
+                } else if mode == S_IFLNK && (archiveExts.contains(ext) || bundleExts.contains(ext)) {
+                    discovered.append(childURL)
+                } else if mode == S_IFDIR {
+                    if bundleExts.contains(ext) {
+                        discovered.append(childURL)
+                    } else {
+                        walk(dirURL: childURL, depth: depth + 1)
+                    }
+                }
+            }
+        }
+
+        walk(dirURL: rootURL, depth: 0)
+        return discovered
+    }
+
     private static func findAndParseCSStore() -> CSStoreSnapshot? {
         #if os(macOS)
         let homeCaches = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches").path
@@ -325,7 +569,7 @@ public enum CLICommandRunner: Sendable {
             "/private/var/mobile/Library/Caches"
         ]
         for dir in candidates {
-            guard FileManager.default.fileExists(atPath: dir) else { continue }
+            guard IPAPackageScanner.isNonSymlinkDirectory(at: URL(fileURLWithPath: dir, isDirectory: true)) else { continue }
             if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
                 for f in files where f.hasPrefix("com.apple.LaunchServices-") && f.hasSuffix(".csstore") {
                     let csURL = URL(fileURLWithPath: (dir as NSString).appendingPathComponent(f))
@@ -340,10 +584,11 @@ public enum CLICommandRunner: Sendable {
 
     private static func formatFirmwareReportText(report: FirmwarePostureReport, styler: TerminalStyler) -> String {
         var lines: [String] = []
+        let safeDisplayOS = ReportGenerator.shared.plain(report.osVersion.displayString)
         lines.append("================================================================================")
         lines.append("           WQGuard Firmware CVE Exposure Radar")
         lines.append("================================================================================")
-        lines.append("Target OS: \(report.osVersion.displayString)")
+        lines.append("Target OS: \(safeDisplayOS)")
         lines.append("Overall Posture: \(report.overallRiskTier.rawValue) (\(report.overallRiskTier.localizedNameZh))")
         lines.append("Evaluated CVEs: \(report.totalEvaluated)")
         lines.append("Exposed Vulnerabilities: \(report.exposedCount)")
@@ -374,7 +619,7 @@ public enum CLICommandRunner: Sendable {
         var lines: [String] = []
         lines.append("# WQGuard Firmware CVE Exposure Radar Report")
         lines.append("")
-        lines.append("- **Target OS**: `\(report.osVersion.displayString)`")
+        lines.append("- **Target OS**: \(ReportGenerator.shared.codeSpan(report.osVersion.displayString))")
         lines.append("- **Overall Posture**: `\(report.overallRiskTier.rawValue)` (\(report.overallRiskTier.localizedNameZh))")
         lines.append("- **Exposed Vulnerabilities**: `\(report.exposedCount)` / `\(report.totalEvaluated)`")
         lines.append("")

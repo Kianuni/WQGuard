@@ -7,6 +7,7 @@
 //  Unicode sanitization, container UUID mapping, and localized app name resolution.
 //
 
+import Darwin
 import Foundation
 
 /// Snapshot representing parsed LaunchServices application, plugin, and App Group mappings.
@@ -203,17 +204,74 @@ public final class CSStore2Parser: Sendable {
 
     public init() {}
 
-    /// Parses CSStore2 data directly from a file URL.
+    /// Parses CSStore2 data directly from a file URL with strict `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, `S_IFREG`, and size pre-checks.
     public func parse(at fileURL: URL) throws -> CSStoreSnapshot {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw CSStore2ParserError.fileReadFailed("File not found at \(fileURL.path)")
+        let cleanPath = IPAPackageScanner.stripTrailingSlashes(fileURL.path)
+        var lst = stat()
+        guard lstat(cleanPath, &lst) == 0 else {
+            throw CSStore2ParserError.fileReadFailed("File not found at \(cleanPath)")
         }
-        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
-        return try parse(data: data, storePath: fileURL.path)
+        let mode = lst.st_mode & S_IFMT
+        if mode == S_IFLNK {
+            throw CSStore2ParserError.fileReadFailed("Refused symbolic link at \(cleanPath)")
+        }
+        guard mode == S_IFREG else {
+            throw CSStore2ParserError.fileReadFailed("Target is not a regular file at \(cleanPath)")
+        }
+        if lst.st_size < off_t(Self.minStoreBytes) {
+            throw CSStore2ParserError.dataTooSmall(size: Int(max(0, lst.st_size)), minRequired: Self.minStoreBytes)
+        }
+        if lst.st_size > off_t(Self.maxStoreBytes) {
+            let clamped = Int(min(off_t(Int.max), lst.st_size))
+            throw CSStore2ParserError.dataTooLarge(size: clamped, maxAllowed: Self.maxStoreBytes)
+        }
+
+        let fd = Darwin.open(cleanPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw CSStore2ParserError.fileReadFailed("Unable to open regular file at \(cleanPath) (errno=\(errno))")
+        }
+        defer { Darwin.close(fd) }
+
+        var fst = stat()
+        guard fstat(fd, &fst) == 0,
+              (fst.st_mode & S_IFMT) == S_IFREG,
+              fst.st_dev == lst.st_dev,
+              fst.st_ino == lst.st_ino else {
+            throw CSStore2ParserError.fileReadFailed("File changed type or inode during open at \(cleanPath)")
+        }
+        if fst.st_size < off_t(Self.minStoreBytes) {
+            throw CSStore2ParserError.dataTooSmall(size: Int(max(0, fst.st_size)), minRequired: Self.minStoreBytes)
+        }
+        if fst.st_size > off_t(Self.maxStoreBytes) {
+            let clamped = Int(min(off_t(Int.max), fst.st_size))
+            throw CSStore2ParserError.dataTooLarge(size: clamped, maxAllowed: Self.maxStoreBytes)
+        }
+
+        let expected = Int(fst.st_size)
+        var data = Data(count: expected)
+        var total = 0
+        try data.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            while total < expected {
+                let n = Darwin.read(fd, base.advanced(by: total), expected - total)
+                if n > 0 {
+                    total += n
+                } else if n == 0 {
+                    break
+                } else if errno == EINTR {
+                    continue
+                } else {
+                    throw CSStore2ParserError.fileReadFailed("Read error at \(cleanPath) (errno=\(errno))")
+                }
+            }
+        }
+        let finalData = total < expected ? Data(data.prefix(total)) : data
+        return try parse(data: finalData, storePath: cleanPath)
     }
 
     /// Parses CSStore2 data directly from memory.
-    public func parse(data: Data, storePath: String? = nil) throws -> CSStoreSnapshot {
+    public func parse(data rawInput: Data, storePath: String? = nil) throws -> CSStoreSnapshot {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
         guard data.count >= Self.minStoreBytes else {
             throw CSStore2ParserError.dataTooSmall(size: data.count, minRequired: Self.minStoreBytes)
         }
@@ -240,20 +298,27 @@ public final class CSStore2Parser: Sendable {
         var layoutRecs = [[UInt32]](repeating: [], count: layouts.count)
         var layoutPlugins = [[UInt32]](repeating: [], count: layouts.count)
 
-        // Read unit records across all layouts
+        // Read unit records across all layouts (checking exact per-layout record size bounds so trailing plugins/smaller layouts near EOF are never truncated)
         let totalCount = data.count
+        let minRecordSize = layouts.reduce(Int.max) { acc, l in
+            min(acc, min(Int(l.pluginSize), Int(l.bundleSize)))
+        }
         data.withUnsafeBytes { rawBuffer in
             let bytes = rawBuffer.bindMemory(to: UInt8.self).baseAddress!
-            let maxRecordSize = 0x25c
 
             var o = 0
-            while o + 8 + maxRecordSize <= totalCount {
+            while o + 8 + minRecordSize <= totalCount {
                 let size = readUInt32(from: bytes + o + 4)
                 let u = bytes + o + 8
+                let remainingPayload = totalCount - (o + 8)
 
                 for (lIdx, layout) in layouts.enumerated() {
                     // Check plugin record
-                    if size == layout.pluginSize {
+                    let plugSz = Int(layout.pluginSize)
+                    if size == layout.pluginSize,
+                       plugSz <= remainingPayload,
+                       Int(layout.pluginBundleIDOffset) + 4 <= plugSz,
+                       Int(layout.pluginContainerOffset) + 4 <= plugSz {
                         let p0 = readUInt32(from: u + Int(layout.pluginBundleIDOffset))
                         let p1 = readUInt32(from: u + Int(layout.pluginContainerOffset))
                         if p0 != 0 && (p0 & 3) == 0 && (p0 >> 2) < Self.maxStringID &&
@@ -269,7 +334,14 @@ public final class CSStore2Parser: Sendable {
                     }
 
                     // Check bundle record
-                    if size == layout.bundleSize {
+                    let bndSz = Int(layout.bundleSize)
+                    if size == layout.bundleSize,
+                       bndSz <= remainingPayload,
+                       Int(layout.bundleIDOffset) + 4 <= bndSz,
+                       Int(layout.nameOffset) + 4 <= bndSz,
+                       Int(layout.displayNameOffset) + 4 <= bndSz,
+                       Int(layout.containerOffset) + 4 <= bndSz,
+                       Int(layout.bundlePathOffset) + 4 <= bndSz {
                         if layoutRecs[lIdx].count / 5 < Self.maxBundleRecords {
                             let bid = readUInt32(from: u + Int(layout.bundleIDOffset))
                             let name = readUInt32(from: u + Int(layout.nameOffset))
@@ -333,10 +405,15 @@ public final class CSStore2Parser: Sendable {
                                         }
                                     }
                                 }
-                                if keepGeneral && (!hasExisting && strings.count < Self.maxDecodedStrings && (decodedStringBytes + s.utf8.count) < Self.maxDecodedStringBytes) {
-                                    strings[sid] = s
-                                    if !hasExisting { decodedStringBytes += s.utf8.count }
-                                    if isHereInHeap { inHeap[sidInt / 8] |= UInt8(1 << (sidInt % 8)) }
+                                if keepGeneral {
+                                    let oldBytes = strings[sid]?.utf8.count ?? 0
+                                    let withinCountQuota = hasExisting || strings.count < Self.maxDecodedStrings
+                                    let withinByteQuota = (decodedStringBytes - oldBytes + s.utf8.count) < Self.maxDecodedStringBytes
+                                    if withinCountQuota && withinByteQuota {
+                                        strings[sid] = s
+                                        decodedStringBytes += (s.utf8.count - oldBytes)
+                                        if isHereInHeap { inHeap[sidInt / 8] |= UInt8(1 << (sidInt % 8)) }
+                                    }
                                 }
                             }
                         }
@@ -424,7 +501,9 @@ public final class CSStore2Parser: Sendable {
                 }
                 if bpathRef != 0 && (bpathRef & 3) == 0 {
                     if let rawBundlePath = bundlePathFor(ref: bpathRef),
+                       !rawBundlePath.contains(".."),
                        let normBundlePath = normalizeVarPath(rawBundlePath),
+                       (normBundlePath.hasPrefix("/var/containers/Bundle/Application/") || normBundlePath.hasPrefix("/Applications/")),
                        bpMap[bid] == nil {
                         bpMap[bid] = normBundlePath
                     }
@@ -520,7 +599,7 @@ public final class CSStore2Parser: Sendable {
         guard offset + 8 <= totalLength else { return nil }
         let len = Int(readUInt32(from: bytes + offset + 4))
         guard len > 0, len < 0x800, offset + 8 + len <= totalLength else { return nil }
-        if (len % 4) != 0 && bytes[offset + 8 + len] != 0 { return nil }
+        if (len % 4) != 0 && (offset + 8 + len >= totalLength || bytes[offset + 8 + len] != 0) { return nil }
         // Verify no internal null byte
         for i in 0..<len {
             if bytes[offset + 8 + i] == 0 { return nil }
@@ -534,7 +613,7 @@ public final class CSStore2Parser: Sendable {
     private func readUInt32(from ptr: UnsafePointer<UInt8>) -> UInt32 {
         var v: UInt32 = 0
         memcpy(&v, ptr, 4)
-        return v
+        return UInt32(littleEndian: v)
     }
 
     /// Validates if string follows standard reverse-DNS bundle identifier rules.
@@ -544,12 +623,25 @@ public final class CSStore2Parser: Sendable {
         return s.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
-    /// Normalizes path removing `/private/var` symlink prefix and standardizing path separators.
+    /// Pure lexical path normalizer removing `/private/var` prefix and collapsing `.`/`..`/duplicate slashes without touching the filesystem.
     public func normalizeVarPath(_ raw: String) -> String? {
-        guard !raw.isEmpty else { return nil }
-        var p = (raw as NSString).standardizingPath
+        guard raw.hasPrefix("/"), !raw.contains("\0") else { return nil }
+        var stack: [Substring] = []
+        for comp in raw.split(separator: "/", omittingEmptySubsequences: true) {
+            if comp == "." {
+                continue
+            } else if comp == ".." {
+                guard !stack.isEmpty else { return nil }
+                stack.removeLast()
+            } else {
+                stack.append(comp)
+            }
+        }
+        var p = "/" + stack.joined(separator: "/")
         if p.hasPrefix("/private/var/") {
             p = String(p.dropFirst(8))
+        } else if p == "/private/var" {
+            p = "/var"
         }
         return p
     }
@@ -561,7 +653,7 @@ public final class CSStore2Parser: Sendable {
         return UUID(uuidString: uuidStr) != nil
     }
 
-    /// Sanitizes display names to eliminate format scalars, BiDi overrides, and invisible characters.
+    /// Sanitizes display names to eliminate format scalars, BiDi overrides, C0/C1 controls, and Variation Selectors.
     public func sanitizeUnicodeName(_ raw: String) -> String? {
         guard !raw.isEmpty else { return nil }
         var result = ""
@@ -569,10 +661,12 @@ public final class CSStore2Parser: Sendable {
 
         for scalar in raw.unicodeScalars {
             let val = scalar.value
-            if isFormatScalar(val) || val == 0x2028 || val == 0x2029 {
+            if val <= 0x1F || (val >= 0x7F && val <= 0x9F) {
+                return nil // Rejects ASCII C0, DEL, and C1 control characters (0x80..0x9F)
+            } else if isFormatScalar(val) || scalar.properties.generalCategory == .format || val == 0x2028 || val == 0x2029 {
                 result.append("\u{FFFD}")
-            } else if val >= 0x00 && val <= 0x1F || val == 0x7F {
-                return nil // Rejects ASCII control characters
+            } else if scalar.properties.generalCategory == .control {
+                return nil
             } else {
                 result.append(String(scalar))
             }
@@ -587,7 +681,7 @@ public final class CSStore2Parser: Sendable {
         return normalized
     }
 
-    /// Identifies format and BiDi control scalars that could disguise malicious binaries.
+    /// Identifies format, BiDi override, Variation Selector, Tag, and Interlinear Annotation scalars that could disguise malicious binaries.
     private func isFormatScalar(_ c: UInt32) -> Bool {
         return c == 0x00ad ||
                (c >= 0x0600 && c <= 0x0605) || c == 0x061c || c == 0x06dd ||
@@ -597,6 +691,10 @@ public final class CSStore2Parser: Sendable {
                (c >= 0x200b && c <= 0x200f) ||
                (c >= 0x202a && c <= 0x202e) ||
                (c >= 0x2060 && c <= 0x206f) ||
-               c == 0xfeff
+               (c >= 0xfe00 && c <= 0xfe0f) ||
+               c == 0xfeff ||
+               (c >= 0xfff9 && c <= 0xfffb) ||
+               (c >= 0xe0000 && c <= 0xe007f) ||
+               (c >= 0xe0100 && c <= 0xe01ef)
     }
 }

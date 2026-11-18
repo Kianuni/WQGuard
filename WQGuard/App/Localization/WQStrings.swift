@@ -775,7 +775,7 @@ public enum WQStrings {
         IOCTokenArmor.tCqCopyToken: "私有沙盒扩展令牌签发请求 (绕过系统访问控制)",
         IOCTokenArmor.tContainerMgrDylib: "引用私有容器管理器动态库",
         "com.apple.containermanagerd": "直接 XPC 访问容器管理守护进程",
-        "fsgetpath": "底层 APFS Inode 路径暴力破解枚举调用",
+        IOCTokenArmor.tFsgetpath: "底层 APFS Inode 路径暴力破解枚举调用",
         "escaping_symlink": "共享容器内异常逃逸符号链接 (S_ISLNK 指向外部路径)",
         "PhotoLibraryServices": "私有相册服务框架引用 (CVE-2026-112676 隐私绕过)",
         "BrotliDecoderDecompressStream": "嵌入第三方易受攻击的 libbrotli 解码库 (CVE-2026-111497)"

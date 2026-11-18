@@ -8,8 +8,10 @@
 //  files across FileProviders and supports native multi-selection for `.ipa` packages.
 //
 
+import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
+import WQGuardCore
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -109,15 +111,31 @@ public final class NativeDocumentPickerPresenter: NSObject, UIDocumentPickerDele
     private static func stageCopiedFilesIfNeeded(_ urls: [URL]) -> [URL] {
         let fm = FileManager.default
         let stageDir = fm.temporaryDirectory.appendingPathComponent("WQGuardPicked", isDirectory: true)
+        var dirSt = stat()
+        if lstat(IPAPackageScanner.stripTrailingSlashes(stageDir.path), &dirSt) == 0,
+           (dirSt.st_mode & S_IFMT) == S_IFLNK {
+            try? fm.removeItem(at: stageDir)
+        }
         try? fm.createDirectory(at: stageDir, withIntermediateDirectories: true)
 
         return urls.map { src in
-            let dst = stageDir.appendingPathComponent("\(UUID().uuidString.prefix(8))_\(src.lastPathComponent)")
-            try? fm.removeItem(at: dst)
-            if (try? fm.moveItem(at: src, to: dst)) != nil {
-                return dst
+            let rawName = src.lastPathComponent
+            let sanitizedName = rawName.filter { $0 != "/" && $0 != "\\" && $0 != "\0" }
+            guard !sanitizedName.isEmpty, sanitizedName != ".", sanitizedName != "..", sanitizedName.count <= 240 else {
+                return src
             }
-            if (try? fm.copyItem(at: src, to: dst)) != nil {
+            let dst = stageDir.appendingPathComponent("\(UUID().uuidString.prefix(8))_\(sanitizedName)")
+            if (try? IPAPackageScanner.copyBoundedRegularFileNoFollow(
+                from: src,
+                to: dst,
+                maxBytes: 1024 * 1024 * 1024
+            )) != nil {
+                // Clean up temporary UIKit `-Inbox` copy if located inside temporaryDirectory
+                let tmpPrefix = fm.temporaryDirectory.resolvingSymlinksInPath().path
+                let srcParent = src.deletingLastPathComponent().resolvingSymlinksInPath().path
+                if !tmpPrefix.isEmpty && srcParent.hasPrefix(tmpPrefix) {
+                    try? fm.removeItem(at: src)
+                }
                 return dst
             }
             return src

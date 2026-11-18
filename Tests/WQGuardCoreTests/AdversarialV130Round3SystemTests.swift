@@ -1025,16 +1025,16 @@ final class AdversarialV130Round3SystemTests: XCTestCase {
         )
     }
 
-    // MARK: - 4. Empirical Real-IPA Self-Armor & Self-Audit (build/WQGuard_v1.3.1.ipa)
+    // MARK: - 4. Empirical Real-IPA Self-Armor & Self-Audit (build/WQGuard_v1.3.2.ipa)
 
     func test_round3_empiricalRealIPA_selfArmorZeroLeaksAndKnownToolSelfAudit() throws {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let ipaURL = repoRoot.appendingPathComponent("build/WQGuard_v1.3.1.ipa")
+        let ipaURL = repoRoot.appendingPathComponent("build/WQGuard_v1.3.2.ipa")
         guard FileManager.default.fileExists(atPath: ipaURL.path) else {
-            throw XCTSkip("build/WQGuard_v1.3.1.ipa not present at \(ipaURL.path)")
+            throw XCTSkip("build/WQGuard_v1.3.2.ipa not present at \(ipaURL.path)")
         }
 
         // 1. Direct inspection of Payload/WQGuard.app/WQGuard via NativeZIPArchiveReader + MachOParser
@@ -1044,7 +1044,7 @@ final class AdversarialV130Round3SystemTests: XCTestCase {
 
         let execEntry = try XCTUnwrap(
             entries.first { $0.path == "Payload/WQGuard.app/WQGuard" },
-            "Payload/WQGuard.app/WQGuard entry missing from build/WQGuard_v1.3.1.ipa"
+            "Payload/WQGuard.app/WQGuard entry missing from build/WQGuard_v1.3.2.ipa"
         )
         let execData = try zipReader.extract(entry: execEntry)
         XCTAssertGreaterThan(execData.count, 0)
@@ -1107,7 +1107,7 @@ final class AdversarialV130Round3SystemTests: XCTestCase {
         )
 
         XCTAssertEqual(finding.bundleId, "com.wqguard.app")
-        XCTAssertEqual(finding.version, "1.3.1")
+        XCTAssertEqual(finding.version, "1.3.2")
         XCTAssertEqual(finding.riskTier, .knownTool)
         XCTAssertTrue(finding.isWhitelisted)
         XCTAssertEqual(finding.whitelistedToolName, "WQGuard")
@@ -1123,7 +1123,7 @@ final class AdversarialV130Round3SystemTests: XCTestCase {
             for prefix in forbiddenPrefixes {
                 XCTAssertFalse(
                     indicator.signature.hasPrefix(prefix),
-                    "Real WQGuard_v1.3.1.ipa self-triggered indicator \(indicator.signature)"
+                    "Real WQGuard_v1.3.2.ipa self-triggered indicator \(indicator.signature)"
                 )
             }
         }
@@ -1131,7 +1131,7 @@ final class AdversarialV130Round3SystemTests: XCTestCase {
             for prefix in forbiddenPrefixes {
                 XCTAssertFalse(
                     sym.hasPrefix(prefix),
-                    "Real WQGuard_v1.3.1.ipa matchedSymbols unexpectedly contains \(sym)"
+                    "Real WQGuard_v1.3.2.ipa matchedSymbols unexpectedly contains \(sym)"
                 )
             }
         }

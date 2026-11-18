@@ -140,50 +140,141 @@ public final class ContainerScanner: Sendable {
             }
         }
 
-        // 2. Inspect Library/Caches (part = 3)
-        let cachesURL = containerURL.appendingPathComponent("Library/Caches")
-        let cachesInspection = inspectPathForEscapingSymlink(targetURL: cachesURL, containerRootURL: containerURL)
+        // 2. Inspect Library and Library/Caches (part = 3) without following symlinks
+        let libraryURL = containerURL.appendingPathComponent("Library")
+        let libraryInspection = inspectPathForEscapingSymlink(targetURL: libraryURL, containerRootURL: containerURL)
 
-        if cachesInspection.isSymlink {
-            if cachesInspection.isEscaping {
-                escapingSymlinks.append(cachesURL.path)
+        if libraryInspection.isSymlink {
+            if libraryInspection.isEscaping {
+                escapingSymlinks.append(libraryURL.path)
                 indicators.append(ThreatIndicator(
-                    signature: "CONTAINER_CACHES_SYMLINK",
-                    description: "Container Library/Caches has been replaced by an escaping symbolic link pointing to '\(cachesInspection.destination ?? "unknown")' (classic worse_query / containermanagerd exploit primitive).",
+                    signature: "CONTAINER_LIBRARY_SYMLINK",
+                    description: WQLocale.pick(
+                        en: "Container Library directory has been replaced by an escaping symbolic link pointing to '\(libraryInspection.destination ?? "unknown")' (sandbox container escape vector).",
+                        zh: "容器 Library 目录已被替换为指向外部路径 '\(libraryInspection.destination ?? "unknown")' 的逃逸符号链接。"
+                    ),
                     category: ThreatIndicator.Category.escapingSymlink,
-                    location: cachesURL.path,
+                    location: libraryURL.path,
                     severity: .highRisk
                 ))
             }
-            // CRITICAL: NEVER recurse into cachesURL when it is a symlink!
-        } else if cachesInspection.isDirectory {
-            // Safely inspect direct entries in Library/Caches without following symlinks
-            let childEscapes = inspectDirectoryChildren(dirURL: cachesURL, containerRootURL: containerURL)
-            for escape in childEscapes {
-                escapingSymlinks.append(escape.url.path)
-                indicators.append(ThreatIndicator(
-                    signature: "CONTAINER_ESCAPING_SYMLINK",
-                    description: "Symbolic link inside Library/Caches points outside container boundary to '\(escape.destination)' (unauthorized container escape vector).",
-                    category: ThreatIndicator.Category.escapingSymlink,
-                    location: escape.url.path,
-                    severity: .highRisk
-                ))
+            // CRITICAL: NEVER traverse through a symlinked Library directory!
+        } else if libraryInspection.isDirectory {
+            let cachesURL = containerURL.appendingPathComponent("Library/Caches")
+            let cachesInspection = inspectPathForEscapingSymlink(targetURL: cachesURL, containerRootURL: containerURL)
+
+            if cachesInspection.isSymlink {
+                if cachesInspection.isEscaping {
+                    escapingSymlinks.append(cachesURL.path)
+                    indicators.append(ThreatIndicator(
+                        signature: "CONTAINER_CACHES_SYMLINK",
+                        description: "Container Library/Caches has been replaced by an escaping symbolic link pointing to '\(cachesInspection.destination ?? "unknown")' (classic worse_query / containermanagerd exploit primitive).",
+                        category: ThreatIndicator.Category.escapingSymlink,
+                        location: cachesURL.path,
+                        severity: .highRisk
+                    ))
+                }
+                // CRITICAL: NEVER recurse into cachesURL when it is a symlink!
+            } else if cachesInspection.isDirectory {
+                // Safely inspect entries in Library/Caches without following symlinks, failing closed if entry/depth limits or unreadable subdirs occur
+                let childScan = inspectDirectoryChildren(dirURL: cachesURL, containerRootURL: containerURL)
+                for escape in childScan.escapes {
+                    escapingSymlinks.append(escape.url.path)
+                    indicators.append(ThreatIndicator(
+                        signature: "CONTAINER_ESCAPING_SYMLINK",
+                        description: "Symbolic link inside Library/Caches points outside container boundary to '\(escape.destination)' (unauthorized container escape vector).",
+                        category: ThreatIndicator.Category.escapingSymlink,
+                        location: escape.url.path,
+                        severity: .highRisk
+                    ))
+                }
+                if childScan.hitEntryLimit || childScan.hitDepthLimit {
+                    let limitDetail = childScan.hitEntryLimit
+                        ? WQLocale.pick(
+                            en: "entry cap (\(childScan.inspectedEntries) items) exceeded",
+                            zh: "超过目录条目扫描上限 (\(childScan.inspectedEntries) 项)"
+                        )
+                        : WQLocale.pick(
+                            en: "directory nesting depth cap exceeded",
+                            zh: "超过子目录嵌套深度上限"
+                        )
+                    indicators.append(ThreatIndicator(
+                        signature: "CONTAINER_CACHES_SCAN_TRUNCATED",
+                        description: WQLocale.pick(
+                            en: "Container Library/Caches inspection was truncated (\(limitDetail)); excessive decoy files or deep nesting may conceal an escaping symbolic link.",
+                            zh: "容器 Library/Caches 扫描因 \(limitDetail) 被截断，大量诱饵文件或超深嵌套目录可能被用于隐藏逃逸符号链接。"
+                        ),
+                        category: ThreatIndicator.Category.escapingSymlink,
+                        location: cachesURL.path,
+                        severity: .highRisk
+                    ))
+                }
+                for unreadablePath in childScan.unreadableSubdirs.prefix(8) {
+                    indicators.append(ThreatIndicator(
+                        signature: "CONTAINER_CACHES_UNREADABLE_SUBDIR",
+                        description: WQLocale.pick(
+                            en: "Container Library/Caches contains an unreadable subdirectory ('\(unreadablePath)') that prevented complete symbolic link inspection.",
+                            zh: "容器 Library/Caches 内存在无法读取的子目录 ('\(unreadablePath)')，阻碍了完整逃逸符号链接排查。"
+                        ),
+                        category: ThreatIndicator.Category.escapingSymlink,
+                        location: unreadablePath,
+                        severity: .highRisk
+                    ))
+                }
             }
         }
 
-        // 3. Fake Supervision Check for systemgroup.com.apple.configurationprofiles
+        // 3. Fake Supervision Check for systemgroup.com.apple.configurationprofiles (strict O_NOFOLLOW regular-file read)
         if metadata?.identifier == "systemgroup.com.apple.configurationprofiles" || containerURL.path.contains("configurationprofiles") {
             let cloudConfigURL = containerURL.appendingPathComponent("Library/ConfigurationProfiles/CloudConfigurationDetails.plist")
-            if let cloudConfig = try? Data(contentsOf: cloudConfigURL, options: .alwaysMapped),
-               let plist = try? PropertyListSerialization.propertyList(from: cloudConfig, options: [], format: nil) as? [String: Any],
-               let isSupervised = plist["IsSupervised"] as? Bool, isSupervised {
-                indicators.append(ThreatIndicator(
-                    signature: "SYSTEMGROUP_SUPERVISION_DETECTED",
-                    description: "CloudConfigurationDetails.plist asserts IsSupervised=true without verified MDM enrollment.",
-                    category: "container_configuration",
-                    location: cloudConfigURL.path,
-                    severity: .highRisk
-                ))
+            switch Self.readBoundedRegularFileNoFollow(
+                rootURL: containerURL,
+                relativeComponents: ["Library", "ConfigurationProfiles", "CloudConfigurationDetails.plist"]
+            ) {
+            case .success(let maybeData):
+                if let cloudConfig = maybeData,
+                   let plist = try? PropertyListSerialization.propertyList(from: cloudConfig, options: [], format: nil) as? [String: Any] {
+                    let isSupervised = (plist["IsSupervised"] as? Bool == true) ||
+                        ((plist["IsSupervised"] as? NSNumber)?.int64Value ?? 0) != 0
+                    if isSupervised {
+                        indicators.append(ThreatIndicator(
+                            signature: "SYSTEMGROUP_SUPERVISION_DETECTED",
+                            description: "CloudConfigurationDetails.plist asserts IsSupervised=true without verified MDM enrollment.",
+                            category: "container_configuration",
+                            location: cloudConfigURL.path,
+                            severity: .highRisk
+                        ))
+                    }
+                }
+            case .failure(let hazard):
+                if case .symlinkDetected(let symPath) = hazard {
+                    let symURL = URL(fileURLWithPath: symPath)
+                    let symInsp = inspectPathForEscapingSymlink(targetURL: symURL, containerRootURL: containerURL)
+                    if symInsp.isEscaping && !escapingSymlinks.contains(symPath) {
+                        escapingSymlinks.append(symPath)
+                    }
+                    indicators.append(ThreatIndicator(
+                        signature: "CONTAINER_SUPERVISION_SYMLINK",
+                        description: WQLocale.pick(
+                            en: "ConfigurationProfiles supervision path '\(symPath)' is a symbolic link (potential O_NOFOLLOW evasion or cross-container redirect).",
+                            zh: "ConfigurationProfiles 监管配置路径 '\(symPath)' 为符号链接（疑似规避检测或跨容器重定向）。"
+                        ),
+                        category: ThreatIndicator.Category.escapingSymlink,
+                        location: symPath,
+                        severity: .highRisk
+                    ))
+                } else if case .specialFileDetected(let specPath) = hazard {
+                    indicators.append(ThreatIndicator(
+                        signature: "CONTAINER_SUPERVISION_SPECIAL_FILE",
+                        description: WQLocale.pick(
+                            en: "CloudConfigurationDetails.plist path '\(specPath)' is a non-regular special file (FIFO/device/oversized).",
+                            zh: "CloudConfigurationDetails.plist 路径 '\(specPath)' 为非常规特殊文件（FIFO/设备节点或超大文件）。"
+                        ),
+                        category: "container_configuration",
+                        location: specPath,
+                        severity: .caution
+                    ))
+                }
             }
         }
 
@@ -237,11 +328,11 @@ public final class ContainerScanner: Sendable {
             return (false, isDirectory, false, nil)
         }
 
-        // Read destination using readlink
-        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
-        let len = readlink(targetURL.path, &buffer, buffer.count - 1)
-        guard len > 0 else {
-            return (true, false, false, nil)
+        // Read destination using readlink (fail-closed if symlink target is unreadable or truncated at PATH_MAX)
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let len = readlink(targetURL.path, &buffer, Int(PATH_MAX))
+        guard len > 0 && len < Int(PATH_MAX) else {
+            return (true, false, true, "<unreadable-or-oversized-symlink>")
         }
         buffer[len] = 0
         let dest = String(cString: buffer)
@@ -250,53 +341,340 @@ public final class ContainerScanner: Sendable {
         return (true, false, isEscaping, dest)
     }
 
-    /// Checks if a symlink destination escapes container root.
-    public func isDestinationEscaping(destination: String, relativeTo parentDir: URL, containerRoot: URL) -> Bool {
-        let canonicalRoot = containerRoot.standardizedFileURL.path
-        let privateRoot = "/private" + canonicalRoot
-
-        let resolvedPath: String
-        if destination.hasPrefix("/") {
-            resolvedPath = (destination as NSString).standardizingPath
-        } else {
-            resolvedPath = parentDir.appendingPathComponent(destination).standardizedFileURL.path
-        }
-
-        // Target escapes if it does not have containerRoot as its prefix
-        if resolvedPath == canonicalRoot || resolvedPath == privateRoot {
-            return false // Symlink to container root itself is internal
-        }
-
-        let isInsideCanonical = resolvedPath.hasPrefix(canonicalRoot.hasSuffix("/") ? canonicalRoot : canonicalRoot + "/")
-        let isInsidePrivate = resolvedPath.hasPrefix(privateRoot.hasSuffix("/") ? privateRoot : privateRoot + "/")
-
-        return !(isInsideCanonical || isInsidePrivate)
+    public enum NoFollowReadHazard: Error, Sendable, Equatable {
+        case symlinkDetected(String)
+        case specialFileDetected(String)
     }
 
-    /// Inspects directory entries using POSIX readdir with zero symlink traversal.
-    private func inspectDirectoryChildren(
-        dirURL: URL,
-        containerRootURL: URL
-    ) -> [(url: URL, destination: String)] {
-        guard let dir = opendir(dirURL.path) else { return [] }
-        defer { closedir(dir) }
+    /// Reads a regular file under `rootURL` component-by-component using `lstat` and `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`,
+    /// guaranteeing zero symlink traversal, zero FIFO/special-file hangs, and strict size capping.
+    public static func readBoundedRegularFileNoFollow(
+        rootURL: URL,
+        relativeComponents: [String],
+        maxBytes: Int = 1_048_576
+    ) -> Result<Data?, NoFollowReadHazard> {
+        guard !relativeComponents.isEmpty else { return .success(nil) }
+        var curPath = rootURL.path
+        var rootSt = stat()
+        guard lstat(curPath, &rootSt) == 0 else { return .success(nil) }
+        if (rootSt.st_mode & S_IFMT) == S_IFLNK {
+            return .failure(.symlinkDetected(curPath))
+        }
+        guard (rootSt.st_mode & S_IFMT) == S_IFDIR else { return .success(nil) }
 
-        var escapes: [(url: URL, destination: String)] = []
-
-        while let entry = readdir(dir) {
-            let name = withUnsafeBytes(of: entry.pointee.d_name) { raw -> String in
-                let ptr = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
-                return String(cString: ptr)
+        for idx in 0..<relativeComponents.count {
+            let comp = relativeComponents[idx]
+            guard !comp.isEmpty, comp != ".", comp != "..", !comp.contains("/") else {
+                return .failure(.specialFileDetected(curPath))
             }
-            if name == "." || name == ".." { continue }
+            curPath = (curPath as NSString).appendingPathComponent(comp)
+            var st = stat()
+            guard lstat(curPath, &st) == 0 else {
+                return .success(nil)
+            }
+            let mode = st.st_mode & S_IFMT
+            if mode == S_IFLNK {
+                return .failure(.symlinkDetected(curPath))
+            }
+            if idx < relativeComponents.count - 1 {
+                guard mode == S_IFDIR else { return .success(nil) }
+            } else {
+                guard mode == S_IFREG else {
+                    return .failure(.specialFileDetected(curPath))
+                }
+                guard st.st_size >= 0 && st.st_size <= off_t(maxBytes) else {
+                    return .failure(.specialFileDetected(curPath))
+                }
+                let fd = Darwin.open(curPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                guard fd >= 0 else {
+                    if errno == ELOOP {
+                        return .failure(.symlinkDetected(curPath))
+                    }
+                    return .success(nil)
+                }
+                defer { Darwin.close(fd) }
+                var fst = stat()
+                guard fstat(fd, &fst) == 0,
+                      (fst.st_mode & S_IFMT) == S_IFREG,
+                      fst.st_dev == st.st_dev,
+                      fst.st_ino == st.st_ino,
+                      fst.st_size >= 0,
+                      fst.st_size <= off_t(maxBytes) else {
+                    return .failure(.specialFileDetected(curPath))
+                }
+                let targetLen = Int(fst.st_size)
+                if targetLen == 0 {
+                    return .success(Data())
+                }
+                var out = Data()
+                out.reserveCapacity(min(targetLen, 65_536))
+                var buf = [UInt8](repeating: 0, count: min(targetLen, 16_384))
+                while out.count < targetLen {
+                    let n = buf.withUnsafeMutableBytes { ptr -> Int in
+                        guard let base = ptr.baseAddress else { return -1 }
+                        return Darwin.read(fd, base, ptr.count)
+                    }
+                    if n > 0 {
+                        if out.count + n > maxBytes {
+                            return .failure(.specialFileDetected(curPath))
+                        }
+                        out.append(contentsOf: buf[0..<n])
+                    } else if n == 0 {
+                        break
+                    } else if errno == EINTR {
+                        continue
+                    } else {
+                        return .success(nil)
+                    }
+                }
+                return .success(out)
+            }
+        }
+        return .success(nil)
+    }
 
-            let childURL = dirURL.appendingPathComponent(name)
-            let inspection = inspectPathForEscapingSymlink(targetURL: childURL, containerRootURL: containerRootURL)
-            if inspection.isSymlink && inspection.isEscaping, let dest = inspection.destination {
-                escapes.append((url: childURL, destination: dest))
+    /// Checks if a symlink destination (or any intermediate/chained in-container symlink hop) escapes container root,
+    /// using a true POSIX `namei` token-by-token resolver (`lstat` + `readlink` before `..` collapse) without
+    /// `NSString.standardizingPath` (`~` expansion / host filesystem assumptions) or kernel symlink traversal.
+    /// Any relative, absolute, or chained-symlink `..` traversal that climbs above `containerRoot` at any intermediate step
+    /// is immediately flagged as escaping, even if subsequent path components would lexically re-enter `containerRoot`.
+    public func isDestinationEscaping(destination: String, relativeTo parentDir: URL, containerRoot: URL) -> Bool {
+        guard !destination.isEmpty, !destination.contains("\0") else {
+            return true
+        }
+
+        func normalizePrivateAlias(_ comps: [String]) -> [String] {
+            if comps.count >= 2,
+               comps[0] == "private",
+               (comps[1] == "var" || comps[1] == "tmp" || comps[1] == "etc") {
+                return Array(comps.dropFirst())
+            }
+            return comps
+        }
+
+        func resolveStaticAbsoluteComponents(_ rawPath: String) -> [String]? {
+            guard rawPath.hasPrefix("/"), !rawPath.contains("\0") else { return nil }
+            var stack: [String] = []
+            for sub in rawPath.split(separator: "/", omittingEmptySubsequences: true) {
+                if sub == "." {
+                    continue
+                } else if sub == ".." {
+                    guard !stack.isEmpty else { return nil }
+                    stack.removeLast()
+                } else {
+                    stack.append(String(sub))
+                }
+            }
+            return normalizePrivateAlias(stack)
+        }
+
+        let diskRootPath = containerRoot.standardizedFileURL.path
+        guard let rootComps = resolveStaticAbsoluteComponents(diskRootPath),
+              let parentAbsComps = resolveStaticAbsoluteComponents(parentDir.standardizedFileURL.path),
+              parentAbsComps.count >= rootComps.count,
+              Array(parentAbsComps.prefix(rootComps.count)) == rootComps else {
+            return true
+        }
+
+        var currentStack = Array(parentAbsComps.dropFirst(rootComps.count))
+        var pendingTokens: [String] = []
+
+        // Tokenizes a raw symlink target onto `(currentStack, pendingTokens)` without prematurely collapsing `..` across symlinks.
+        func enqueueTarget(_ target: String) -> Bool {
+            guard !target.isEmpty, !target.contains("\0") else { return false }
+            if target == "~" || target.hasPrefix("~/") {
+                return false
+            }
+            if target.hasPrefix("/") {
+                var rawTokens = target.split(separator: "/", omittingEmptySubsequences: true)
+                    .map(String.init)
+                    .filter { $0 != "." }
+                if rawTokens.count >= 2,
+                   rawTokens[0] == "private",
+                   (rawTokens[1] == "var" || rawTokens[1] == "tmp" || rawTokens[1] == "etc") {
+                    rawTokens.removeFirst()
+                }
+                guard rawTokens.count >= rootComps.count else {
+                    return false
+                }
+                for i in 0..<rootComps.count {
+                    if rawTokens[i] == ".." || rawTokens[i] != rootComps[i] {
+                        return false
+                    }
+                }
+                let remainder = Array(rawTokens.dropFirst(rootComps.count))
+                if remainder.first == ".." {
+                    return false
+                }
+                currentStack = []
+                pendingTokens.insert(contentsOf: remainder, at: 0)
+                return pendingTokens.count <= 512
+            } else {
+                let relTokens = target.split(separator: "/", omittingEmptySubsequences: true)
+                    .map(String.init)
+                    .filter { $0 != "." }
+                pendingTokens.insert(contentsOf: relTokens, at: 0)
+                return pendingTokens.count <= 512
             }
         }
 
-        return escapes
+        guard enqueueTarget(destination) else {
+            return true
+        }
+
+        var visitedStates: Set<String> = []
+        var symlinkHops = 0
+
+        while !pendingTokens.isEmpty {
+            let tok = pendingTokens.removeFirst()
+            if tok.isEmpty || tok == "." {
+                continue
+            }
+            if tok == ".." {
+                guard !currentStack.isEmpty else {
+                    return true
+                }
+                currentStack.removeLast()
+                continue
+            }
+
+            var candidateDiskPath = diskRootPath
+            for seg in currentStack {
+                candidateDiskPath = (candidateDiskPath as NSString).appendingPathComponent(seg)
+            }
+            candidateDiskPath = (candidateDiskPath as NSString).appendingPathComponent(tok)
+
+            var st = stat()
+            if lstat(candidateDiskPath, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK {
+                let stateKey = (currentStack + [tok]).joined(separator: "/")
+                    + "\u{0}"
+                    + pendingTokens.joined(separator: "/")
+                if !visitedStates.insert(stateKey).inserted {
+                    // Purely internal finite symlink cycle verified to remain inside containerRoot on every step
+                    return false
+                }
+                symlinkHops += 1
+                guard symlinkHops <= 32 else {
+                    return true
+                }
+                var linkBuf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+                let rLen = readlink(candidateDiskPath, &linkBuf, Int(PATH_MAX))
+                guard rLen > 0 && rLen < Int(PATH_MAX) else {
+                    return true
+                }
+                linkBuf[rLen] = 0
+                let hopDest = String(cString: linkBuf)
+                guard enqueueTarget(hopDest) else {
+                    return true
+                }
+            } else {
+                currentStack.append(tok)
+            }
+        }
+
+        return false
+    }
+
+    internal struct DirectoryChildrenScanOutcome {
+        let escapes: [(url: URL, destination: String)]
+        let inspectedEntries: Int
+        let hitEntryLimit: Bool
+        let hitDepthLimit: Bool
+        let unreadableSubdirs: [String]
+    }
+
+    /// Inspects `Library/Caches` entries (including nested real subdirectories up to bounded depth)
+    /// using POSIX `lstat` + `readdir` with zero symlink traversal, reporting truncation or unreadable subdirs.
+    internal func inspectDirectoryChildren(
+        dirURL: URL,
+        containerRootURL: URL,
+        maxDepth: Int = 8,
+        maxEntries: Int = 4096
+    ) -> DirectoryChildrenScanOutcome {
+        struct InodeKey: Hashable {
+            let dev: dev_t
+            let ino: ino_t
+        }
+        var escapes: [(url: URL, destination: String)] = []
+        var visitedDirs: Set<InodeKey> = []
+        var inspectedEntries = 0
+        var hitEntryLimit = false
+        var hitDepthLimit = false
+        var unreadableSubdirs: [String] = []
+
+        func directoryHasNonDotEntries(at path: String) -> Bool? {
+            guard let subDir = opendir(path) else { return nil }
+            defer { closedir(subDir) }
+            while let entry = readdir(subDir) {
+                let name = withUnsafeBytes(of: entry.pointee.d_name) { raw -> String in
+                    let ptr = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
+                    return String(cString: ptr)
+                }
+                if name != "." && name != ".." {
+                    return true
+                }
+            }
+            return false
+        }
+
+        func walk(currentDirURL: URL, depth: Int) {
+            var dirSt = stat()
+            guard lstat(currentDirURL.path, &dirSt) == 0,
+                  (dirSt.st_mode & S_IFMT) == S_IFDIR else {
+                return
+            }
+            guard visitedDirs.insert(InodeKey(dev: dirSt.st_dev, ino: dirSt.st_ino)).inserted else {
+                return
+            }
+            guard let dir = opendir(currentDirURL.path) else {
+                unreadableSubdirs.append(currentDirURL.path)
+                return
+            }
+            defer { closedir(dir) }
+
+            while let entry = readdir(dir) {
+                let name = withUnsafeBytes(of: entry.pointee.d_name) { raw -> String in
+                    let ptr = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
+                    return String(cString: ptr)
+                }
+                if name == "." || name == ".." { continue }
+                if inspectedEntries >= maxEntries {
+                    hitEntryLimit = true
+                    break
+                }
+                inspectedEntries += 1
+
+                let childURL = currentDirURL.appendingPathComponent(name)
+                let inspection = inspectPathForEscapingSymlink(targetURL: childURL, containerRootURL: containerRootURL)
+                if inspection.isSymlink {
+                    if inspection.isEscaping, let dest = inspection.destination {
+                        escapes.append((url: childURL, destination: dest))
+                    }
+                    // NEVER recurse through symlinks!
+                } else if inspection.isDirectory {
+                    if depth < maxDepth {
+                        walk(currentDirURL: childURL, depth: depth + 1)
+                    } else {
+                        switch directoryHasNonDotEntries(at: childURL.path) {
+                        case .some(true):
+                            hitDepthLimit = true
+                        case .some(false):
+                            break
+                        case .none:
+                            unreadableSubdirs.append(childURL.path)
+                        }
+                    }
+                }
+            }
+        }
+
+        walk(currentDirURL: dirURL, depth: 0)
+        return DirectoryChildrenScanOutcome(
+            escapes: escapes,
+            inspectedEntries: inspectedEntries,
+            hitEntryLimit: hitEntryLimit,
+            hitDepthLimit: hitDepthLimit,
+            unreadableSubdirs: unreadableSubdirs
+        )
     }
 }

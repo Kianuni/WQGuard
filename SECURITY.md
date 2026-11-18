@@ -52,7 +52,7 @@ iOS 内核为单个进程分配的沙盒扩展槽位（Sandbox Extension Slots�
 
 ### 3. 自动化只读回归验证体系
 
-WQGuard 的只读承诺由 **40 个 XCTest 测试套件、共计 800 项自动化单元与安全回归测试**（含 `ReadOnlyAssertions.swift`、`LocalizationBilingualTests.swift`、`SecurityAuditV121RegressionTests.swift` 与 `V130FeatureUnitTests.swift` 等专项检测套件）在每次构建时强制校验：
+WQGuard 的只读承诺由 **45 个 XCTest 测试套件、共计 869 项自动化单元与安全回归测试**（含 `ReadOnlyAssertions.swift`、`LocalizationBilingualTests.swift`、`SecurityAuditV121RegressionTests.swift` 与 `V130FeatureUnitTests.swift` 等专项检测套件）在每次构建时强制校验：
 1. **全目录逐字节 SHA-256 前后比对**：扫描前后对目标目录全部文件计算 SHA-256，任何 1 比特变化立即判定测试失败。
 2. **纳秒级文件系统时间戳校验**：比对 `st_mtimespec.tv_sec` 与 `st_mtimespec.tv_nsec`，确保扫描绝不污染文件修改时间。
 3. **描述符只读模式断言**：通过 `fcntl(fd, F_GETFL)` 校验 `flags & O_ACCMODE == O_RDONLY`。
@@ -85,7 +85,7 @@ WQGuard 的只读承诺由 **40 个 XCTest 测试套件、共计 800 项自动�
 
 ### 3. Automated Read-Only Regression Verification
 
-Continuously enforced across **800 automated unit & security regression tests across 40 XCTest suites** (`ReadOnlyAssertions.swift`, `LocalizationBilingualTests.swift`, `SecurityAuditV121RegressionTests.swift`, `V130FeatureUnitTests.swift`, and parser/exploit verification suites):
+Continuously enforced across **869 automated unit & security regression tests across 45 XCTest suites** (`ReadOnlyAssertions.swift`, `LocalizationBilingualTests.swift`, `SecurityAuditV121RegressionTests.swift`, `V130FeatureUnitTests.swift`, and parser/exploit verification suites):
 - Pre/post bit-for-bit **SHA-256 checksum equality** across all scanned files;
 - Pre/post **nanosecond `st_mtimespec` timestamp equality**;
 - Descriptor access mode verification (`fcntl(fd, F_GETFL) & O_ACCMODE == O_RDONLY`);

@@ -27,7 +27,8 @@ public struct CLIArgumentParser: Sendable {
             } else if arg == "scan" {
                 if idx + 1 < args.count && !args[idx + 1].hasPrefix("-") {
                     let target = args[idx + 1]
-                    if target.lowercased().hasSuffix(".ipa") {
+                    let lowerTarget = target.lowercased()
+                    if lowerTarget.hasSuffix(".ipa") || lowerTarget.hasSuffix(".tipa") {
                         config.ipaPath = target
                     } else {
                         config.containerPath = target
@@ -201,7 +202,8 @@ public final class TerminalStyler: Sendable {
         let clampedFraction = min(max(progress.fractionCompleted, 0.0), 1.0)
         let filled = Int(Double(width) * clampedFraction)
         let bar = String(repeating: "=", count: filled) + (filled < width ? ">" : "") + String(repeating: " ", count: max(0, width - filled - (filled < width ? 1 : 0)))
-        let line = String(format: "\r\u{001B}[2K[%@] %5.1f%% (%d/%d) %@", bar, clampedFraction * 100.0, progress.completedCount, progress.totalCount, progress.currentTarget)
+        let safeTarget = ReportGenerator.shared.plain(progress.currentTarget)
+        let line = String(format: "\r\u{001B}[2K[%@] %5.1f%% (%d/%d) %@", bar, clampedFraction * 100.0, progress.completedCount, progress.totalCount, safeTarget)
         handle.write(Data(line.utf8))
     }
 

@@ -85,7 +85,7 @@ public struct WhitelistedTool: Identifiable, Codable, Sendable, Equatable {
 public enum PatternMatcher {
     internal static let asciiWhitespace = CharacterSet(charactersIn: " \t\r\n")
 
-    /// Returns true if the string contains any control, format, zero-width, soft-hyphen, or non-printable scalar.
+    /// Returns true if the string contains any control, format, zero-width, soft-hyphen, variation-selector, or non-printable scalar.
     internal static func containsForbiddenScalar(_ s: String) -> Bool {
         for scalar in s.unicodeScalars {
             let v = scalar.value
@@ -93,7 +93,9 @@ public enum PatternMatcher {
                 || (v >= 0x200B && v <= 0x200F)
                 || (v >= 0x2028 && v <= 0x202F)
                 || (v >= 0x2060 && v <= 0x206F)
-                || v == 0xFEFF {
+                || (v >= 0xFE00 && v <= 0xFE0F)
+                || v == 0xFEFF
+                || (v >= 0xE0100 && v <= 0xE01EF) {
                 return true
             }
             let cat = scalar.properties.generalCategory
@@ -233,14 +235,18 @@ public final class WhitelistEngine: @unchecked Sendable {
         return tools.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
     }
 
-    /// Registers a custom tool rule or updates an existing rule with the same name.
+    /// Registers a custom tool rule or updates an existing non-built-in rule with the same name.
+    /// Built-in default rules (`WQGuard`) can never be overwritten or forged via custom registration.
     public func registerCustomTool(_ tool: WhitelistedTool) {
         lock.lock()
         defer { lock.unlock() }
-        if let idx = tools.firstIndex(where: { $0.name.caseInsensitiveCompare(tool.name) == .orderedSame }) {
-            tools[idx] = tool
+        var customTool = tool
+        customTool.isBuiltIn = false
+        if let idx = tools.firstIndex(where: { $0.name.caseInsensitiveCompare(customTool.name) == .orderedSame }) {
+            guard !tools[idx].isBuiltIn else { return }
+            tools[idx] = customTool
         } else {
-            tools.append(tool)
+            tools.append(customTool)
         }
     }
 
@@ -253,11 +259,11 @@ public final class WhitelistEngine: @unchecked Sendable {
         }
     }
 
-    /// Removes a tool rule by name.
+    /// Removes a non-built-in tool rule by name.
     public func removeTool(named name: String) {
         lock.lock()
         defer { lock.unlock() }
-        tools.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        tools.removeAll { !$0.isBuiltIn && $0.name.caseInsensitiveCompare(name) == .orderedSame }
     }
 
     /// Resets all rules to the built-in default WQGuard rule.
@@ -281,69 +287,217 @@ public final class WhitelistEngine: @unchecked Sendable {
         matchedSignatures: [String] = [],
         teamId: String? = nil
     ) -> (isWhitelisted: Bool, toolName: String?) {
+        evaluateCandidateBundleIds(
+            [bundleId],
+            appGroups: appGroups,
+            matchedSignatures: matchedSignatures,
+            teamId: teamId
+        )
+    }
+
+    /// Queries whether a single active whitelist rule simultaneously covers both `primaryBundleId` and `secondaryBundleId`
+    /// (used when correlating an installed registry record with a suffix-modified sideloaded package).
+    public func isWhitelistedForBoth(
+        primaryBundleId: String,
+        secondaryBundleId: String,
+        appGroups: [String] = [],
+        matchedSignatures: [String] = [],
+        teamId: String? = nil
+    ) -> (isWhitelisted: Bool, toolName: String?) {
+        if primaryBundleId.trimmingCharacters(in: PatternMatcher.asciiWhitespace)
+            .caseInsensitiveCompare(secondaryBundleId.trimmingCharacters(in: PatternMatcher.asciiWhitespace)) == .orderedSame {
+            return evaluateCandidateBundleIds(
+                [primaryBundleId],
+                appGroups: appGroups,
+                matchedSignatures: matchedSignatures,
+                teamId: teamId
+            )
+        }
+        return evaluateCandidateBundleIds(
+            [primaryBundleId, secondaryBundleId],
+            appGroups: appGroups,
+            matchedSignatures: matchedSignatures,
+            teamId: teamId
+        )
+    }
+
+    /// Evaluates whether an existing `ScanFinding` qualifies for whitelist downgrade, enforcing
+    /// `isWhitelistEligible`, `correlatedPackageBundleId` dual-bundle matching, `isTeamIdWhitelistVerified`,
+    /// and complete threat-indicator signature coverage.
+    public func evaluateFindingWhitelist(_ finding: ScanFinding) -> (isWhitelisted: Bool, toolName: String?) {
+        guard finding.evidence.isWhitelistEligible else {
+            return (false, nil)
+        }
+        guard finding.evidence.escapingSymlinks.isEmpty else {
+            return (false, nil)
+        }
+
+        var sigSet = Set(finding.evidence.matchedSymbols)
+        for ind in finding.indicators {
+            if ind.signature != "com.apple.security.application-groups"
+                && ind.signature != SignatureCatalog.dynamicLoadingCautionRule.pattern {
+                sigSet.insert(ind.signature)
+            }
+        }
+        let allSignatures = Array(sigSet)
+        let candidateTeam = finding.evidence.isTeamIdWhitelistVerified ? finding.teamId : nil
+
+        if let secondaryBid = finding.evidence.correlatedPackageBundleId, !secondaryBid.isEmpty {
+            return isWhitelistedForBoth(
+                primaryBundleId: finding.bundleId,
+                secondaryBundleId: secondaryBid,
+                appGroups: finding.evidence.appGroups,
+                matchedSignatures: allSignatures,
+                teamId: candidateTeam
+            )
+        }
+
+        return isWhitelisted(
+            bundleId: finding.bundleId,
+            appGroups: finding.evidence.appGroups,
+            matchedSignatures: allSignatures,
+            teamId: candidateTeam
+        )
+    }
+
+    private func evaluateCandidateBundleIds(
+        _ requiredBundleIds: [String],
+        appGroups: [String],
+        matchedSignatures: [String],
+        teamId: String?
+    ) -> (isWhitelisted: Bool, toolName: String?) {
+        guard !requiredBundleIds.isEmpty else {
+            return (false, nil)
+        }
+
+        // Structurally hostile archive/package/Mach-O anomalies can never be downgraded by any whitelist rule
+        if matchedSignatures.contains(where: {
+            $0.hasPrefix("SymlinkEscape:")
+                || $0.hasPrefix("MalformedPackage:")
+                || $0.hasPrefix("CorruptMachO:")
+                || $0 == "AppexExecutableTraversal"
+        }) {
+            return (false, nil)
+        }
+
         lock.lock()
         let currentTools = tools
         lock.unlock()
 
+        let requiresMultipleDistinctBundles = requiredBundleIds.count > 1
+
         for tool in currentTools where tool.isEnabled {
+            let cleanBundlePatterns = tool.allowedBundleIds
+                .map { $0.trimmingCharacters(in: PatternMatcher.asciiWhitespace) }
+                .filter { !$0.isEmpty }
+            let cleanGroupPatterns = tool.allowedAppGroups
+                .map { $0.trimmingCharacters(in: PatternMatcher.asciiWhitespace) }
+                .filter { !$0.isEmpty }
+            let cleanTeamIds = (tool.allowedTeamIds ?? [])
+                .map { $0.trimmingCharacters(in: PatternMatcher.asciiWhitespace) }
+                .filter { !$0.isEmpty }
+
+            // Fail-closed: reject degenerate or wildcard-only rules (e.g. "*", "?") that lack any concrete identity anchor
+            let hasConcretePattern: ([String]) -> Bool = { patterns in
+                patterns.contains { pat in
+                    let stripped = pat.filter { $0 != "*" && $0 != "?" && $0 != "." }
+                    return !stripped.isEmpty
+                }
+            }
+            let hasConcreteTeam = cleanTeamIds.contains { tid in
+                let stripped = tid.filter { $0 != "*" && $0 != "?" }
+                return !stripped.isEmpty
+            }
+            guard hasConcretePattern(cleanBundlePatterns) || hasConcretePattern(cleanGroupPatterns) || hasConcreteTeam else {
+                continue
+            }
+            // Reject rules where allowedBundleIds contains a pure wildcard ("*" / "?") without a concrete Team ID anchor
+            if cleanBundlePatterns.contains(where: { $0.allSatisfy { $0 == "*" || $0 == "?" || $0 == "." } }) && !hasConcreteTeam {
+                continue
+            }
+            // Bridging two distinct correlated bundle IDs requires an explicit allowedBundleIds pattern covering both
+            if requiresMultipleDistinctBundles && cleanBundlePatterns.isEmpty {
+                continue
+            }
+
             if tool.isBuiltIn {
-                guard PatternMatcher.isStrictIdentifierASCII(bundleId),
+                guard requiredBundleIds.allSatisfy({ PatternMatcher.isStrictIdentifierASCII($0) }),
                       appGroups.allSatisfy({ PatternMatcher.isStrictIdentifierASCII($0) }) else {
                     continue
                 }
             }
 
-            // 1. Bundle ID match check
-            if !tool.allowedBundleIds.isEmpty {
-                let matchesBundle = tool.allowedBundleIds.contains { pattern in
-                    if pattern.utf8.allSatisfy({ $0 < 0x80 }) {
-                        let candidate = bundleId.trimmingCharacters(in: PatternMatcher.asciiWhitespace)
-                        let patternHasUnderscore = pattern.utf8.contains(0x5F)
-                        let allowedCharsOk = candidate.utf8.allSatisfy { b in
-                            (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
-                                || b == 0x2E || b == 0x2D || (patternHasUnderscore && b == 0x5F)
+            // 1. Bundle ID match check across ALL required candidate bundle IDs
+            if !cleanBundlePatterns.isEmpty {
+                let allBundlesMatch = requiredBundleIds.allSatisfy { candidateBid in
+                    cleanBundlePatterns.contains { pattern in
+                        if pattern.utf8.allSatisfy({ $0 < 0x80 }) {
+                            let candidate = candidateBid.trimmingCharacters(in: PatternMatcher.asciiWhitespace)
+                            let patternHasUnderscore = pattern.utf8.contains(0x5F)
+                            let allowedCharsOk = candidate.utf8.allSatisfy { b in
+                                (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
+                                    || b == 0x2E || b == 0x2D || (patternHasUnderscore && b == 0x5F)
+                            }
+                            guard !candidate.isEmpty && allowedCharsOk else { return false }
                         }
-                        guard !candidate.isEmpty && allowedCharsOk else { return false }
+                        return PatternMatcher.matches(pattern: pattern, value: candidateBid)
                     }
-                    return PatternMatcher.matches(pattern: pattern, value: bundleId)
                 }
-                guard matchesBundle else { continue }
+                guard allBundlesMatch else { continue }
             }
 
-            // 2. App Group match check (Crucial for preventing bundle ID spoofing & piggybacked victim App Groups)
-            if !tool.allowedAppGroups.isEmpty {
-                let matchesGroupPattern: (String, String) -> Bool = { pattern, group in
-                    if pattern.utf8.allSatisfy({ $0 < 0x80 }) {
-                        let candidate = group.trimmingCharacters(in: PatternMatcher.asciiWhitespace)
-                        let patternHasUnderscore = pattern.utf8.contains(0x5F)
-                        let allowedCharsOk = candidate.utf8.allSatisfy { b in
-                            (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
-                                || b == 0x2E || b == 0x2D || (patternHasUnderscore && b == 0x5F)
-                        }
-                        guard !candidate.isEmpty && allowedCharsOk else { return false }
+            // 2. App Group match check:
+            // - Reject unauthorized Apple internal system App Groups (`group.com.apple.*` / `systemgroup.com.apple.*`) on non-Apple bundle IDs
+            //   unless explicitly matched by a concrete group pattern.
+            // - Enforce `allSatisfy` across ALL rules (both built-in and custom) whenever `allowedAppGroups` is non-empty so a re-signed
+            //   whitelisted tool can never piggyback third-party victim App Groups (e.g. `group.io.metamask`, `group.org.telegram`).
+            let concreteGroupPatterns = cleanGroupPatterns.filter { pat in
+                !pat.filter { $0 != "*" && $0 != "?" && $0 != "." }.isEmpty
+            }
+            let matchesGroupPattern: (String, String) -> Bool = { pattern, group in
+                if pattern.utf8.allSatisfy({ $0 < 0x80 }) {
+                    let candidate = group.trimmingCharacters(in: PatternMatcher.asciiWhitespace)
+                    let patternHasUnderscore = pattern.utf8.contains(0x5F)
+                    let allowedCharsOk = candidate.utf8.allSatisfy { b in
+                        (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
+                            || b == 0x2E || b == 0x2D || (patternHasUnderscore && b == 0x5F)
                     }
-                    return PatternMatcher.matches(pattern: pattern, value: group)
+                    guard !candidate.isEmpty && allowedCharsOk else { return false }
                 }
-                let matchesAppGroup: Bool
-                if tool.isBuiltIn {
-                    matchesAppGroup = !appGroups.isEmpty && appGroups.allSatisfy { group in
-                        tool.allowedAppGroups.contains { pattern in
-                            matchesGroupPattern(pattern, group)
-                        }
-                    }
-                } else {
-                    matchesAppGroup = appGroups.contains { group in
-                        tool.allowedAppGroups.contains { pattern in
-                            matchesGroupPattern(pattern, group)
-                        }
-                    }
+                return PatternMatcher.matches(pattern: pattern, value: group)
+            }
+
+            let allCandidateBidsAreApple = requiredBundleIds.allSatisfy {
+                $0.trimmingCharacters(in: PatternMatcher.asciiWhitespace).lowercased().hasPrefix("com.apple.")
+            }
+            let requiresExplicitAppleGroupPattern = !tool.isBuiltIn || !allCandidateBidsAreApple
+            let hasUnauthorizedAppleSystemGroup = requiresExplicitAppleGroupPattern && appGroups.contains { grp in
+                let lowerGrp = grp.trimmingCharacters(in: PatternMatcher.asciiWhitespace).lowercased()
+                guard lowerGrp.hasPrefix("group.com.apple.") || lowerGrp.hasPrefix("systemgroup.com.apple.") else {
+                    return false
                 }
-                guard matchesAppGroup else { continue }
+                return !concreteGroupPatterns.contains { pattern in matchesGroupPattern(pattern, grp) }
+            }
+            guard !hasUnauthorizedAppleSystemGroup else { continue }
+
+            if !cleanGroupPatterns.isEmpty {
+                guard !concreteGroupPatterns.isEmpty,
+                      !appGroups.isEmpty,
+                      appGroups.allSatisfy({ group in
+                          concreteGroupPatterns.contains { pattern in
+                              matchesGroupPattern(pattern, group)
+                          }
+                      }) else {
+                    continue
+                }
             }
 
             // 3. Team ID match check (if rule explicitly restricts Team IDs)
-            if let allowedTeams = tool.allowedTeamIds, !allowedTeams.isEmpty {
-                guard let candidateTeam = teamId, allowedTeams.contains(candidateTeam) else {
+            if !cleanTeamIds.isEmpty {
+                let trimmedCandidateTeam = teamId?.trimmingCharacters(in: PatternMatcher.asciiWhitespace) ?? ""
+                guard !trimmedCandidateTeam.isEmpty,
+                      !PatternMatcher.containsForbiddenScalar(trimmedCandidateTeam),
+                      cleanTeamIds.contains(where: { $0.caseInsensitiveCompare(trimmedCandidateTeam) == .orderedSame }) else {
                     continue
                 }
             }

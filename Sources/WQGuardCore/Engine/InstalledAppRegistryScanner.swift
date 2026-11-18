@@ -112,7 +112,9 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
 
         let appType = (dict["ApplicationType"] as? String) ?? "User"
         let signerIdentity = dict["SignerIdentity"] as? String
-        let profileValidated = (dict["ProfileValidated"] as? Bool) ?? false
+        let profileValidated = (dict["ProfileValidated"] as? Bool == true)
+            || (dict["UPPValidated"] as? Bool == true)
+            || (dict["FreeProfileValidated"] as? Bool == true)
 
         // App Store / TestFlight packages carry ApplicationDSID / iTunesMetadata or Apple App Store signing identity without provisioning profile
         let hasDSID: Bool = {
@@ -153,6 +155,27 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             }
             return nil
         }
+        func extractTrimmedStrings(_ raw: Any?) -> [String] {
+            guard let raw else { return [] }
+            if let arr = raw as? [String] {
+                return arr.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            }
+            if let anyArr = raw as? [Any] {
+                return anyArr.compactMap { $0 as? String }
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+            if let single = raw as? String {
+                let trimmed = single.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? [] : [trimmed]
+            }
+            return []
+        }
+
+        let collectionCapableEscapeKeys: Set<String> = [
+            "com.apple.private.MobileContainerManager.allowed",
+            "com.apple.private.security.storage.AppDataContainers"
+        ]
         for (k, v) in entDict {
             let isRestrictedNumericBool = numericBoolKeys.contains(k)
                 || InstalledAppRegistryScanner.matchesRestricted2026PrivateEntitlementPrefix(k)
@@ -164,6 +187,8 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
                 boolEnts[k] = num.boolValue
             } else if isRestrictedNumericBool, let parsed = parseIntegerBool(v) {
                 boolEnts[k] = parsed
+            } else if collectionCapableEscapeKeys.contains(k), !extractTrimmedStrings(v).isEmpty {
+                boolEnts[k] = true
             } else if let s = v as? String {
                 strEnts[k] = s
             }
@@ -172,20 +197,18 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             boolEnts["beta-reports-active"] = true
         }
 
-        let appGroups = (entDict["com.apple.security.application-groups"] as? [String] ?? [])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        let keychainGroups = (entDict["keychain-access-groups"] as? [String] ?? [])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let appGroups = extractTrimmedStrings(entDict["com.apple.security.application-groups"])
+        let keychainGroups = extractTrimmedStrings(entDict["keychain-access-groups"])
 
         var tccServices: [String] = []
-        if let allowList = entDict["com.apple.private.tcc.allow"] as? [String] {
-            tccServices.append(contentsOf: allowList)
-        }
-        if let promptList = entDict["com.apple.private.tcc.allow-prompting"] as? [String] {
-            tccServices.append(contentsOf: promptList)
+        for tccKey in ["com.apple.private.tcc.allow", "com.apple.private.tcc.allow-prompting"] {
+            guard let rawTCC = entDict[tccKey] else { continue }
+            let extracted = extractTrimmedStrings(rawTCC)
+            if !extracted.isEmpty {
+                tccServices.append(contentsOf: extracted)
+            } else if (rawTCC as? Bool == true) || (parseIntegerBool(rawTCC) == true) {
+                tccServices.append(tccKey)
+            }
         }
 
         var teamId = strEnts["com.apple.developer.team-identifier"]
@@ -193,12 +216,15 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         if teamId == nil, let appId = strEnts["application-identifier"],
            let dotIdx = appId.firstIndex(of: ".") {
             let prefix = String(appId[..<dotIdx])
-            if prefix.count == 10 && prefix.allSatisfy({ $0.isLetter || $0.isNumber }) {
-                teamId = prefix
+            let isStrictASCIITeam = prefix.count == 10 && prefix.utf8.allSatisfy { b in
+                (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
+            }
+            if isStrictASCIITeam {
+                teamId = prefix.uppercased()
             }
         }
 
-        let bgModes = (dict["UIBackgroundModes"] as? [String]) ?? []
+        let bgModes = extractTrimmedStrings(dict["UIBackgroundModes"])
         let bundlePath = (dict["Path"] as? String) ?? "/var/containers/Bundle/Application/\(bundleId)"
         let containerPath = dict["Container"] as? String
 
@@ -238,28 +264,15 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         let isInternalApp = (dict["internalApp"] as? Bool) ?? false
         let builtByDeveloper = (dict["builtByDeveloper"] as? Bool) ?? false
 
-        let appType = (isDefaultApp || isInternalApp) ? "System" : "User"
-        let profileValidated = builtByDeveloper
-        let hasAppStoreMetadata = !isDefaultApp && !isInternalApp && !builtByDeveloper
-        let signerIdentity: String? = builtByDeveloper
-            ? "Apple Development (CoreDevice)"
-            : (hasAppStoreMetadata ? "Apple iPhone OS Application Signing" : nil)
-
-        var groupSet: Set<String> = []
-        if let arr = dict["appGroupIdentifiers"] as? [String] {
-            for g in arr {
-                let trimmed = g.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { groupSet.insert(trimmed) }
-            }
-        }
-        if let map = dict["groupContainerPaths"] as? [String: Any] {
-            for k in map.keys {
-                let trimmed = k.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { groupSet.insert(trimmed) }
-            }
-        }
-        let sortedGroups = Array(groupSet).sorted()
-
+        let explicitSignerRaw = (dict["signerIdentity"] as? String)
+            ?? (dict["SignerIdentity"] as? String)
+        let explicitProfileValidated: Bool? = {
+            if let pv = dict["profileValidated"] as? Bool { return pv }
+            if let pv = dict["ProfileValidated"] as? Bool { return pv }
+            if dict["UPPValidated"] as? Bool == true || dict["FreeProfileValidated"] as? Bool == true { return true }
+            if dict["provisioningProfile"] != nil { return true }
+            return nil
+        }()
         let resolvedBundlePath: String = {
             if let urlStr = dict["url"] as? String, let u = URL(string: urlStr), u.isFileURL {
                 return u.path
@@ -270,18 +283,104 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             return isDefaultApp ? "/Applications/\(bundleId).app" : "/var/containers/Bundle/Application/\(bundleId)"
         }()
 
+        let lowerBundlePath = resolvedBundlePath.lowercased()
+        let isTrollStoreOrJailbreakPath = lowerBundlePath.contains("/var/jb/")
+            || lowerBundlePath.contains("/preboot/")
+            || (!isDefaultApp && !isInternalApp && lowerBundlePath.hasPrefix("/applications/"))
+
+        let isEnterpriseFlag = (dict["enterpriseApp"] as? Bool == true) || (dict["isEnterpriseApp"] as? Bool == true)
+        let isAdHocFlag = (dict["adHoc"] as? Bool == true) || (dict["isAdHoc"] as? Bool == true)
+        let explicitNotAppStore = (dict["fromAppStore"] as? Bool == false)
+            || (dict["isAppStore"] as? Bool == false)
+            || isEnterpriseFlag
+            || isAdHocFlag
+            || isTrollStoreOrJailbreakPath
+            || (dict["provisioningProfile"] != nil)
+
+        let appType = (isDefaultApp || isInternalApp) ? "System" : "User"
+        let profileValidated = explicitProfileValidated ?? (builtByDeveloper || isEnterpriseFlag)
+        var groupSet: Set<String> = []
+        if let arr = dict["appGroupIdentifiers"] as? [Any] {
+            for case let g as String in arr {
+                let trimmed = g.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { groupSet.insert(trimmed) }
+            }
+        }
+        if let map = dict["groupContainerPaths"] as? [String: Any] {
+            for k in map.keys {
+                let trimmed = k.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { groupSet.insert(trimmed) }
+            }
+        }
+
         let containerPath = dict["dataContainerPath"] as? String
         var boolEnts: [String: Bool] = [:]
-        var allEntKeys: [String] = []
+        var strEnts: [String: String] = [:]
+        var keychainGroups: [String] = []
+        var tccServices: [String] = []
+        var allEntKeySet: Set<String> = []
+        var teamId = dict["teamIdentifier"] as? String
+
+        if let rawEntDict = (dict["entitlements"] as? [String: Any]) ?? (dict["Entitlements"] as? [String: Any]),
+           let parsedFromEnt = fromDictionary(["CFBundleIdentifier": bundleId, "Entitlements": rawEntDict]) {
+            for g in parsedFromEnt.appGroups { groupSet.insert(g) }
+            keychainGroups = parsedFromEnt.keychainAccessGroups
+            tccServices = parsedFromEnt.tccAllowedServices
+            boolEnts = parsedFromEnt.booleanEntitlements
+            strEnts = parsedFromEnt.stringEntitlements
+            allEntKeySet.formUnion(parsedFromEnt.allEntitlementKeys)
+            if teamId == nil { teamId = parsedFromEnt.teamId }
+        }
+
+        let hasEscapeOrPlatformEnt = boolEnts["get-task-allow"] == true
+            || boolEnts["com.apple.private.security.no-sandbox"] == true
+            || boolEnts["com.apple.private.security.no-container"] == true
+            || boolEnts["com.apple.private.security.container-required"] == false
+            || boolEnts["com.apple.private.MobileContainerManager.allowed"] == true
+            || boolEnts["com.apple.private.security.storage.AppDataContainers"] == true
+            || boolEnts["platform-application"] == true
+            || !tccServices.isEmpty
+        let explicitFromAppStore = (dict["fromAppStore"] as? Bool == true) || (dict["isAppStore"] as? Bool == true)
+        let lowerBid = bundleId.lowercased()
+
+        let hasAppStoreMetadata: Bool
+        let signerIdentity: String?
+
+        if builtByDeveloper {
+            hasAppStoreMetadata = false
+            signerIdentity = explicitSignerRaw ?? "Apple Development (CoreDevice)"
+        } else if isEnterpriseFlag {
+            hasAppStoreMetadata = false
+            signerIdentity = explicitSignerRaw ?? "iPhone Distribution (Enterprise)"
+        } else if explicitNotAppStore || profileValidated || hasEscapeOrPlatformEnt {
+            hasAppStoreMetadata = false
+            signerIdentity = explicitSignerRaw ?? (isAdHocFlag ? "Ad Hoc" : nil)
+        } else if let explicitSigner = explicitSignerRaw {
+            let lowerSig = explicitSigner.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            hasAppStoreMetadata = !isDefaultApp && !isInternalApp && (lowerSig == "apple iphone os application signing")
+            signerIdentity = explicitSigner
+        } else {
+            let canInferAppStoreForComApple = !lowerBid.hasPrefix("com.apple.")
+                || explicitFromAppStore
+                || InstalledAppRegistryScanner.isCanonicalRemovableAppleStockBundleId(lowerBid)
+            hasAppStoreMetadata = !isDefaultApp && !isInternalApp && canInferAppStoreForComApple
+            signerIdentity = hasAppStoreMetadata ? "Apple iPhone OS Application Signing" : nil
+        }
+
+        let sortedGroups = Array(groupSet).sorted()
         if !sortedGroups.isEmpty {
-            allEntKeys.append("com.apple.security.application-groups")
+            allEntKeySet.insert("com.apple.security.application-groups")
         }
         if (dict["isBeta"] as? Bool == true) ||
            (dict["testFlight"] as? Bool == true) ||
            (dict["betaReportsActive"] as? Bool == true) {
             boolEnts["beta-reports-active"] = true
-            allEntKeys.append("beta-reports-active")
+            allEntKeySet.insert("beta-reports-active")
         }
+        let bgModes = (dict["backgroundModes"] as? [Any] ?? dict["UIBackgroundModes"] as? [Any] ?? [])
+            .compactMap { $0 as? String }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
         return InstalledAppRegistryRecord(
             bundleId: bundleId,
@@ -291,14 +390,14 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             signerIdentity: signerIdentity,
             profileValidated: profileValidated,
             hasAppStoreMetadata: hasAppStoreMetadata,
-            teamId: nil,
+            teamId: teamId,
             appGroups: sortedGroups,
-            keychainAccessGroups: [],
-            tccAllowedServices: [],
+            keychainAccessGroups: keychainGroups,
+            tccAllowedServices: tccServices,
             booleanEntitlements: boolEnts,
-            stringEntitlements: [:],
-            allEntitlementKeys: allEntKeys,
-            backgroundModes: [],
+            stringEntitlements: strEnts,
+            allEntitlementKeys: Array(allEntKeySet).sorted(),
+            backgroundModes: bgModes,
             bundlePath: resolvedBundlePath,
             containerPath: containerPath
         )
@@ -343,10 +442,14 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
     // MARK: - Snapshot Parsing (Plist / XML / Binary Plist / JSON)
 
     public func parseSnapshotFile(at url: URL) throws -> [InstalledAppRegistryRecord] {
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        let data: Data
+        do {
+            data = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: url, maxBytes: 128 * 1024 * 1024)
+        } catch IPAPackageScannerError.fileNotFound {
             throw InstalledAppRegistryError.fileNotFound(url.path)
+        } catch {
+            throw InstalledAppRegistryError.invalidSnapshotFormat(error.localizedDescription)
         }
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
         return try parseSnapshotData(data)
     }
 
@@ -392,39 +495,24 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         )
     }
 
-    private static let plistCloseMarker = Data("</plist>".utf8)
-
-    /// `true` when the raw data contains at least two `</plist>` terminators (concatenated documents).
+    /// `true` when the raw data contains at least two top-level XML `<plist>...</plist>` documents
+    /// (ignoring literal `</plist>` tokens inside `<!--...-->` comments or `<![CDATA[...]]>` blocks).
     static func containsMultiplePlistTerminators(_ data: Data) -> Bool {
-        guard let first = data.range(of: plistCloseMarker) else { return false }
-        return data.range(of: plistCloseMarker, in: first.upperBound..<data.endIndex) != nil
+        CSBlobParser.scanXMLPlistDocumentRanges(in: data, maxDocuments: 2).count >= 2
     }
 
-    /// Splits a concatenated XML plist stream into individual documents, starting each chunk at whichever
-    /// start marker (`<?xml` or `<plist`) occurs FIRST, and aggregates the records of every chunk.
+    /// Splits a concatenated XML plist stream into individual documents using comment/CDATA-aware O(N) lexical scanning,
+    /// and aggregates the records of every chunk.
     private func parseConcatenatedPlistStream(_ data: Data) -> [InstalledAppRegistryRecord]? {
-        guard let text = String(data: data, encoding: .utf8), text.contains("<plist") else { return nil }
+        let ranges = CSBlobParser.scanXMLPlistDocumentRanges(in: data, maxDocuments: 8192)
+        guard !ranges.isEmpty else { return nil }
+        let normalized = data.startIndex == 0 ? data : Data(data)
         var aggregated: [InstalledAppRegistryRecord] = []
-        var searchRange = text.startIndex..<text.endIndex
-        while true {
-            let xmlStart = text.range(of: "<?xml", range: searchRange)
-            let plistStart = text.range(of: "<plist", range: searchRange)
-            let startRange: Range<String.Index>
-            switch (xmlStart, plistStart) {
-            case let (x?, p?): startRange = x.lowerBound <= p.lowerBound ? x : p
-            case let (x?, nil): startRange = x
-            case let (nil, p?): startRange = p
-            case (nil, nil): return aggregated.isEmpty ? nil : deduplicate(aggregated)
-            }
-            guard let endRange = text.range(of: "</plist>", range: startRange.lowerBound..<text.endIndex) else {
-                break
-            }
-            let chunk = String(text[startRange.lowerBound..<endRange.upperBound])
-            if let chunkData = chunk.data(using: .utf8),
-               let plistObj = try? PropertyListSerialization.propertyList(from: chunkData, options: [], format: nil) {
+        for docRange in ranges {
+            let chunkData = normalized.subdata(in: docRange)
+            if let plistObj = try? PropertyListSerialization.propertyList(from: chunkData, options: [], format: nil) {
                 aggregated.append(contentsOf: extractRecords(from: plistObj))
             }
-            searchRange = endRange.upperBound..<text.endIndex
         }
         return aggregated.isEmpty ? nil : deduplicate(aggregated)
     }
@@ -493,7 +581,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
     /// Collapses records sharing the same (whitespace-trimmed, case-sensitive) bundle ID.
     /// Secure-by-default: on a collision the RISKIEST record is kept (higher risk tier, then more
     /// indicators), so a clean duplicate can never shadow a malicious one.
-    private func deduplicate(_ records: [InstalledAppRegistryRecord]) -> [InstalledAppRegistryRecord] {
+    func deduplicate(_ records: [InstalledAppRegistryRecord]) -> [InstalledAppRegistryRecord] {
         var indexByBid: [String: Int] = [:]
         var unique: [InstalledAppRegistryRecord] = []
         unique.reserveCapacity(records.count)
@@ -519,51 +607,135 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     // MARK: - Channel Classification & Security Audit
 
+    /// Canonical lowercased bundle identifiers of Apple preinstalled removable stock apps that reside under
+    /// `/private/var/containers/Bundle/Application/...` and may omit `SignerIdentity` in CoreTrust static-cache exports.
+    private static let canonicalRemovableAppleStockBundleIds: Set<String> = {
+        var ids = Set(
+            CSStore2Parser.builtInChineseNames.keys
+                .map { $0.lowercased() }
+                .filter { $0.hasPrefix("com.apple.") }
+        )
+        let extras: [String] = [
+            "com.apple.health",
+            "com.apple.shortcuts",
+            "com.apple.fitness",
+            "com.apple.passbook",
+            "com.apple.bridge",
+            "com.apple.tips",
+            "com.apple.translate",
+            "com.apple.journal",
+            "com.apple.passwords",
+            "com.apple.freeform",
+            "com.apple.measure",
+            "com.apple.magnifier",
+            "com.apple.compass",
+            "com.apple.stocks",
+            "com.apple.weather",
+            "com.apple.voicememos",
+            "com.apple.podcasts",
+            "com.apple.ibooks",
+            "com.apple.tv",
+            "com.apple.music",
+            "com.apple.news",
+            "com.apple.home",
+            "com.apple.findmy",
+            "com.apple.contacts",
+            "com.apple.facetime",
+            "com.apple.files",
+            "com.apple.documentsapp",
+            "com.apple.reminders",
+            "com.apple.mobilenotes",
+            "com.apple.mobilecal",
+            "com.apple.mobilemail",
+            "com.apple.mobilesafari",
+            "com.apple.mobileslideshow",
+            "com.apple.mobiletimer",
+            "com.apple.calculator",
+            "com.apple.camera",
+            "com.apple.appstore",
+            "com.apple.preferences"
+        ]
+        for item in extras {
+            ids.insert(item)
+        }
+        return ids
+    }()
+
+    internal static func isCanonicalRemovableAppleStockBundleId(_ lowerBid: String) -> Bool {
+        canonicalRemovableAppleStockBundleIds.contains(lowerBid)
+    }
+
     /// Returns `true` when the record represents a genuine Apple OS daemon, CoreServices UI service,
-    /// or Apple first-party system/removable application (never developer-sideloaded or enterprise-resigned).
+    /// or Apple first-party system/removable application (never developer-sideloaded, TrollStore-registered, or enterprise-resigned).
     public func isAppleSystemOrFirstPartyApp(_ record: InstalledAppRegistryRecord) -> Bool {
         // Any bundle signed with a provisioning profile (Developer / Ad-Hoc / Enterprise sideload)
         // or carrying get-task-allow is NEVER a genuine Apple OS platform binary.
         if record.profileValidated || record.booleanEntitlements["get-task-allow"] == true {
             return false
         }
-        let signer = record.signerIdentity?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        if let signer {
-            if signer.contains("development") || signer.contains("developer") ||
-               signer.contains("distribution") || signer.contains("enterprise") {
-                return false
-            }
-            // Apple platform (OS) signature: only Apple can produce it.
-            if signer == "software signing" {
-                return true
-            }
+
+        // Genuine Apple OS / first-party records do not carry a third-party developer Team ID.
+        if let tid = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !tid.isEmpty {
+            return false
         }
 
-        // From here on, trust REQUIRES an Apple bundle identity: a `com.apple.*` ID alone is
-        // trivially spoofable by ad-hoc / TrollStore bundles, and a system path alone is shared by
-        // rootful-jailbreak apps (e.g. Filza in /Applications).
         let lowerBid = record.bundleId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard lowerBid.hasPrefix("com.apple.") else {
             return false
         }
 
-        // Genuine Apple App Store signature (Apple-owned removable apps such as Shortcuts).
-        if signer == "apple iphone os application signing" {
+        let signer = record.signerIdentity?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let signer, !signer.isEmpty {
+            // Cryptographic Apple OS platform signature or Apple App Store signature on a `com.apple.*` bundle without profileValidated
+            if signer == "software signing" || signer == "apple iphone os application signing" {
+                return true
+            }
+            // Any other non-empty signer (e.g. "Ad Hoc", "ldid", "Apple Development", "iPhone Distribution") is NEVER Apple OS.
+            return false
+        }
+
+        // Unsigned / nil-SignerIdentity path (CoreTrust static cache vs TrollStore "Switch to System Registration"):
+        // 1. NEVER trust an unverified (`signer == nil`) record holding ANY sandbox-escape, platform-application, TCC,
+        //    wildcard keychain, private Photos, or 2026 restricted bypass entitlement.
+        if hasAnyDangerousRegistryEntitlement(record, assumingUnverifiedIdentity: true) || record.booleanEntitlements["platform-application"] == true {
+            return false
+        }
+
+        // 2. Reject third-party App Groups, known sideload tool names, or wallet/messenger display-name impersonation.
+        let hasThirdPartyGroup = record.appGroups.contains { grp in
+            let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !lg.isEmpty && !lg.hasPrefix("group.com.apple.") && !lg.hasPrefix("systemgroup.com.apple.")
+        }
+        if hasThirdPartyGroup {
+            return false
+        }
+        if Self.matchKnownSideloadInfrastructure(bundleId: record.bundleId, displayName: record.displayName) != nil {
+            return false
+        }
+        if !ExpandedThreatCatalog.evaluateImpersonation(
+            bundleId: record.bundleId,
+            displayName: record.displayName,
+            installChannel: .developerSideloaded,
+            cryptid: 0
+        ).isEmpty {
+            return false
+        }
+
+        // 3. Path-anchored system verification:
+        //    - SSV-sealed OS paths (`/System/`, `/Applications/`, `/private/preboot/`) are trusted for clean `com.apple.*` bundles.
+        //    - User-writable bundle container paths (`/var/containers/Bundle/Application/...`, where TrollStore "Switch to System
+        //      Registration" flips `ApplicationType` to `"System"`) ONLY trust canonical preinstalled Apple stock bundle IDs.
+        let path = Self.standardizedAbsolutePath(record.bundlePath)
+        if path.hasPrefix("/System/") ||
+           path.hasPrefix("/Applications/") ||
+           path.hasPrefix("/private/preboot/") {
             return true
         }
 
         let appType = record.applicationType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if appType == "system" || ((appType == "internal" || appType == "hidden") && record.teamId == nil) {
-            return true
-        }
-
-        // Real (normalized: `.`/`..` resolved) system path for an Apple bundle.
-        let path = Self.standardizedAbsolutePath(record.bundlePath)
-        if path.hasPrefix("/Applications/") ||
-           path.hasPrefix("/System/") ||
-           path.hasPrefix("/private/preboot/") {
+        if appType == "system" && Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid) {
             return true
         }
 
@@ -652,6 +824,39 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         !restricted2026BypassEntitlements(for: record).isEmpty
     }
 
+    private func hasAnyDangerousRegistryEntitlement(
+        _ record: InstalledAppRegistryRecord,
+        assumingUnverifiedIdentity: Bool = false
+    ) -> Bool {
+        let isTrustedApple = assumingUnverifiedIdentity ? false : isAppleSystemOrFirstPartyApp(record)
+        if record.booleanEntitlements["com.apple.private.security.no-container"] == true ||
+           record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true ||
+           record.booleanEntitlements["com.apple.private.security.container-required"] == false ||
+           record.booleanEntitlements["com.apple.private.MobileContainerManager.allowed"] == true ||
+           record.booleanEntitlements["com.apple.private.security.storage.AppDataContainers"] == true ||
+           (record.booleanEntitlements["platform-application"] == true && !isTrustedApple) ||
+           !record.tccAllowedServices.isEmpty ||
+           !rawRestricted2026EntitlementKeys(in: record).isEmpty {
+            return true
+        }
+        if record.keychainAccessGroups.contains("*") ||
+           record.keychainAccessGroups.contains(where: { $0.hasSuffix(".*") }) {
+            return true
+        }
+        let candidateKeys = Set(record.allEntitlementKeys)
+            .union(record.booleanEntitlements.keys)
+            .union(record.stringEntitlements.keys)
+        for key in candidateKeys {
+            if key.hasPrefix(ExpandedThreatCatalog.photosEntitlementPrefix) ||
+               key == ExpandedThreatCatalog.photosBourgeoisieEntitlement {
+                if record.booleanEntitlements[key] != false {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     public func classifyChannel(for record: InstalledAppRegistryRecord) -> (channel: InstallChannel, isFairPlayEncrypted: Bool) {
         if isAppleSystemOrFirstPartyApp(record) {
             return (.appStore, true)
@@ -661,47 +866,46 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return (.developerSideloaded, false)
         }
 
-        let signerLower = record.signerIdentity?.lowercased() ?? ""
-        let hasDangerousPrivateEscape =
-            record.booleanEntitlements["com.apple.private.security.no-container"] == true ||
-            record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true ||
-            !record.tccAllowedServices.isEmpty ||
-            !rawRestricted2026EntitlementKeys(in: record).isEmpty
+        let signerLower = record.signerIdentity?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        let hasDangerousPrivateEscape = hasAnyDangerousRegistryEntitlement(record)
 
-        // TestFlight Beta builds:
-        // On iOS, TestFlight apps embed a 90-day beta provisioning profile (`profileValidated == true`),
-        // carry `Entitlements["beta-reports-active"] == true` (only issued on App Store Connect / TestFlight
-        // distribution profiles and rejected by installd on sideloaded/enterprise IPAs), and are signed with
-        // "Apple Distribution: ...", "iPhone Distribution: ...", "Apple TestFlight Beta Distribution",
-        // or "Apple iPhone OS Application Signing".
+        // 1. Check explicit developer / ad-hoc signers FIRST so leftover `iTunesMetadata.plist` (`ApplicationDSID > 0`)
+        //    on a repackaged wallet/messenger can never spoof `.appStore`.
+        if signerLower.contains("apple development") || signerLower.contains("iphone developer") {
+            return (.developerSideloaded, false)
+        }
+        if signerLower == "ad hoc" || signerLower.contains("ad-hoc") || signerLower.contains("ldid") || signerLower.contains("trollstore") {
+            return (.developerSideloaded, false)
+        }
+
+        // 2. TestFlight Beta builds:
+        //    Require `beta-reports-active == true` paired with a validated Apple Distribution / App Store / TestFlight signature
+        //    (never trusting arbitrary `"testflight"` substrings without `beta-reports-active`, nor ad-hoc/unsigned `beta-reports-active`).
         if !hasDangerousPrivateEscape {
-            if record.booleanEntitlements["beta-reports-active"] == true ||
-               signerLower.contains("testflight") ||
-               (record.profileValidated && signerLower == "apple iphone os application signing") {
+            let isEligibleBetaSigner = (signerLower == "apple iphone os application signing")
+                || (signerLower == "apple testflight beta distribution")
+                || signerLower.hasPrefix("apple distribution:")
+                || signerLower.hasPrefix("iphone distribution:")
+            if (record.profileValidated && signerLower == "apple iphone os application signing") ||
+               (record.booleanEntitlements["beta-reports-active"] == true && record.profileValidated && isEligibleBetaSigner) {
                 return (.testFlight, true)
             }
         }
 
-        if record.hasAppStoreMetadata && !record.profileValidated {
+        // 3. Enterprise / Distribution profile builds
+        if record.profileValidated && (signerLower.contains("distribution") || signerLower.contains("enterprise")) {
+            return (.enterpriseInHouse, false)
+        }
+
+        // 4. Genuine Apple App Store release: requires cryptographic Apple App Store signer without provisioning profile.
+        //    Unvalidated TrollStore / ad-hoc records (`signerIdentity == nil`) carrying `iTunesMetadata.plist` fall through to `.developerSideloaded`.
+        if signerLower == "apple iphone os application signing" && !record.profileValidated {
             return (.appStore, true)
         }
 
-        if let signer = record.signerIdentity {
-            let lower = signer.lowercased()
-            if lower.contains("apple development") || lower.contains("iphone developer") {
-                return (.developerSideloaded, false)
-            }
-            if record.profileValidated && (lower.contains("distribution") || lower.contains("enterprise")) {
-                // Distinguish Ad-Hoc vs In-House Enterprise: Ad-Hoc usually has team-identifier and non-enterprise profile,
-                // whereas Enterprise distribution lacks App Store metadata and distributes broadly.
-                return (.enterpriseInHouse, false)
-            }
-            if signer == "Apple iPhone OS Application Signing" && !record.profileValidated {
-                return (.appStore, true)
-            }
-        }
-
-        // Unvalidated user bundle (e.g., TrollStore ad-hoc ldid signed or custom sideload)
+        // Unvalidated user bundle (e.g., TrollStore ad-hoc ldid signed, distribution-resigned without profileValidated, or custom sideload)
         return (.developerSideloaded, false)
     }
 
@@ -714,11 +918,8 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if channel.isSideloadedOrEnterprise {
             return true
         }
-        // Even if marked App Store, inspect if carrying dangerous private sandbox-escape or 2026 bypass entitlements
-        if record.booleanEntitlements["com.apple.private.security.no-container"] == true ||
-           record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true ||
-           !record.tccAllowedServices.isEmpty ||
-           hasRestricted2026PrivateEntitlements(record) {
+        // Even if marked App Store, inspect if carrying dangerous private sandbox-escape, TCC, Photos, keychain wildcard, or 2026 bypass entitlements
+        if hasAnyDangerousRegistryEntitlement(record) {
             return true
         }
         return false
@@ -738,7 +939,12 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         var findings: [ScanFinding] = []
         for rec in records {
             if !selfBid.isEmpty && rec.bundleId == selfBid {
-                continue
+                // Only skip WQGuard's own bundle ID when it matches the built-in self-whitelist (.knownTool/.safe);
+                // never skip a Trojanized sideloaded clone spoofing com.wqguard.app with high-risk entitlements.
+                let selfEval = evaluateRecord(rec)
+                if selfEval.riskTier == .knownTool || selfEval.riskTier == .safe {
+                    continue
+                }
             }
             // Always exclude genuine Apple OS daemons, CoreServices UI services, and Apple system apps
             // so `includeAppStoreApps` strictly audits user-installed third-party App Store applications.
@@ -796,12 +1002,14 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             }
         }
 
-        if record.booleanEntitlements["platform-application"] == true && !record.bundleId.hasPrefix("com.apple.") {
+        let isTrustedAppleRecord = isAppleSystemOrFirstPartyApp(record)
+
+        if record.booleanEntitlements["platform-application"] == true && !isTrustedAppleRecord {
             indicators.append(ThreatIndicator(
                 signature: "platform-application",
                 description: WQLocale.pick(
-                    en: "Third-party installed app declares Apple system platform privilege (platform-application=true).",
-                    zh: "第三方已安装应用伪造声明了 Apple 平台级系统应用特权 (platform-application=true)！"
+                    en: "Non-Apple or unverified installed app declares Apple system platform privilege (platform-application=true).",
+                    zh: "非官方或未验证已安装应用伪造声明了 Apple 平台级系统应用特权 (platform-application=true)！"
                 ),
                 category: "Privilege Escalation Entitlement",
                 location: "installation_proxy Entitlements",
@@ -891,7 +1099,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         }
 
         // 4. Keychain Wildcard Access
-        if record.keychainAccessGroups.contains("*") || record.keychainAccessGroups.contains(where: { $0.hasSuffix(".*") && $0.contains("apple") }) {
+        if record.keychainAccessGroups.contains("*") || record.keychainAccessGroups.contains(where: { $0.hasSuffix(".*") }) {
             indicators.append(ThreatIndicator(
                 signature: "keychain-access-groups(*)",
                 description: WQLocale.pick(
@@ -908,8 +1116,9 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         // 5. App Groups Cross-Container Surface (Layer 1 Gating)
         let gating = EntitlementGating.evaluate(hasAppGroups: !record.appGroups.isEmpty, appGroups: record.appGroups)
         if !gating.appGroups.isEmpty && channel.isSideloadedOrEnterprise {
-            let appleGroupAbuse = gating.appGroups.filter {
-                ($0.hasPrefix("group.com.apple.") || $0.hasPrefix("systemgroup.com.apple.")) && !record.bundleId.hasPrefix("com.apple.")
+            let appleGroupAbuse = gating.appGroups.filter { grp in
+                let lowerG = grp.lowercased()
+                return (lowerG.hasPrefix("group.com.apple.") || lowerG.hasPrefix("systemgroup.com.apple.")) && !isTrustedAppleRecord
             }
             if !appleGroupAbuse.isEmpty {
                 let gStr = appleGroupAbuse.joined(separator: ", ")
@@ -939,33 +1148,60 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             }
         }
 
-        // 6. Repackaged Crypto Wallet & Messenger Impersonation
-        let brandInds = ExpandedThreatCatalog.evaluateImpersonation(
-            bundleId: record.bundleId,
-            displayName: record.displayName,
-            installChannel: channel,
-            cryptid: cryptid
+        // 6. Repackaged Crypto Wallet & Messenger Impersonation (check both CFBundleIdentifier and any conflicting Entitlements application-identifier)
+        let rawEntAppId = record.stringEntitlements["application-identifier"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (entBundleId, inferredEntTeamId) = IPAPackageScanner.extractEntitlementBundleIdentity(
+            entitlements: rawEntAppId.map { ["application-identifier": $0] } ?? [:],
+            explicitTeamId: nil
         )
-        for b in brandInds {
-            indicators.append(b)
-            matchedSignatures.insert(b.signature)
+        let hasConflictingRegistryBundleId = IPAPackageScanner.doesEntitlementBundleIdConflict(
+            entBundleId: entBundleId,
+            withPlistBundleId: record.bundleId
+        )
+        let hasConflictingRegistryTeamId: Bool = {
+            guard let recTeam = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !recTeam.isEmpty,
+                  let entTeam = inferredEntTeamId?.trimmingCharacters(in: .whitespacesAndNewlines), !entTeam.isEmpty else {
+                return false
+            }
+            return recTeam.caseInsensitiveCompare(entTeam) != .orderedSame
+        }()
+
+        var candidateBrandBundleIds: [String] = [record.bundleId]
+        if let eBid = entBundleId, eBid.caseInsensitiveCompare(record.bundleId) != .orderedSame {
+            candidateBrandBundleIds.append(eBid)
+        }
+        var seenBrandImpSigs: Set<String> = []
+        for candBid in candidateBrandBundleIds {
+            let brandInds = ExpandedThreatCatalog.evaluateImpersonation(
+                bundleId: candBid,
+                displayName: record.displayName,
+                installChannel: channel,
+                cryptid: cryptid
+            )
+            for b in brandInds where seenBrandImpSigs.insert(b.signature).inserted {
+                indicators.append(b)
+                matchedSignatures.insert(b.signature)
+            }
         }
 
         if cryptid == 0 && channel.isSideloadedOrEnterprise {
-            let lowerBid = record.bundleId.lowercased()
             let trimmedOrigName = record.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
             let lowerName = trimmedOrigName.lowercased()
+            let foldedLowerName = ExpandedThreatCatalog.foldConfusablesToASCII(trimmedOrigName).lowercased()
             let nameTokens = ExpandedThreatCatalog.extractBrandTokens(from: trimmedOrigName)
+            let foldedCandBids = candidateBrandBundleIds.map { ExpandedThreatCatalog.foldConfusablesToASCII($0).lowercased() }
             for extra in Self.extraSideloadImpersonationTargets {
-                let matchBid = extra.bundleIdPatterns.contains { pat in
-                    lowerBid == pat || lowerBid.hasPrefix(pat + ".") || lowerBid.contains("." + pat + ".") || lowerBid.hasSuffix("." + pat)
+                let matchBid = foldedCandBids.contains { lowerBid in
+                    extra.bundleIdPatterns.contains { pat in
+                        lowerBid == pat || lowerBid.hasPrefix(pat + ".") || lowerBid.contains("." + pat + ".") || lowerBid.hasSuffix("." + pat)
+                    }
                 }
                 let matchName = extra.displayNames.contains { pat in
                     let isASCII = pat.unicodeScalars.allSatisfy { $0.isASCII }
                     if isASCII && !pat.contains(" ") {
-                        return lowerName == pat || nameTokens.contains(pat)
+                        return lowerName == pat || foldedLowerName == pat || nameTokens.contains(pat)
                     }
-                    return lowerName == pat || lowerName.contains(pat)
+                    return lowerName == pat || lowerName.contains(pat) || foldedLowerName == pat || foldedLowerName.contains(pat)
                 }
                 if matchBid || matchName {
                     let sig = "IMPERSONATION:\(extra.name)"
@@ -988,9 +1224,9 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
         // 7. Persistent Background Execution Modes on Sideloaded Apps
         if channel.isSideloadedOrEnterprise {
-            let persistent = record.backgroundModes.filter {
-                ExpandedThreatCatalog.backgroundModesRequiringInspection.contains($0)
-            }
+            let persistent = record.backgroundModes
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { ExpandedThreatCatalog.backgroundModesRequiringInspection.contains($0) }
             if !persistent.isEmpty {
                 let mStr = persistent.joined(separator: ", ")
                 let bgSig = "UIBackgroundModes(\(mStr))"
@@ -1035,20 +1271,38 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             provisionalRisk = .caution
         }
 
+        let isRegistryWhitelistEligible = !hasConflictingRegistryBundleId && !hasConflictingRegistryTeamId
+        let signerLowerForTeam = record.signerIdentity?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let isAdHocOrUnsignedRegistrySigner = signerLowerForTeam == "ad hoc"
+            || signerLowerForTeam.contains("ad-hoc")
+            || signerLowerForTeam.contains("ldid")
+            || signerLowerForTeam.contains("trollstore")
+        let isRegistryTeamVerified: Bool
+        if let recTeam = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !recTeam.isEmpty {
+            isRegistryTeamVerified = !hasConflictingRegistryTeamId
+                && !isAdHocOrUnsignedRegistrySigner
+                && (record.profileValidated || record.hasAppStoreMetadata || signerLowerForTeam == "apple iphone os application signing")
+        } else {
+            isRegistryTeamVerified = true
+        }
+        let whitelistCandidateTeam: String? = isRegistryTeamVerified ? record.teamId : nil
+
         var isWhitelisted = false
         var whitelistedToolName: String? = nil
         var finalRisk = provisionalRisk
 
-        let wlResult = whitelistEngine.isWhitelisted(
-            bundleId: record.bundleId,
-            appGroups: gating.appGroups,
-            matchedSignatures: Array(matchedSignatures),
-            teamId: record.teamId
-        )
-        if wlResult.isWhitelisted {
-            isWhitelisted = true
-            whitelistedToolName = wlResult.toolName
-            finalRisk = .knownTool
+        if isRegistryWhitelistEligible {
+            let wlResult = whitelistEngine.isWhitelisted(
+                bundleId: record.bundleId,
+                appGroups: gating.appGroups,
+                matchedSignatures: Array(matchedSignatures),
+                teamId: whitelistCandidateTeam
+            )
+            if wlResult.isWhitelisted {
+                isWhitelisted = true
+                whitelistedToolName = wlResult.toolName
+                finalRisk = .knownTool
+            }
         }
 
         let remediation: String
@@ -1088,7 +1342,9 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             pathEnumerationPresent: false,
             remediationGuidance: remediation,
             auditDepth: .registryEntitlements,
-            signerIdentity: record.signerIdentity
+            signerIdentity: record.signerIdentity,
+            isWhitelistEligible: isRegistryWhitelistEligible,
+            isTeamIdWhitelistVerified: isRegistryTeamVerified
         )
 
         return ScanFinding(

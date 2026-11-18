@@ -100,111 +100,577 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
     
     /// Scans a single Mach-O binary file at the specified URL.
     public func scanBinary(at url: URL) throws -> ScanFinding {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw IPAPackageScannerError.fileNotFound(url.path)
-        }
-        
-        let binaryData = try Data(contentsOf: url, options: .mappedIfSafe)
+        let binaryData = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: url)
         let slices = try MachOParser.shared.parseAllSlices(data: binaryData)
-        let details = machoScanner.parseMachO(files: slices, rawData: binaryData)
+        let details = machoScanner.parseMachO(
+            files: slices,
+            rawData: binaryData,
+            expectedContainerSliceCount: slices.first?.slicesInContainer.count
+        )
         
         var appGroups: [String] = []
-        var bundleId = url.lastPathComponent
-        for slice in slices {
-            let (_, sliceGroups) = CSBlobParser.shared.extractAppGroups(from: slice.codeSignatureData)
+        var entitlementsDict: [String: Any] = [:]
+        var embeddedPlist: [String: Any] = [:]
+        var hasEmbeddedInfoPlist = false
+        for slice in MachOParser.selectAuditSlices(from: slices) {
+            let (_, sliceGroups) = CSBlobParser.shared.extractAppGroups(fromSlice: slice)
             for g in sliceGroups where !appGroups.contains(g) {
                 appGroups.append(g)
             }
-            if bundleId == url.lastPathComponent {
-                let ents = CSBlobParser.shared.parseMergedEntitlements(from: slice.codeSignatureData)
-                if let appId = ents["application-identifier"] as? String {
-                    bundleId = appId
+            let sliceEnts = CSBlobParser.shared.parseMergedEntitlements(fromSlice: slice)
+            entitlementsDict = CSBlobParser.mergeEntitlementDictionaries(entitlementsDict, sliceEnts)
+            if let sPlist = slice.embeddedInfoPlist {
+                hasEmbeddedInfoPlist = true
+                for (k, v) in sPlist where embeddedPlist[k] == nil {
+                    embeddedPlist[k] = v
                 }
             }
         }
-        
+
+        let identityResolution = IPAPackageScanner.resolveDistinctEntitlementIdentities(
+            fromSlices: slices,
+            explicitTeamId: nil
+        )
+        let teamId: String? = identityResolution.inferredTeamId
+
+        let embeddedBundleId: String? = {
+            guard let raw = (embeddedPlist["CFBundleIdentifier"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else { return nil }
+            return raw
+        }()
+        let embeddedDisplayName: String? = {
+            let raw = (embeddedPlist["CFBundleDisplayName"] as? String) ?? (embeddedPlist["CFBundleName"] as? String)
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+            return trimmed
+        }()
+        let embeddedVersion: String? = {
+            let raw = (embeddedPlist["CFBundleShortVersionString"] as? String) ?? (embeddedPlist["CFBundleVersion"] as? String)
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+            return trimmed
+        }()
+        let mainBackgroundModes = IPAPackageScanner.extractFlexibleStringList(embeddedPlist["UIBackgroundModes"])
+
+        let hasEntitlementBundleId = !identityResolution.distinctBundleIds.isEmpty
+        let bundleId = identityResolution.primaryBundleId ?? embeddedBundleId ?? url.lastPathComponent
+
+        var codeSigTrust = CSBlobParser.shared.inspectCodeSignatureTrust(fromSlices: slices)
+        if hasEmbeddedInfoPlist,
+           let embeddedBindFailure = CSBlobParser.shared.verifyBundleInfoPlistBinding(
+               fromSlices: slices,
+               infoPlistData: nil,
+               plistBundleId: embeddedBundleId
+           ) {
+            codeSigTrust = embeddedBindFailure
+        }
+        let hasMissingCS = CSBlobParser.hasMissingCodeSignature(inSlices: slices)
+        let installChannel: InstallChannel = (details.isFairPlayEncrypted && !codeSigTrust.isDisqualifiedFromAppStore)
+            ? .appStore
+            : .developerSideloaded
+        let displayName = embeddedDisplayName ?? url.lastPathComponent
+        let version = embeddedVersion ?? "1.0"
+        let gating = EntitlementGating.evaluate(hasAppGroups: !appGroups.isEmpty, appGroups: appGroups)
+        let hasConflictingEmbeddedBundleId: Bool
+        if identityResolution.hasMultipleBundleIds || identityResolution.hasMultipleTeamIds {
+            hasConflictingEmbeddedBundleId = true
+        } else if hasEntitlementBundleId, let embId = embeddedBundleId {
+            hasConflictingEmbeddedBundleId = identityResolution.distinctBundleIds.contains {
+                IPAPackageScanner.doesEntitlementBundleIdConflict(entBundleId: $0, withPlistBundleId: embId)
+            }
+        } else {
+            hasConflictingEmbeddedBundleId = false
+        }
+        let hasVerifiedBundleIdentity = (hasEntitlementBundleId || embeddedBundleId != nil) && !hasConflictingEmbeddedBundleId
+        let isStandaloneTeamVerified: Bool = (teamId == nil) || (codeSigTrust == .appleAppStoreVerified && !hasMissingCS && !identityResolution.hasMultipleTeamIds)
+        let whitelistTeamId: String? = isStandaloneTeamVerified ? teamId : nil
+
         let bundleContext = MachOScanner.ScanContext(
             bundleId: bundleId,
-            displayName: url.lastPathComponent,
-            version: "1.0",
-            teamId: nil,
+            displayName: displayName,
+            version: version,
+            teamId: whitelistTeamId,
             bundlePath: url.deletingLastPathComponent().path,
             executablePath: url.path,
-            installChannel: details.cryptid != 0 ? .appStore : .developerSideloaded,
-            appGroups: appGroups
+            installChannel: installChannel,
+            appGroups: gating.appGroups,
+            disqualifyAppStoreExemption: details.cryptid != 0 && (hasMissingCS || codeSigTrust != .appleAppStoreVerified)
         )
         
-        return machoScanner.scan(details: details, context: bundleContext)
+        let baseFinding = machoScanner.scan(details: details, context: bundleContext)
+        var allIndicators = baseFinding.indicators
+        var allMatchedSymbols = Set(baseFinding.evidence.matchedSymbols)
+        let linkedSet = Set(details.linkedDylibs)
+        let binInspectable = !details.isFairPlayEncrypted || details.hasUnencryptedSegments || codeSigTrust.isDisqualifiedFromAppStore || hasMissingCS
+        let binSymbolsInspectable = binInspectable || codeSigTrust != .appleAppStoreVerified
+        let unencSyms: Set<String> = binSymbolsInspectable ? Set(details.symbols) : []
+        let unencStrs: Set<String> = binInspectable ? Set(details.textStrings) : []
+        let effectivePlist: [String: Any]
+        if hasEmbeddedInfoPlist {
+            effectivePlist = embeddedPlist
+        } else {
+            effectivePlist = [
+                "NSBluetoothAlwaysUsageDescription": "standalone-macho",
+                "NSAccessorySetupKitSupports": ["Bluetooth"]
+            ]
+        }
+
+        IPAPackageScanner.appendExpandedThreatIndicators(
+            bundleId: bundleId,
+            displayName: displayName,
+            installChannel: installChannel,
+            mainCryptid: details.cryptid,
+            mainIsFairPlayEncrypted: details.isFairPlayEncrypted,
+            mainHasUnencryptedSegments: details.hasUnencryptedSegments,
+            mainBackgroundModes: mainBackgroundModes,
+            infoDict: effectivePlist,
+            entitlementsDict: entitlementsDict,
+            allLinkedDylibs: linkedSet,
+            appLinkedDylibs: linkedSet,
+            unencryptedSymbols: unencSyms,
+            appUnencryptedSymbols: unencSyms,
+            unencryptedTextStrings: unencStrs,
+            hasUnencryptedBinary: binInspectable,
+            appHasUnencryptedBinary: binInspectable,
+            codeSignatureTrust: codeSigTrust,
+            hasMissingCodeSignature: hasMissingCS,
+            appHasMissingCodeSignature: hasMissingCS,
+            allIndicators: &allIndicators,
+            allMatchedSymbols: &allMatchedSymbols
+        )
+
+        // Evaluate impersonation and dangerous entitlements across ALL conflicting/secondary identities (across slices/slots and embedded __info_plist)
+        var secondaryBids: [String] = []
+        for candBid in identityResolution.distinctBundleIds where candBid.caseInsensitiveCompare(bundleId) != .orderedSame {
+            secondaryBids.append(candBid)
+        }
+        if let embId = embeddedBundleId, embId.caseInsensitiveCompare(bundleId) != .orderedSame,
+           !secondaryBids.contains(where: { $0.caseInsensitiveCompare(embId) == .orderedSame }) {
+            secondaryBids.append(embId)
+        }
+        for conflictId in secondaryBids {
+            IPAPackageScanner.appendConflictingIdentityIndicators(
+                conflictingBundleId: conflictId,
+                displayName: displayName,
+                installChannel: installChannel,
+                mainCryptid: details.cryptid,
+                mainIsFairPlayEncrypted: details.isFairPlayEncrypted,
+                mainHasUnencryptedSegments: details.hasUnencryptedSegments,
+                hasUnencryptedBinary: binInspectable,
+                codeSignatureTrust: codeSigTrust,
+                hasMissingCodeSignature: hasMissingCS,
+                entitlementsDict: entitlementsDict,
+                allIndicators: &allIndicators,
+                allMatchedSymbols: &allMatchedSymbols
+            )
+        }
+
+        if hasVerifiedBundleIdentity
+            && isStandaloneTeamVerified
+            && (baseFinding.teamId == teamId)
+            && !hasConflictingEmbeddedBundleId
+            && allIndicators.count == baseFinding.indicators.count
+            && allMatchedSymbols == Set(baseFinding.evidence.matchedSymbols) {
+            return baseFinding
+        }
+
+        var provisionalRisk: RiskTier = .safe
+        if allIndicators.contains(where: { $0.severity == .highRisk }) {
+            provisionalRisk = .highRisk
+        } else if allIndicators.contains(where: { $0.severity == .caution }) {
+            provisionalRisk = .caution
+        }
+
+        var isWhitelisted = false
+        var whitelistedToolName: String? = nil
+        var finalRisk = provisionalRisk
+        if hasVerifiedBundleIdentity && (provisionalRisk == .highRisk || provisionalRisk == .caution) {
+            let wlResult = whitelistEngine.isWhitelisted(
+                bundleId: bundleId,
+                appGroups: gating.appGroups,
+                matchedSignatures: Array(allMatchedSymbols),
+                teamId: whitelistTeamId
+            )
+            if wlResult.isWhitelisted {
+                isWhitelisted = true
+                whitelistedToolName = wlResult.toolName
+                finalRisk = .knownTool
+            }
+        }
+
+        let remediation: String
+        switch finalRisk {
+        case .highRisk:
+            remediation = WQLocale.pick(
+                en: "Unauthorized high-risk exploit indicators or privileged entitlements detected. Immediately isolate or delete this binary.",
+                zh: "检测到未经授权的高危利用特征或越权私有 Entitlements，建议立即隔离或删除该二进制文件。"
+            )
+        case .knownTool:
+            remediation = WQLocale.pick(
+                en: "Matched trusted whitelist rule (\(whitelistedToolName ?? "Known Tool")).",
+                zh: "匹配已知开源安全审计工具白名单（\(whitelistedToolName ?? "Known Tool")）。"
+            )
+        case .caution:
+            remediation = WQLocale.pick(
+                en: "Binary includes dynamic symbol resolution, injected libraries, or supply-chain advisories. Review source before trusting.",
+                zh: "该二进制包含动态符号解析、注入动态库或供应链风险组件，建议复核来源。"
+            )
+        case .safe:
+            remediation = baseFinding.evidence.remediationGuidance
+        }
+
+        let updatedEvidence = AuditEvidence(
+            matchedSymbols: Array(allMatchedSymbols).sorted(),
+            linkedDylibs: details.linkedDylibs,
+            hasAppGroups: !gating.appGroups.isEmpty,
+            appGroups: gating.appGroups,
+            installChannel: installChannel,
+            cryptid: details.cryptid,
+            isFairPlayEncrypted: details.isFairPlayEncrypted,
+            escapingSymlinks: [],
+            dynamicLoadingPresent: baseFinding.evidence.dynamicLoadingPresent,
+            pathEnumerationPresent: baseFinding.evidence.pathEnumerationPresent,
+            remediationGuidance: remediation,
+            isWhitelistEligible: hasVerifiedBundleIdentity,
+            isTeamIdWhitelistVerified: isStandaloneTeamVerified
+        )
+
+        return ScanFinding(
+            bundleId: bundleId,
+            displayName: displayName,
+            version: version,
+            teamId: teamId,
+            executablePath: url.path,
+            bundlePath: url.deletingLastPathComponent().path,
+            installChannel: installChannel,
+            riskTier: finalRisk,
+            isWhitelisted: isWhitelisted,
+            whitelistedToolName: whitelistedToolName,
+            indicators: allIndicators,
+            evidence: updatedEvidence,
+            scanTimestamp: Date()
+        )
     }
     
-    /// Scans an application `.app` bundle directory.
-    public func scanBundle(at url: URL) throws -> ScanFinding {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw IPAPackageScannerError.fileNotFound(url.path)
+    private static func stripTrailingSlashes(_ rawPath: String) -> String {
+        guard rawPath.count > 1 else { return rawPath }
+        var s = rawPath
+        while s.count > 1 && s.hasSuffix("/") {
+            s.removeLast()
         }
-        
-        let infoPlistURL = url.appendingPathComponent("Info.plist")
-        guard FileManager.default.fileExists(atPath: infoPlistURL.path),
-              let plistData = try? Data(contentsOf: infoPlistURL),
-              let infoDict = (try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)) as? [String: Any] else {
+        return s
+    }
+
+    /// Scans an application `.app`, `.appex`, `.xpc`, `.framework`, `.xcframework`, or `.bundle` directory.
+    public func scanBundle(at rawURL: URL) throws -> ScanFinding {
+        let normalizedPath = Self.stripTrailingSlashes(rawURL.path)
+        let url = URL(fileURLWithPath: normalizedPath)
+        var topStat = stat()
+        guard lstat(normalizedPath, &topStat) == 0 else {
+            throw IPAPackageScannerError.fileNotFound(normalizedPath)
+        }
+        let topMode = topStat.st_mode & S_IFMT
+        if topMode == S_IFLNK {
+            throw IPAPackageScannerError.zipSlipDetected(url.lastPathComponent)
+        }
+        guard topMode == S_IFDIR else {
             throw IPAPackageScannerError.invalidInfoPlist(WQLocale.pick(
-                en: "Missing or invalid Info.plist",
-                zh: "缺少或无效的 Info.plist"
+                en: "Bundle target is not a directory: '\(normalizedPath)'",
+                zh: "Bundle 目标不是目录: '\(normalizedPath)'"
             ))
         }
         
-        let bundleId = infoDict["CFBundleIdentifier"] as? String ?? url.deletingPathExtension().lastPathComponent
-        let displayName = infoDict["CFBundleDisplayName"] as? String ?? infoDict["CFBundleName"] as? String ?? url.deletingPathExtension().lastPathComponent
-        let version = infoDict["CFBundleShortVersionString"] as? String ?? infoDict["CFBundleVersion"] as? String ?? "1.0"
-        let (_, execURL) = try IPAPackageScanner.resolveSafeBundleExecutableURL(
-            infoDict: infoDict,
-            bundleURL: url,
-            fallbackName: displayName
-        )
-        let execReadURL = execURL.resolvingSymlinksInPath().standardizedFileURL
+        let bundleResolvedPath = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let bundleResolvedPrefix = bundleResolvedPath.hasSuffix("/") ? bundleResolvedPath : bundleResolvedPath + "/"
+        let bundleExt = url.pathExtension.lowercased()
+        let isFrameworkOrGenericBundle = (bundleExt == "framework" || bundleExt == "xcframework" || bundleExt == "bundle")
+        let bundleStem = url.deletingPathExtension().lastPathComponent
+
+        let infoPlistCandidates: [URL] = [
+            url.appendingPathComponent("Info.plist"),
+            url.appendingPathComponent("Contents/Info.plist"),
+            url.appendingPathComponent("Resources/Info.plist"),
+            url.appendingPathComponent("Versions/Current/Resources/Info.plist"),
+            url.appendingPathComponent("Versions/A/Resources/Info.plist")
+        ]
+
+        var matchedInfoPlistURL: URL? = nil
+        for candidatePlist in infoPlistCandidates {
+            var pStat = stat()
+            if lstat(candidatePlist.path, &pStat) == 0 {
+                matchedInfoPlistURL = candidatePlist
+                break
+            }
+        }
+
+        var infoDict: [String: Any] = [:]
+        var rawInfoPlistData: Data? = nil
+        var escapingSymlinks: [String] = []
+        var resolvedExecPair: (logical: URL, read: URL)? = nil
+
+        if let infoPlistURL = matchedInfoPlistURL {
+            let resolvedInfoPlist = infoPlistURL.resolvingSymlinksInPath().standardizedFileURL
+            guard resolvedInfoPlist.path.hasPrefix(bundleResolvedPrefix) else {
+                throw IPAPackageScannerError.zipSlipDetected("Info.plist")
+            }
+            guard let plistData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: resolvedInfoPlist, maxBytes: 8 * 1024 * 1024),
+                  let parsedInfo = (try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)) as? [String: Any] else {
+                throw IPAPackageScannerError.invalidInfoPlist(WQLocale.pick(
+                    en: "Missing or invalid Info.plist",
+                    zh: "缺少或无效的 Info.plist"
+                ))
+            }
+            rawInfoPlistData = plistData
+            infoDict = parsedInfo
+
+            let pkgType = (infoDict["CFBundlePackageType"] as? String)?.uppercased()
+            let isXCFrameworkPlist = (pkgType == "XFWK" || infoDict["AvailableLibraries"] != nil || bundleExt == "xcframework")
+
+            if !isXCFrameworkPlist {
+                let candidateExecRoots: [URL] = [
+                    url,
+                    url.appendingPathComponent("Contents/MacOS"),
+                    url.appendingPathComponent("Versions/Current"),
+                    url.appendingPathComponent("Versions/A")
+                ]
+                let fallbackName = infoDict["CFBundleDisplayName"] as? String
+                    ?? infoDict["CFBundleName"] as? String
+                    ?? bundleStem
+                var resolvedPrimaryExec: URL? = nil
+                var firstExecError: Error? = nil
+                for rootCandidate in candidateExecRoots {
+                    var rIsDir: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: rootCandidate.path, isDirectory: &rIsDir), rIsDir.boolValue else {
+                        continue
+                    }
+                    let rootResolved = rootCandidate.resolvingSymlinksInPath().standardizedFileURL
+                    guard rootResolved.path == bundleResolvedPath || rootResolved.path.hasPrefix(bundleResolvedPrefix) else {
+                        throw IPAPackageScannerError.zipSlipDetected(rootCandidate.lastPathComponent)
+                    }
+                    do {
+                        let (_, foundExec) = try IPAPackageScanner.resolveSafeBundleExecutableURL(
+                            infoDict: infoDict,
+                            bundleURL: rootResolved,
+                            fallbackName: fallbackName
+                        )
+                        resolvedPrimaryExec = foundExec
+                        break
+                    } catch let err as IPAPackageScannerError {
+                        if case .zipSlipDetected = err { throw err }
+                        if case .invalidInfoPlist = err { throw err }
+                        if firstExecError == nil { firstExecError = err }
+                    } catch {
+                        if firstExecError == nil { firstExecError = error }
+                    }
+                }
+                if let chosenExec = resolvedPrimaryExec {
+                    let resolvedChosen = chosenExec.resolvingSymlinksInPath().standardizedFileURL
+                    guard resolvedChosen.path.hasPrefix(bundleResolvedPrefix) else {
+                        throw IPAPackageScannerError.zipSlipDetected(chosenExec.lastPathComponent)
+                    }
+                    resolvedExecPair = (chosenExec, resolvedChosen)
+                } else if !isFrameworkOrGenericBundle {
+                    throw firstExecError ?? IPAPackageScannerError.missingExecutable(fallbackName)
+                }
+            }
+        }
+
+        if resolvedExecPair == nil {
+            // Support `.xcframework`, `Info.plist`-less `.framework` / `.bundle`, and `Info.plist`-less `.app` / `.appex` / `.xpc` bundles containing binaries
+            let stemCandidates: [URL] = [
+                url.appendingPathComponent(bundleStem),
+                url.appendingPathComponent("Versions/Current/\(bundleStem)"),
+                url.appendingPathComponent("Versions/A/\(bundleStem)"),
+                url.appendingPathComponent("Contents/MacOS/\(bundleStem)")
+            ]
+            for cand in stemCandidates {
+                var cStat = stat()
+                guard lstat(cand.path, &cStat) == 0 else { continue }
+                let resolved = cand.resolvingSymlinksInPath().standardizedFileURL
+                guard resolved.path.hasPrefix(bundleResolvedPrefix) else {
+                    throw IPAPackageScannerError.zipSlipDetected(cand.lastPathComponent)
+                }
+                if (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+                    resolvedExecPair = (cand, resolved)
+                    break
+                }
+            }
+            if resolvedExecPair == nil {
+                let discovered = IPAPackageScanner.enumerateCandidateFiles(
+                    in: url,
+                    bundleRootResolvedPrefix: bundleResolvedPrefix,
+                    escapingSymlinks: &escapingSymlinks,
+                    bundleRootURL: url
+                )
+                for item in discovered {
+                    let isRole = IPAPackageScanner.isExpectedEmbeddedBinaryRole(
+                        itemURL: item.logicalURL,
+                        bundleRootResolvedPrefix: bundleResolvedPrefix
+                    )
+                    let (pfx, fsz) = IPAPackageScanner.readMachOHeaderPrefix(of: item.readURL)
+                    if isRole || IPAPackageScanner.isMachOOrFatMagic(pfx, fileSize: fsz) {
+                        resolvedExecPair = (item.logicalURL, item.readURL)
+                        break
+                    }
+                }
+            }
+            if resolvedExecPair == nil {
+                if !escapingSymlinks.isEmpty {
+                    var symInds: [ThreatIndicator] = []
+                    var symMatched: Set<String> = []
+                    IPAPackageScanner.appendEscapingSymlinkIndicators(
+                        escapingSymlinks: escapingSymlinks,
+                        allIndicators: &symInds,
+                        allMatchedSymbols: &symMatched
+                    )
+                    let symEvidence = AuditEvidence(
+                        matchedSymbols: Array(symMatched).sorted(),
+                        linkedDylibs: [],
+                        hasAppGroups: false,
+                        appGroups: [],
+                        installChannel: .developerSideloaded,
+                        cryptid: 0,
+                        isFairPlayEncrypted: false,
+                        escapingSymlinks: escapingSymlinks,
+                        dynamicLoadingPresent: false,
+                        pathEnumerationPresent: false,
+                        remediationGuidance: WQLocale.pick(
+                            en: "Bundle directory contains escaping symbolic links pointing outside bundle boundaries.",
+                            zh: "Bundle 目录包含指向包边界之外的越界符号链接。"
+                        )
+                    )
+                    return ScanFinding(
+                        bundleId: bundleStem,
+                        displayName: bundleStem,
+                        version: "1.0",
+                        teamId: nil,
+                        executablePath: nil,
+                        bundlePath: url.path,
+                        installChannel: .developerSideloaded,
+                        riskTier: .highRisk,
+                        isWhitelisted: false,
+                        whitelistedToolName: nil,
+                        indicators: symInds,
+                        evidence: symEvidence,
+                        scanTimestamp: Date()
+                    )
+                } else if isFrameworkOrGenericBundle || matchedInfoPlistURL != nil {
+                    throw IPAPackageScannerError.missingExecutable(bundleStem)
+                } else {
+                    throw IPAPackageScannerError.invalidInfoPlist(WQLocale.pick(
+                        en: "Missing or invalid Info.plist",
+                        zh: "缺少或无效的 Info.plist"
+                    ))
+                }
+            }
+        }
+
+        let execURL = resolvedExecPair!.logical
+        let execReadURL = resolvedExecPair!.read
         
-        let execData = try Data(contentsOf: execReadURL, options: .mappedIfSafe)
+        let execData = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: execReadURL)
         let mainSlices = try MachOParser.shared.parseAllSlices(data: execData)
-        let details = machoScanner.parseMachO(files: mainSlices, rawData: execData)
+        if infoDict.isEmpty {
+            for slice in MachOParser.selectAuditSlices(from: mainSlices) {
+                if let sPlist = slice.embeddedInfoPlist {
+                    for (k, v) in sPlist where infoDict[k] == nil {
+                        infoDict[k] = v
+                    }
+                }
+            }
+        }
+
+        let pkgTypeUpper = (infoDict["CFBundlePackageType"] as? String)?.uppercased()
+        let isTopLevelXCFramework = (pkgTypeUpper == "XFWK" || infoDict["AvailableLibraries"] != nil || bundleExt == "xcframework")
+        let rawPlistBundleId: String? = isTopLevelXCFramework
+            ? nil
+            : (infoDict["CFBundleIdentifier"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasExplicitPlistBundleId = (rawPlistBundleId != nil && !rawPlistBundleId!.isEmpty)
+        let bundleId = (hasExplicitPlistBundleId ? rawPlistBundleId! : nil) ?? bundleStem
+        let displayName = infoDict["CFBundleDisplayName"] as? String ?? infoDict["CFBundleName"] as? String ?? bundleStem
+        let version = infoDict["CFBundleShortVersionString"] as? String ?? infoDict["CFBundleVersion"] as? String ?? "1.0"
+        let details = machoScanner.parseMachO(
+            files: mainSlices,
+            rawData: execData,
+            expectedContainerSliceCount: mainSlices.first?.slicesInContainer.count
+        )
         
-        let channelResult = ChannelClassifier.classifyBundle(at: url, cryptid: details.cryptid)
+        var codeSigTrust = CSBlobParser.shared.inspectCodeSignatureTrust(fromSlices: mainSlices)
+        if !isTopLevelXCFramework,
+           let plistBindingFailure = CSBlobParser.shared.verifyBundleInfoPlistBinding(
+               fromSlices: mainSlices,
+               infoPlistData: rawInfoPlistData,
+               plistBundleId: hasExplicitPlistBundleId ? bundleId : nil
+           ) {
+            codeSigTrust = plistBindingFailure
+        } else if !isTopLevelXCFramework,
+                  let crSealFailure = CSBlobParser.shared.verifyBundleCodeResourcesSeal(
+                      fromSlices: mainSlices,
+                      bundleURL: url
+                  ) {
+            codeSigTrust = crSealFailure
+        }
+        let mainHasMissingCS = CSBlobParser.hasMissingCodeSignature(inSlices: mainSlices)
+        var bundleSigTrust = codeSigTrust
+        var bundleHasMissingCS = mainHasMissingCS
+        var appHasMissingCS = mainHasMissingCS
+        var channelResult = ChannelClassifier.classifyBundle(
+            at: url,
+            cryptid: details.cryptid,
+            codeSignatureTrust: codeSigTrust
+        )
         var mainAppGroups: [String] = []
+        var mainEntitlementsDict: [String: Any] = [:]
         var entitlementsDict: [String: Any] = [:]
-        for slice in mainSlices {
-            let (_, sliceGroups) = CSBlobParser.shared.extractAppGroups(from: slice.codeSignatureData)
+        for slice in MachOParser.selectAuditSlices(from: mainSlices) {
+            let (_, sliceGroups) = CSBlobParser.shared.extractAppGroups(fromSlice: slice)
             for g in sliceGroups where !mainAppGroups.contains(g) {
                 mainAppGroups.append(g)
             }
-            let sliceEnts = CSBlobParser.shared.parseMergedEntitlements(from: slice.codeSignatureData)
+            let sliceEnts = CSBlobParser.shared.parseMergedEntitlements(fromSlice: slice)
+            mainEntitlementsDict = CSBlobParser.mergeEntitlementDictionaries(mainEntitlementsDict, sliceEnts)
             entitlementsDict = CSBlobParser.mergeEntitlementDictionaries(entitlementsDict, sliceEnts)
         }
+        let identityResolution = IPAPackageScanner.resolveDistinctEntitlementIdentities(
+            fromSlices: mainSlices,
+            explicitTeamId: channelResult.teamIdentifier
+        )
+        let mainEntBundleId = identityResolution.primaryBundleId
+        let effectiveTeamId = channelResult.teamIdentifier ?? identityResolution.inferredTeamId
+        let hasConflictingBundleIdentity = identityResolution.hasMultipleBundleIds
+            || identityResolution.hasMultipleTeamIds
+            || identityResolution.hasProvisionTeamConflict
+            || (hasExplicitPlistBundleId && identityResolution.distinctBundleIds.contains {
+                IPAPackageScanner.doesEntitlementBundleIdConflict(entBundleId: $0, withPlistBundleId: bundleId)
+            })
+        let hasVerifiedBundleIdentity = (hasExplicitPlistBundleId || mainEntBundleId != nil) && !hasConflictingBundleIdentity
         let gating = EntitlementGating.evaluate(hasAppGroups: !mainAppGroups.isEmpty, appGroups: mainAppGroups)
         var combinedAppGroups = gating.appGroups
-        let mainBackgroundModes = infoDict["UIBackgroundModes"] as? [String] ?? []
+        let mainBackgroundModes = IPAPackageScanner.extractFlexibleStringList(infoDict["UIBackgroundModes"])
         
         let context = MachOScanner.ScanContext(
             bundleId: bundleId,
             displayName: displayName,
             version: version,
-            teamId: channelResult.teamIdentifier,
+            teamId: effectiveTeamId,
             bundlePath: url.path,
             executablePath: execURL.path,
             installChannel: channelResult.channel,
-            appGroups: gating.appGroups
+            appGroups: gating.appGroups,
+            disqualifyAppStoreExemption: details.cryptid != 0 && (mainHasMissingCS || codeSigTrust != .appleAppStoreVerified)
         )
         
         var allIndicators: [ThreatIndicator] = []
         var allMatchedSymbols: Set<String> = []
         var allLinkedDylibs: Set<String> = Set(details.linkedDylibs)
-        var unencryptedSymbols: Set<String> = details.isFairPlayEncrypted ? [] : Set(details.symbols)
-        var unencryptedTextStrings: Set<String> = details.isFairPlayEncrypted ? [] : Set(details.textStrings)
-        var hasUnencryptedBinary = !details.isFairPlayEncrypted
+        let mainInspectable = !details.isFairPlayEncrypted || details.hasUnencryptedSegments || codeSigTrust.isDisqualifiedFromAppStore || mainHasMissingCS
+        let mainSymbolsInspectable = mainInspectable || codeSigTrust != .appleAppStoreVerified
+        var unencryptedSymbols: Set<String> = mainSymbolsInspectable ? Set(details.symbols) : []
+        var unencryptedTextStrings: Set<String> = mainInspectable ? Set(details.textStrings) : []
+        var hasUnencryptedBinary = mainInspectable
         var appLinkedDylibs: Set<String> = Set(details.linkedDylibs)
-        var appUnencryptedSymbols: Set<String> = details.isFairPlayEncrypted ? [] : Set(details.symbols)
-        var appHasUnencryptedBinary = !details.isFairPlayEncrypted
+        var appUnencryptedSymbols: Set<String> = mainSymbolsInspectable ? Set(details.symbols) : []
+        var appHasUnencryptedBinary = mainInspectable
         var dynamicLoadingFound = false
         var pathEnumerationFound = false
-        var escapingSymlinks: [String] = []
         
         let mainFinding = machoScanner.scan(details: details, context: context)
         allIndicators.append(contentsOf: mainFinding.indicators)
@@ -212,29 +678,32 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         if mainFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
         if mainFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
         
-        // Discover and scan all embedded *.appex bundles FIRST so combinedAppGroups includes extension App Groups
+        // Discover and scan all embedded *.appex, *.xpc, and nested *.app bundles FIRST so combinedAppGroups includes extension App Groups
         // before evaluating shared Frameworks/* across the .app (R5 D3)
-        let bundleResolvedPath = url.resolvingSymlinksInPath().standardizedFileURL.path
-        let bundleResolvedPrefix = bundleResolvedPath.hasSuffix("/") ? bundleResolvedPath : bundleResolvedPath + "/"
-
-        var appexURLs: [URL] = []
-        if let dirEnum = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey]) {
-            while let candidateURL = dirEnum.nextObject() as? URL {
-                if candidateURL.pathExtension.lowercased() == "appex" {
-                    appexURLs.append(candidateURL)
-                }
-            }
+        var appexDiscoveryEscapes: [String] = []
+        let appexURLs = IPAPackageScanner.discoverEmbeddedExtensions(
+            in: url,
+            bundleRootResolvedPrefix: bundleResolvedPrefix,
+            escapingSymlinks: &appexDiscoveryEscapes,
+            bundleRootURL: url
+        )
+        for esc in appexDiscoveryEscapes where !escapingSymlinks.contains(esc) {
+            escapingSymlinks.append(esc)
         }
-        let appexPrefixes = appexURLs.map { $0.standardizedFileURL.path + "/" }
+        let appexPrefixes = IPAPackageScanner.computeEmbeddedExtensionPrefixes(
+            appexURLs: appexURLs,
+            bundleRootResolvedPrefix: bundleResolvedPrefix
+        )
 
         for itemURL in appexURLs {
             IPAPackageScanner.scanEmbeddedAppex(
                 appexURL: itemURL,
                 rootBundleURL: url,
                 bundleResolvedPrefix: bundleResolvedPrefix,
+                allEmbeddedExtensionPrefixes: appexPrefixes,
                 parentBundleId: bundleId,
                 version: version,
-                teamId: channelResult.teamIdentifier,
+                teamId: effectiveTeamId,
                 installChannel: channelResult.channel,
                 machoScanner: machoScanner,
                 combinedAppGroups: &combinedAppGroups,
@@ -245,35 +714,53 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                 unencryptedSymbols: &unencryptedSymbols,
                 unencryptedTextStrings: &unencryptedTextStrings,
                 hasUnencryptedBinary: &hasUnencryptedBinary,
+                bundleCodeSignatureTrust: &bundleSigTrust,
+                bundleHasMissingCodeSignature: &bundleHasMissingCS,
                 dynamicLoadingFound: &dynamicLoadingFound,
                 pathEnumerationFound: &pathEnumerationFound,
                 escapingSymlinks: &escapingSymlinks
             )
         }
+        if bundleSigTrust.isDisqualifiedFromAppStore && channelResult.channel == .appStore {
+            channelResult = ChannelClassifier.classify(
+                cryptid: details.cryptid,
+                mobileprovisionData: nil,
+                hasMobileProvisionArtifact: false,
+                codeSignatureTrust: bundleSigTrust
+            )
+        }
         
-        // Scan all remaining Mach-O binaries across the .app (identified by magic or binary role, resolving in-bundle symlinks)
+        // Scan all remaining Mach-O binaries across the bundle (identified by magic or binary role, resolving in-bundle symlinks)
         // using combinedAppGroups so frameworks shared with grouped .appex extensions are properly gated
         let mainExecCanonical = execURL.standardizedFileURL.path
         let mainExecResolved = execReadURL.path
+        var enumerationEscapes: [String] = []
         let appCandidates = IPAPackageScanner.enumerateCandidateFiles(
             in: url,
             bundleRootResolvedPrefix: bundleResolvedPrefix,
-            escapingSymlinks: &escapingSymlinks,
+            escapingSymlinks: &enumerationEscapes,
             bundleRootURL: url
         )
+        for esc in enumerationEscapes where !escapingSymlinks.contains(esc) {
+            escapingSymlinks.append(esc)
+        }
         for candidate in appCandidates {
             let itemURL = candidate.logicalURL
             let readURL = candidate.readURL
             let itemCanonical = itemURL.standardizedFileURL.path
             if itemCanonical == mainExecCanonical ||
                itemCanonical == mainExecResolved ||
+               readURL.path == mainExecResolved ||
                appexPrefixes.contains(where: { itemCanonical.hasPrefix($0) }) {
                 continue
             }
             let isDylib = itemURL.pathExtension.lowercased() == "dylib"
-            let isExpectedRole = IPAPackageScanner.isExpectedEmbeddedBinaryRole(itemURL: itemURL)
-            let prefixBytes = IPAPackageScanner.readPrefixBytes(of: readURL, maxBytes: 16) ?? Data()
-            let hasMachOMagic = IPAPackageScanner.isMachOOrFatMagic(prefixBytes)
+            let isExpectedRole = IPAPackageScanner.isExpectedEmbeddedBinaryRole(
+                itemURL: itemURL,
+                bundleRootResolvedPrefix: bundleResolvedPrefix
+            )
+            let (prefixBytes, readFileSize) = IPAPackageScanner.readMachOHeaderPrefix(of: readURL)
+            let hasMachOMagic = IPAPackageScanner.isMachOOrFatMagic(prefixBytes, fileSize: readFileSize)
             guard isExpectedRole || hasMachOMagic else { continue }
 
             let relPath = IPAPackageScanner.bundleRelativePath(of: itemURL, in: url)
@@ -282,7 +769,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                 appLinkedDylibs.insert("@executable_path/\(relPath)")
             }
 
-            guard let dylibData = try? Data(contentsOf: readURL, options: .mappedIfSafe),
+            guard let dylibData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: readURL),
                   let fwSlices = try? MachOParser.shared.parseAllSlices(data: dylibData),
                   !fwSlices.isEmpty else {
                 let corruptInd = IPAPackageScanner.makeCorruptMachOIndicator(relPath: relPath)
@@ -291,23 +778,49 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                 continue
             }
 
-            let fwDetails = machoScanner.parseMachO(files: fwSlices, rawData: dylibData)
+            let fwSigTrust = CSBlobParser.shared.inspectCodeSignatureTrust(fromSlices: fwSlices)
+            let fwHasMissingCS = CSBlobParser.hasMissingCodeSignature(inSlices: fwSlices)
+            if fwHasMissingCS {
+                bundleHasMissingCS = true
+                appHasMissingCS = true
+            }
+            if fwSigTrust != .appleAppStoreVerified {
+                if bundleSigTrust == .appleAppStoreVerified || fwSigTrust.isDisqualifiedFromAppStore {
+                    bundleSigTrust = fwSigTrust
+                }
+            }
+            if fwSigTrust.isDisqualifiedFromAppStore && channelResult.channel == .appStore {
+                channelResult = ChannelClassifier.classify(
+                    cryptid: details.cryptid,
+                    mobileprovisionData: nil,
+                    hasMobileProvisionArtifact: false,
+                    codeSignatureTrust: fwSigTrust
+                )
+            }
+
+            let fwDetails = machoScanner.parseMachO(
+                files: fwSlices,
+                rawData: dylibData,
+                expectedContainerSliceCount: fwSlices.first?.slicesInContainer.count
+            )
             var fwGroups = combinedAppGroups
-            for s in fwSlices {
-                let (_, sg) = CSBlobParser.shared.extractAppGroups(from: s.codeSignatureData)
+            for s in MachOParser.selectAuditSlices(from: fwSlices) {
+                let (_, sg) = CSBlobParser.shared.extractAppGroups(fromSlice: s)
                 for g in sg where !fwGroups.contains(g) { fwGroups.append(g) }
-                let fwEnts = CSBlobParser.shared.parseMergedEntitlements(from: s.codeSignatureData)
+                for g in sg where !combinedAppGroups.contains(g) { combinedAppGroups.append(g) }
+                let fwEnts = CSBlobParser.shared.parseMergedEntitlements(fromSlice: s)
                 entitlementsDict = CSBlobParser.mergeEntitlementDictionaries(entitlementsDict, fwEnts)
             }
             let fwContext = MachOScanner.ScanContext(
                 bundleId: bundleId,
                 displayName: displayName,
                 version: version,
-                teamId: channelResult.teamIdentifier,
+                teamId: effectiveTeamId,
                 bundlePath: url.path,
                 executablePath: itemURL.path,
                 installChannel: channelResult.channel,
-                appGroups: fwGroups
+                appGroups: fwGroups,
+                disqualifyAppStoreExemption: fwDetails.cryptid != 0 && (fwHasMissingCS || fwSigTrust != .appleAppStoreVerified)
             )
             let fwFinding = machoScanner.scan(details: fwDetails, context: fwContext)
             for ind in fwFinding.indicators {
@@ -322,24 +835,33 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             allMatchedSymbols.formUnion(fwFinding.evidence.matchedSymbols)
             allLinkedDylibs.formUnion(fwDetails.linkedDylibs)
             appLinkedDylibs.formUnion(fwDetails.linkedDylibs)
-            if !fwDetails.isFairPlayEncrypted {
+            if !fwDetails.isFairPlayEncrypted || fwDetails.hasUnencryptedSegments || fwSigTrust.isDisqualifiedFromAppStore || fwHasMissingCS {
                 hasUnencryptedBinary = true
                 appHasUnencryptedBinary = true
                 unencryptedSymbols.formUnion(fwDetails.symbols)
                 appUnencryptedSymbols.formUnion(fwDetails.symbols)
                 unencryptedTextStrings.formUnion(fwDetails.textStrings)
+            } else if fwSigTrust != .appleAppStoreVerified {
+                unencryptedSymbols.formUnion(fwDetails.symbols)
+                appUnencryptedSymbols.formUnion(fwDetails.symbols)
             }
             if fwFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
             if fwFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
         }
         
-        // Expanded Local Threat Signatures (propagate all matched threat signatures into allMatchedSymbols so Trojanized bundles can never spoof WhitelistEngine)
+        // Escaping Bundle Symlinks & Expanded Local Threat Signatures (propagate all matched threat signatures into allMatchedSymbols so Trojanized bundles can never spoof WhitelistEngine)
+        IPAPackageScanner.appendEscapingSymlinkIndicators(
+            escapingSymlinks: escapingSymlinks,
+            allIndicators: &allIndicators,
+            allMatchedSymbols: &allMatchedSymbols
+        )
         IPAPackageScanner.appendExpandedThreatIndicators(
             bundleId: bundleId,
             displayName: displayName,
             installChannel: channelResult.channel,
             mainCryptid: details.cryptid,
             mainIsFairPlayEncrypted: details.isFairPlayEncrypted,
+            mainHasUnencryptedSegments: details.hasUnencryptedSegments,
             mainBackgroundModes: mainBackgroundModes,
             infoDict: infoDict,
             entitlementsDict: entitlementsDict,
@@ -350,9 +872,28 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             unencryptedTextStrings: unencryptedTextStrings,
             hasUnencryptedBinary: hasUnencryptedBinary,
             appHasUnencryptedBinary: appHasUnencryptedBinary,
+            codeSignatureTrust: bundleSigTrust,
+            hasMissingCodeSignature: bundleHasMissingCS,
+            appHasMissingCodeSignature: appHasMissingCS,
             allIndicators: &allIndicators,
             allMatchedSymbols: &allMatchedSymbols
         )
+        for candidateEntBid in identityResolution.distinctBundleIds where candidateEntBid.caseInsensitiveCompare(bundleId) != .orderedSame {
+            IPAPackageScanner.appendConflictingIdentityIndicators(
+                conflictingBundleId: candidateEntBid,
+                displayName: displayName,
+                installChannel: channelResult.channel,
+                mainCryptid: details.cryptid,
+                mainIsFairPlayEncrypted: details.isFairPlayEncrypted,
+                mainHasUnencryptedSegments: details.hasUnencryptedSegments,
+                hasUnencryptedBinary: hasUnencryptedBinary,
+                codeSignatureTrust: bundleSigTrust,
+                hasMissingCodeSignature: bundleHasMissingCS,
+                entitlementsDict: entitlementsDict,
+                allIndicators: &allIndicators,
+                allMatchedSymbols: &allMatchedSymbols
+            )
+        }
         
         var provisionalRisk: RiskTier = .safe
         if allIndicators.contains(where: { $0.severity == .highRisk }) {
@@ -360,17 +901,29 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         } else if allIndicators.contains(where: { $0.severity == .caution }) {
             provisionalRisk = .caution
         }
+
+        let isTeamVerifiedForWhitelist: Bool
+        if let effTeam = effectiveTeamId, !effTeam.isEmpty {
+            isTeamVerifiedForWhitelist = (channelResult.teamIdentifier != nil)
+                && !identityResolution.hasMultipleTeamIds
+                && !identityResolution.hasProvisionTeamConflict
+                && !bundleHasMissingCS
+                && (bundleSigTrust != .adHocOrUnsigned)
+        } else {
+            isTeamVerifiedForWhitelist = true
+        }
+        let whitelistTeamId: String? = isTeamVerifiedForWhitelist ? effectiveTeamId : nil
         
         var isWhitelisted = false
         var whitelistedToolName: String? = nil
         var finalRisk = provisionalRisk
         
-        if provisionalRisk == .highRisk || provisionalRisk == .caution {
+        if hasVerifiedBundleIdentity && (provisionalRisk == .highRisk || provisionalRisk == .caution) {
             let wlResult = whitelistEngine.isWhitelisted(
-                bundleId: bundleId,
+                bundleId: hasExplicitPlistBundleId ? bundleId : (mainEntBundleId ?? bundleId),
                 appGroups: combinedAppGroups,
                 matchedSignatures: Array(allMatchedSymbols),
-                teamId: channelResult.teamIdentifier
+                teamId: whitelistTeamId
             )
             if wlResult.isWhitelisted {
                 isWhitelisted = true
@@ -414,14 +967,16 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             escapingSymlinks: escapingSymlinks,
             dynamicLoadingPresent: dynamicLoadingFound,
             pathEnumerationPresent: pathEnumerationFound,
-            remediationGuidance: remediation
+            remediationGuidance: remediation,
+            isWhitelistEligible: hasVerifiedBundleIdentity,
+            isTeamIdWhitelistVerified: isTeamVerifiedForWhitelist
         )
         
         return ScanFinding(
             bundleId: bundleId,
             displayName: displayName,
             version: version,
-            teamId: channelResult.teamIdentifier,
+            teamId: effectiveTeamId,
             executablePath: execURL.path,
             bundlePath: url.path,
             installChannel: channelResult.channel,
@@ -490,12 +1045,31 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         var mergedResults: [ScanFinding] = []
         var correlatedCount = 0
 
+        func canCorrelate(registry reg: ScanFinding, withPackage pkg: ScanFinding) -> Bool {
+            // Never merge a FairPlay-encrypted official App Store installation with an unencrypted local sideload clone
+            if reg.installChannel == .appStore && reg.evidence.isFairPlayEncrypted &&
+               (!pkg.evidence.isFairPlayEncrypted || pkg.installChannel != .appStore) {
+                return false
+            }
+            // Never correlate findings signed by different non-empty developer Team IDs
+            if let rTeam = reg.teamId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               let pTeam = pkg.teamId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rTeam.isEmpty, !pTeam.isEmpty,
+               rTeam.caseInsensitiveCompare(pTeam) != .orderedSame {
+                return false
+            }
+            return true
+        }
+
         func findMatchingPackageIndex(for reg: ScanFinding) -> Int? {
-            if let exactIdx = remainingPackages.firstIndex(where: { $0.bundleId.caseInsensitiveCompare(reg.bundleId) == .orderedSame }) {
+            if let exactIdx = remainingPackages.firstIndex(where: {
+                $0.bundleId.caseInsensitiveCompare(reg.bundleId) == .orderedSame && canCorrelate(registry: reg, withPackage: $0)
+            }) {
                 return exactIdx
             }
             // Handle sideloaders appending personal Team/UDID suffix to original IPA bundleId (e.g. `com.foo.app` -> `com.foo.app.XYZ123`)
             return remainingPackages.firstIndex { pkg in
+                guard canCorrelate(registry: reg, withPackage: pkg) else { return false }
                 let regLower = reg.bundleId.lowercased()
                 let pkgLower = pkg.bundleId.lowercased()
                 let prefixMatch = regLower.hasPrefix(pkgLower + ".") || pkgLower.hasPrefix(regLower + ".")
@@ -517,15 +1091,18 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         // Append remaining local signer packages (not yet installed or when registry snapshot was not loaded)
         mergedResults.append(contentsOf: remainingPackages)
 
-        // Append on-device probe findings if not already covered by Registry or Package findings
+        // Append on-device probe findings if not already covered by a non-safe Registry or Package finding
+        // (a `.safe` decoy IPA or benign snapshot entry must NEVER silence an active `.highRisk`/`.caution` URL-scheme probe hit)
         var addedProbes = 0
         for probe in probeFindings {
             let alreadyCovered = mergedResults.contains { existing in
+                guard existing.riskTier != .safe else { return false }
                 let exLower = existing.bundleId.lowercased()
                 let prLower = probe.bundleId.lowercased()
-                return exLower == prLower
-                    || exLower.hasPrefix(prLower + ".")
-                    || existing.displayName.caseInsensitiveCompare(probe.displayName) == .orderedSame
+                if exLower == prLower || exLower.hasPrefix(prLower + ".") {
+                    return true
+                }
+                return existing.displayName.caseInsensitiveCompare(probe.displayName) == .orderedSame
             }
             if !alreadyCovered {
                 mergedResults.append(probe)
@@ -562,6 +1139,24 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         let mergedSymbols = Array(mergedSymbolSet).sorted()
         let effectiveTeamId = registry.teamId ?? package.teamId
 
+        // Prevent cross-source TeamID lending and unverified TeamID spoofing:
+        // an unsigned/ad-hoc Trojanized IPA (`package.teamId == nil` or `!package.evidence.isTeamIdWhitelistVerified`)
+        // must NEVER borrow or match `registry.teamId` to pass `allowedTeamIds`, nor may an unsigned/unvalidated
+        // registry record borrow `package.teamId`.
+        let verifiedRegTeam = registry.evidence.isTeamIdWhitelistVerified ? registry.teamId : nil
+        let verifiedPkgTeam = package.evidence.isTeamIdWhitelistVerified ? package.teamId : nil
+        let whitelistCandidateTeamId: String?
+        if let rTeam = verifiedRegTeam, let pTeam = verifiedPkgTeam,
+           rTeam.caseInsensitiveCompare(pTeam) == .orderedSame {
+            whitelistCandidateTeamId = rTeam
+        } else if registry.teamId == nil && registry.evidence.isTeamIdWhitelistVerified,
+                  let pTeam = verifiedPkgTeam,
+                  (registry.riskTier != .highRisk || registry.isWhitelisted) {
+            whitelistCandidateTeamId = pTeam
+        } else {
+            whitelistCandidateTeamId = nil
+        }
+
         var provisionalRisk: RiskTier = .safe
         if combinedIndicators.contains(where: { $0.severity == .highRisk }) {
             provisionalRisk = .highRisk
@@ -569,16 +1164,33 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             provisionalRisk = .caution
         }
 
+        let bothWhitelistEligible = registry.evidence.isWhitelistEligible
+            && package.evidence.isWhitelistEligible
+            && package.evidence.escapingSymlinks.isEmpty
+        let hasDistinctPackageBundleId = registry.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare(package.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame
+
         var isKnown = false
         var resolvedToolName: String? = nil
         var finalRisk: RiskTier = provisionalRisk
-        if provisionalRisk == .highRisk || provisionalRisk == .caution {
-            let wl = whitelistEngine.isWhitelisted(
-                bundleId: registry.bundleId,
-                appGroups: mergedAppGroups,
-                matchedSignatures: mergedSymbols,
-                teamId: effectiveTeamId
-            )
+        if bothWhitelistEligible && (provisionalRisk == .highRisk || provisionalRisk == .caution) {
+            let wl: (isWhitelisted: Bool, toolName: String?)
+            if hasDistinctPackageBundleId {
+                wl = whitelistEngine.isWhitelistedForBoth(
+                    primaryBundleId: registry.bundleId,
+                    secondaryBundleId: package.bundleId,
+                    appGroups: mergedAppGroups,
+                    matchedSignatures: mergedSymbols,
+                    teamId: whitelistCandidateTeamId
+                )
+            } else {
+                wl = whitelistEngine.isWhitelisted(
+                    bundleId: registry.bundleId,
+                    appGroups: mergedAppGroups,
+                    matchedSignatures: mergedSymbols,
+                    teamId: whitelistCandidateTeamId
+                )
+            }
             if wl.isWhitelisted {
                 isKnown = true
                 resolvedToolName = wl.toolName
@@ -605,7 +1217,10 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             pathEnumerationPresent: package.evidence.pathEnumerationPresent,
             remediationGuidance: package.evidence.remediationGuidance,
             auditDepth: .fullBinaryAndRegistry,
-            signerIdentity: registry.evidence.signerIdentity ?? package.evidence.signerIdentity
+            signerIdentity: registry.evidence.signerIdentity ?? package.evidence.signerIdentity,
+            correlatedPackageBundleId: hasDistinctPackageBundleId ? package.bundleId : nil,
+            isWhitelistEligible: bothWhitelistEligible,
+            isTeamIdWhitelistVerified: (effectiveTeamId == nil) || (whitelistCandidateTeamId != nil)
         )
 
         return ScanFinding(
@@ -673,13 +1288,20 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         }
 
         // Engine 1B: Fallback to imported/saved snapshot data if live connection wasn't active
-        if registryRecords.isEmpty, let snapData = savedSnapshotData,
-           let parsed = try? InstalledAppRegistryScanner.shared.parseSnapshotData(snapData) {
-            registryRecords = parsed
-            notices.append(WQLocale.pick(
-                en: "Loaded installed-app snapshot (\(parsed.count) app records)",
-                zh: "已加载已安装应用快照（共 \(parsed.count) 款应用记录）"
-            ))
+        if registryRecords.isEmpty, let snapData = savedSnapshotData {
+            do {
+                let parsed = try InstalledAppRegistryScanner.shared.parseSnapshotData(snapData)
+                registryRecords = parsed
+                notices.append(WQLocale.pick(
+                    en: "Loaded installed-app snapshot (\(parsed.count) app records)",
+                    zh: "已加载已安装应用快照（共 \(parsed.count) 款应用记录）"
+                ))
+            } catch {
+                notices.append(WQLocale.pick(
+                    en: "Saved snapshot failed validation (\(error.localizedDescription)); continued with local engines",
+                    zh: "已保存的应用快照校验失败（\(error.localizedDescription)），已继续执行本地扫描引擎"
+                ))
+            }
         }
 
         // Engine 2: Bound Signer Directories & Local Packages
@@ -698,13 +1320,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                     completedCount: completed,
                     totalCount: total
                 ))
-                let ext = url.pathExtension.lowercased()
-                let f: ScanFinding?
-                if ext == "ipa" || ext == "tipa" {
-                    f = try? self.scanIPA(at: url)
-                } else {
-                    f = try? self.scanBundle(at: url)
-                }
+                let f = self.scanTargetOrEmitMalformedFinding(at: url)
                 if let valid = f {
                     items.append(valid)
                 }
@@ -749,6 +1365,169 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
             statusNotice: notices.isEmpty ? nil : notices.joined(separator: " · ")
         )
     }
+
+    /// Synthesizes a fail-closed `.highRisk` `ScanFinding` whenever a discovered or batch-imported `.ipa` / `.tipa` / bundle
+    /// fails structural validation (polyglot/corrupt ZIP headers, Zip-Slip / symlink traps, zip bombs, hollowed bundles, or corrupt Mach-O).
+    public static func makeMalformedPackageFinding(for url: URL, error: Error) -> ScanFinding {
+        let cleanPath = IPAPackageScanner.stripTrailingSlashes(url.path)
+        let fileName = (cleanPath as NSString).lastPathComponent
+        let rawStem = ((fileName as NSString).deletingPathExtension)
+        let sanitizedStem = rawStem.unicodeScalars.map { s -> Character in
+            let v = s.value
+            if (v >= 0x41 && v <= 0x5A) || (v >= 0x61 && v <= 0x7A)
+                || (v >= 0x30 && v <= 0x39) || v == 0x2E || v == 0x2D {
+                return Character(s)
+            }
+            return "-"
+        }
+        let stemStr = String(sanitizedStem).trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        let safeBundleId = "malformed.package.\(stemStr.isEmpty ? "unknown" : stemStr)"
+
+        let signatureTag: String
+        let reasonEn: String
+        let reasonZh: String
+
+        if let ipaErr = error as? IPAPackageScannerError {
+            switch ipaErr {
+            case .zipSlipDetected(let item):
+                signatureTag = "MalformedPackage:ZipSlipOrSymlink"
+                reasonEn = "Hostile path traversal or symbolic-link trap detected in package ('\(item)')."
+                reasonZh = "安装包或目录中检测到恶意的路径穿越 (Zip-Slip) 或符号链接陷阱 ('\(item)')。"
+            case .quotaExceeded(let detail):
+                signatureTag = "MalformedPackage:DecompressionOrSizeBomb"
+                reasonEn = "Package exceeded extraction or size safety quota (possible zip bomb: \(detail))."
+                reasonZh = "安装包超出解压或体积安全配额（疑似压缩炸弹: \(detail)）。"
+            case .corruptHeader(let detail):
+                signatureTag = "MalformedPackage:CorruptArchiveHeader"
+                reasonEn = "Corrupted or polyglot ZIP/IPA header detected (\(detail))."
+                reasonZh = "检测到损坏或畸形拼接 (Polyglot) 的 ZIP/IPA 头部结构 (\(detail))。"
+            case .endOfCentralDirectoryNotFound:
+                signatureTag = "MalformedPackage:MissingOrTruncatedEOCD"
+                reasonEn = "Archive is missing a valid ZIP End of Central Directory (truncated or non-ZIP payload)."
+                reasonZh = "归档包缺失合法的 ZIP 核心目录结束标记 (EOCD)，文件已被截断或伪装后缀。"
+            case .unsupportedCompressionMethod(let method):
+                signatureTag = "MalformedPackage:UnsupportedCompressionMethod"
+                reasonEn = "Archive uses non-standard compression method (ID: \(method)) to evade static extraction."
+                reasonZh = "归档包使用了非标准压缩算法 (ID: \(method))，可能试图规避静态解压审查。"
+            case .encryptedArchiveNotSupported:
+                signatureTag = "MalformedPackage:PasswordEncryptedArchive"
+                reasonEn = "Password-encrypted ZIP/IPA archive conceals payload contents from static inspection."
+                reasonZh = "加密带密码的 ZIP/IPA 压缩包阻断了静态载荷审查。"
+            case .decompressionFailed(let code):
+                signatureTag = "MalformedPackage:DecompressionStreamCorrupt"
+                reasonEn = "Deflate stream failed integrity verification during extraction (zlib code: \(code))."
+                reasonZh = "解压流完整性校验失败（zlib 错误码: \(code)）。"
+            case .invalidArchive(let detail):
+                signatureTag = "MalformedPackage:InvalidOrTamperedArchive"
+                reasonEn = "Structurally tampered or non-standard package archive (\(detail))."
+                reasonZh = "检测到结构篡改或非标准的归档包（如多 .app 夹带或非普通文件: \(detail)）。"
+            case .missingPayload, .missingAppBundle:
+                signatureTag = "MalformedPackage:MissingPayload"
+                reasonEn = "Archive is missing a valid Payload/*.app structure."
+                reasonZh = "归档包缺失合法的 Payload/*.app 目录结构。"
+            case .invalidInfoPlist(let detail):
+                signatureTag = "MalformedPackage:InvalidInfoPlist"
+                reasonEn = "Bundle Info.plist is missing, tampered, or unparseable (\(detail))."
+                reasonZh = "应用包 Info.plist 缺失、被篡改或无法解析 (\(detail))。"
+            case .missingExecutable(let detail):
+                signatureTag = "MalformedPackage:MissingExecutable"
+                reasonEn = "Declared bundle executable is missing or outside bundle bounds (\(detail))."
+                reasonZh = "声明的主可执行文件缺失或越界 (\(detail))。"
+            case .fileNotFound(let detail):
+                signatureTag = "MalformedPackage:UnreadableTarget"
+                reasonEn = "Target package could not be opened safely (\(detail))."
+                reasonZh = "无法安全打开目标包文件 (\(detail))。"
+            }
+        } else if error is MachOParserError {
+            signatureTag = "MalformedPackage:CorruptMachO"
+            reasonEn = "Bundle executable contains a malformed or anti-analysis Mach-O header (\(error.localizedDescription))."
+            reasonZh = "主可执行文件包含畸形或抗分析篡改的 Mach-O 头部结构 (\(error.localizedDescription))。"
+        } else {
+            signatureTag = "MalformedPackage:TamperedOrUnparseable"
+            reasonEn = "Package failed static security verification (\(error.localizedDescription))."
+            reasonZh = "目标包静态安全校验失败 (\(error.localizedDescription))。"
+        }
+
+        let indicator = ThreatIndicator(
+            signature: signatureTag,
+            description: WQLocale.pick(en: reasonEn, zh: reasonZh),
+            category: "Malformed / Hostile Package",
+            location: fileName,
+            severity: .highRisk
+        )
+
+        let evidence = AuditEvidence(
+            matchedSymbols: [signatureTag],
+            linkedDylibs: [],
+            hasAppGroups: false,
+            appGroups: [],
+            installChannel: .developerSideloaded,
+            cryptid: 0,
+            isFairPlayEncrypted: false,
+            escapingSymlinks: signatureTag == "MalformedPackage:ZipSlipOrSymlink" ? [cleanPath] : [],
+            dynamicLoadingPresent: false,
+            pathEnumerationPresent: false,
+            remediationGuidance: WQLocale.pick(
+                en: "Malformed, tampered, or symlink-trapped packages frequently conceal exploit payloads or evade static parsers. Delete this file immediately and do NOT install it.",
+                zh: "畸形、结构篡改或包含符号链接陷阱的安装包常被用于隐藏恶意载荷或绕过静态解析器，请立即删除该文件，严禁安装。"
+            ),
+            auditDepth: .fullBinaryAndRegistry,
+            isWhitelistEligible: false,
+            isTeamIdWhitelistVerified: false
+        )
+
+        return ScanFinding(
+            bundleId: safeBundleId,
+            displayName: fileName,
+            version: "0.0",
+            teamId: nil,
+            executablePath: cleanPath,
+            bundlePath: cleanPath,
+            installChannel: .developerSideloaded,
+            riskTier: .highRisk,
+            isWhitelisted: false,
+            whitelistedToolName: nil,
+            indicators: [indicator],
+            evidence: evidence,
+            scanTimestamp: Date()
+        )
+    }
+
+    private static func isSystemBundleContainerPath(_ path: String) -> Bool {
+        path.hasPrefix("/var/containers/Bundle/Application/")
+            || path.hasPrefix("/private/var/containers/Bundle/Application/")
+            || path.hasPrefix("/var/mobile/Containers/Bundle/Application/")
+    }
+
+    private func scanTargetOrEmitMalformedFinding(at url: URL) -> ScanFinding? {
+        let cleanPath = IPAPackageScanner.stripTrailingSlashes(url.path)
+        let ext = url.pathExtension.lowercased()
+        do {
+            if ext == "ipa" || ext == "tipa" {
+                return try self.scanIPA(at: url)
+            } else {
+                return try self.scanBundle(at: url)
+            }
+        } catch {
+            // Skip ONLY if the entry genuinely disappeared (ENOENT/ENOTDIR on lstat) or hit OS sandbox EACCES/EPERM in system containers
+            var lst = stat()
+            if lstat(cleanPath, &lst) != 0 {
+                let errCode = errno
+                if errCode == ENOENT || errCode == ENOTDIR {
+                    return nil
+                }
+                if (errCode == EACCES || errCode == EPERM) && Self.isSystemBundleContainerPath(cleanPath) {
+                    return nil
+                }
+            } else if Self.isSystemBundleContainerPath(cleanPath) {
+                let nsErr = error as NSError
+                if nsErr.code == NSFileReadNoPermissionError || nsErr.code == Int(EACCES) || nsErr.code == Int(EPERM) {
+                    return nil
+                }
+            }
+            return Self.makeMalformedPackageFinding(for: url, error: error)
+        }
+    }
     
     /// Discovers readable self-signed/sideloaded `.app` bundles and `.ipa`/`.app` packages in Documents & bookmarked signing folders.
     private func discoverAccessibleTargets(additionalLocations: [URL] = []) -> (targets: [URL], permissionDeniedCount: Int) {
@@ -764,33 +1543,140 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         #endif
         
         func isSelfSignedOrSideloadedBundle(_ appURL: URL) -> Bool {
-            // Check embedded.mobileprovision first (present on all developer/personal self-signed & enterprise apps)
-            let provURL = appURL.appendingPathComponent("embedded.mobileprovision")
-            if fm.fileExists(atPath: provURL.path) {
+            let cleanAppPath = IPAPackageScanner.stripTrailingSlashes(appURL.path)
+            var appLst = stat()
+            guard lstat(cleanAppPath, &appLst) == 0 else {
+                return false
+            }
+            let appMode = appLst.st_mode & S_IFMT
+            if appMode == S_IFLNK {
                 return true
             }
-            // Or check Info.plist executable cryptid == 0 (unencrypted sideloaded app)
-            let infoURL = appURL.appendingPathComponent("Info.plist")
-            if let pData = try? Data(contentsOf: infoURL),
-               let dict = (try? PropertyListSerialization.propertyList(from: pData, options: [], format: nil)) as? [String: Any],
-               let execName = dict["CFBundleExecutable"] as? String {
-                let execURL = appURL.appendingPathComponent(execName)
-                if let binData = try? Data(contentsOf: execURL, options: .mappedIfSafe),
-                   let macho = try? MachOParser.shared.parse(data: binData) {
-                    return macho.cryptid == 0
+            guard appMode == S_IFDIR else {
+                return false
+            }
+
+            // 1. Check embedded.mobileprovision via lstat (present on all developer/personal self-signed & enterprise apps)
+            let provPath = (cleanAppPath as NSString).appendingPathComponent("embedded.mobileprovision")
+            var provLst = stat()
+            if lstat(provPath, &provLst) == 0 {
+                return true
+            }
+
+            // 2. Read Info.plist strictly with O_NOFOLLOW; missing/symlink/corrupt Info.plist cannot be an official App Store bundle
+            let infoURL = URL(fileURLWithPath: cleanAppPath, isDirectory: true).appendingPathComponent("Info.plist")
+            guard let pData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: infoURL, maxBytes: 8 * 1024 * 1024),
+                  let dict = (try? PropertyListSerialization.propertyList(from: pData, options: [], format: nil)) as? [String: Any] else {
+                return true
+            }
+
+            // 3. Inspect ALL slices, partial FairPlay, and code-signature trust on the main executable with O_NOFOLLOW
+            let fallbackName = (dict["CFBundleDisplayName"] as? String)
+                ?? (dict["CFBundleName"] as? String)
+                ?? appURL.deletingPathExtension().lastPathComponent
+            guard let (_, execURL) = try? IPAPackageScanner.resolveSafeBundleExecutableURL(
+                infoDict: dict,
+                bundleURL: URL(fileURLWithPath: cleanAppPath, isDirectory: true),
+                fallbackName: fallbackName
+            ),
+            let binData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: execURL),
+            let slices = try? MachOParser.shared.parseAllSlices(data: binData),
+            !slices.isEmpty else {
+                return true
+            }
+
+            let details = self.machoScanner.parseMachO(
+                files: slices,
+                rawData: binData,
+                expectedContainerSliceCount: slices.first?.slicesInContainer.count
+            )
+            if !details.isFairPlayEncrypted || details.hasUnencryptedSegments || details.corruptedSliceCount > 0 {
+                return true
+            }
+            let auditSlices = MachOParser.selectAuditSlices(from: slices)
+            if auditSlices.contains(where: { !$0.isFairPlayEncrypted || $0.hasForgedPlaintextFairPlayRange }) {
+                return true
+            }
+            let sigTrust = CSBlobParser.shared.inspectCodeSignatureTrust(fromSlices: slices)
+            if sigTrust != .appleAppStoreVerified || CSBlobParser.hasMissingCodeSignature(inSlices: slices) {
+                return true
+            }
+            if CSBlobParser.shared.verifyBundleInfoPlistBinding(
+                fromSlices: slices,
+                infoPlistData: pData,
+                plistBundleId: dict["CFBundleIdentifier"] as? String
+            ) != nil {
+                return true
+            }
+
+            let appRootURL = URL(fileURLWithPath: cleanAppPath, isDirectory: true)
+            if CSBlobParser.shared.verifyBundleCodeResourcesSeal(
+                fromSlices: slices,
+                bundleURL: appRootURL
+            ) != nil {
+                return true
+            }
+
+            // 4. Inspect ALL candidate files across the entire bundle (including `Frameworks`, `Dylibs`, `DynamicLibraries`,
+            //    `PlugIns`, `Extensions`, `XPCServices`, `AppClips`, `Watch`, root `*.dylib`, and disguised Mach-Os) so
+            //    dylib-injection or plugin-hijack attacks on an otherwise untouched App Store main binary are never skipped
+            let appResolved = appRootURL.resolvingSymlinksInPath().standardizedFileURL.path
+            let appResolvedPrefix = appResolved.hasSuffix("/") ? appResolved : appResolved + "/"
+            let mainExecCanonical = execURL.standardizedFileURL.path
+            let mainExecResolved = execURL.resolvingSymlinksInPath().standardizedFileURL.path
+            var subEscapes: [String] = []
+            let candidates = IPAPackageScanner.enumerateCandidateFiles(
+                in: appRootURL,
+                bundleRootResolvedPrefix: appResolvedPrefix,
+                escapingSymlinks: &subEscapes,
+                bundleRootURL: appRootURL
+            )
+            if !subEscapes.isEmpty {
+                return true
+            }
+            for cand in candidates {
+                let itemCanonical = cand.logicalURL.standardizedFileURL.path
+                if itemCanonical == mainExecCanonical || itemCanonical == mainExecResolved || cand.readURL.path == mainExecResolved {
+                    continue
+                }
+                if cand.logicalURL.lastPathComponent.lowercased() == "embedded.mobileprovision" {
+                    return true
+                }
+                let isRole = IPAPackageScanner.isExpectedEmbeddedBinaryRole(
+                    itemURL: cand.logicalURL,
+                    bundleRootResolvedPrefix: appResolvedPrefix
+                )
+                let (pfx, fsz) = IPAPackageScanner.readMachOHeaderPrefix(of: cand.readURL)
+                guard isRole || IPAPackageScanner.isMachOOrFatMagic(pfx, fileSize: fsz) else { continue }
+                guard let subData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: cand.readURL),
+                      let subSlices = try? MachOParser.shared.parseAllSlices(data: subData),
+                      !subSlices.isEmpty else {
+                    return true
+                }
+                let subAudit = MachOParser.selectAuditSlices(from: subSlices)
+                if subAudit.contains(where: { $0.hasForgedPlaintextFairPlayRange }) {
+                    return true
+                }
+                if CSBlobParser.shared.inspectCodeSignatureTrust(fromSlices: subSlices) != .appleAppStoreVerified
+                    || CSBlobParser.hasMissingCodeSignature(inSlices: subSlices) {
+                    return true
                 }
             }
             return false
         }
         
         func appendUnique(_ url: URL, requireSelfSignedCheck: Bool = false) {
-            let canonical = url.resolvingSymlinksInPath().path
-            guard !canonical.isEmpty, canonical != selfBundleCanonical else { return }
+            let cleanPath = IPAPackageScanner.stripTrailingSlashes(url.path)
+            guard !cleanPath.isEmpty else { return }
+            var lst = stat()
+            let isSymlink = (lstat(cleanPath, &lst) == 0) && ((lst.st_mode & S_IFMT) == S_IFLNK)
+            let dedupKey = isSymlink ? "symlink:\(cleanPath)" : url.resolvingSymlinksInPath().path
+            guard !dedupKey.isEmpty, dedupKey != selfBundleCanonical else { return }
             if requireSelfSignedCheck && url.pathExtension.lowercased() == "app" {
                 guard isSelfSignedOrSideloadedBundle(url) else { return }
             }
-            if seenCanonicalPaths.insert(canonical).inserted {
-                targets.append(url)
+            if seenCanonicalPaths.insert(dedupKey).inserted {
+                targets.append(isSymlink ? URL(fileURLWithPath: cleanPath) : url)
             }
         }
         
@@ -826,39 +1712,97 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         }
         
         func scanUserDirectory(_ dirURL: URL) {
-            var isDir: ObjCBool = false
+            let cleanDirPath = IPAPackageScanner.stripTrailingSlashes(dirURL.path)
             let ext = dirURL.pathExtension.lowercased()
-            if ext == "ipa" || ext == "tipa" || ext == "app" {
+            if ext == "ipa" || ext == "tipa" || ext == "app" || ext == "appex" || ext == "xpc" || ext == "framework" || ext == "xcframework" || ext == "bundle" {
                 appendUnique(dirURL, requireSelfSignedCheck: false)
                 return
             }
-            guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else {
+            var dirLst = stat()
+            guard lstat(cleanDirPath, &dirLst) == 0, (dirLst.st_mode & S_IFMT) == S_IFDIR else {
                 return
             }
-            if fm.fileExists(atPath: dirURL.appendingPathComponent("Info.plist").path) {
+
+            let rootInfoPath = (cleanDirPath as NSString).appendingPathComponent("Info.plist")
+            var rootInfoLst = stat()
+            let rootIsExtensionlessBundle = (lstat(rootInfoPath, &rootInfoLst) == 0)
+            if rootIsExtensionlessBundle {
                 appendUnique(dirURL, requireSelfSignedCheck: false)
-                return
+                // Do NOT return early: continue walking with POSIX readdir so `.ipa`/`.tipa` archives in `Documents/`
+                // or signer folders can never be hidden behind a decoy `Info.plist` or hidden from CFURLEnumerator as `._*`.
             }
-            guard let enumerator = fm.enumerator(at: dirURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
-                return
-            }
-            while let fileURL = enumerator.nextObject() as? URL {
-                let fExt = fileURL.pathExtension.lowercased()
-                if fExt == "ipa" || fExt == "tipa" {
-                    appendUnique(fileURL, requireSelfSignedCheck: false)
-                } else if fExt == "app" {
-                    appendUnique(fileURL, requireSelfSignedCheck: false)
-                    enumerator.skipDescendants()
-                } else if fExt != "framework" && fExt != "appex" && fExt != "bundle" {
-                    var subIsDir: ObjCBool = false
-                    if fm.fileExists(atPath: fileURL.path, isDirectory: &subIsDir),
-                       subIsDir.boolValue,
-                       fm.fileExists(atPath: fileURL.appendingPathComponent("Info.plist").path) {
-                        appendUnique(fileURL, requireSelfSignedCheck: false)
-                        enumerator.skipDescendants()
+
+            var visitedCount = 0
+            let maxVisited = 20_000
+            let maxDepth = 16
+
+            func walkNoFollow(currentDirPath: String, depth: Int, insideExtensionlessBundle: Bool) {
+                guard depth <= maxDepth, visitedCount < maxVisited, let dp = opendir(currentDirPath) else { return }
+                defer { closedir(dp) }
+
+                var entryNames: [String] = []
+                while let ent = readdir(dp) {
+                    let name = withUnsafeBytes(of: ent.pointee.d_name) { raw -> String in
+                        String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+                    }
+                    if name != "." && name != ".." && name != ".DS_Store" {
+                        entryNames.append(name)
+                    }
+                }
+                entryNames.sort()
+
+                for name in entryNames {
+                    if visitedCount >= maxVisited { break }
+                    visitedCount += 1
+                    let childPath = (currentDirPath as NSString).appendingPathComponent(name)
+                    let childURL = URL(fileURLWithPath: childPath)
+                    var cst = stat()
+                    guard lstat(childPath, &cst) == 0 else { continue }
+                    let mode = cst.st_mode & S_IFMT
+                    let fExt = childURL.pathExtension.lowercased()
+
+                    if name == ".git" && mode == S_IFDIR {
+                        var gitHeadLst = stat()
+                        if lstat((childPath as NSString).appendingPathComponent("HEAD"), &gitHeadLst) == 0 {
+                            continue
+                        }
+                    }
+                    if name.hasPrefix("._") && mode == S_IFREG && IPAPackageScanner.isGenuineAppleDoubleMetadataFile(at: childURL) {
+                        continue
+                    }
+
+                    let isArchiveExt = (fExt == "ipa" || fExt == "tipa")
+                    let isBundleExt = (fExt == "app" || fExt == "appex" || fExt == "xpc" || fExt == "framework" || fExt == "xcframework")
+
+                    if mode == S_IFLNK {
+                        if isArchiveExt || (isBundleExt && !insideExtensionlessBundle) {
+                            appendUnique(childURL, requireSelfSignedCheck: false)
+                        }
+                        continue
+                    }
+
+                    if isArchiveExt {
+                        appendUnique(childURL, requireSelfSignedCheck: false)
+                    } else if mode == S_IFDIR && isBundleExt {
+                        if !insideExtensionlessBundle {
+                            appendUnique(childURL, requireSelfSignedCheck: false)
+                        }
+                    } else if mode == S_IFDIR && fExt != "bundle" {
+                        var childIsExtensionless = insideExtensionlessBundle
+                        if !insideExtensionlessBundle {
+                            let subInfo = (childPath as NSString).appendingPathComponent("Info.plist")
+                            var subInfoLst = stat()
+                            if lstat(subInfo, &subInfoLst) == 0 {
+                                appendUnique(childURL, requireSelfSignedCheck: false)
+                                childIsExtensionless = true
+                            }
+                        }
+                        walkNoFollow(currentDirPath: childPath, depth: depth + 1, insideExtensionlessBundle: childIsExtensionless)
                     }
                 }
             }
+
+            walkNoFollow(currentDirPath: cleanDirPath, depth: 0, insideExtensionlessBundle: rootIsExtensionlessBundle)
         }
         
         #if os(iOS)
@@ -887,10 +1831,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         
         var findings: [ScanFinding] = []
         for targetURL in discovery.targets {
-            let ext = targetURL.pathExtension.lowercased()
-            if (ext == "ipa" || ext == "tipa"), let finding = try? scanIPA(at: targetURL) {
-                findings.append(finding)
-            } else if let finding = try? scanBundle(at: targetURL) {
+            if let finding = scanTargetOrEmitMalformedFinding(at: targetURL) {
                 findings.append(finding)
             }
         }
@@ -945,13 +1886,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                     totalCount: total,
                     currentFinding: nil
                 ))
-                let ext = url.pathExtension.lowercased()
-                let finding: ScanFinding?
-                if ext == "ipa" || ext == "tipa" {
-                    finding = try? self.scanIPA(at: url)
-                } else {
-                    finding = try? self.scanBundle(at: url)
-                }
+                let finding = self.scanTargetOrEmitMalformedFinding(at: url)
                 if let f = finding {
                     results.append(f)
                 }
@@ -981,7 +1916,7 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                 let ext = url.pathExtension.lowercased()
                 if ext == "ipa" || ext == "tipa" {
                     f = try self.scanIPA(at: url)
-                } else if ext == "app" {
+                } else if ext == "app" || ext == "appex" || ext == "xpc" || ext == "framework" || ext == "xcframework" || ext == "bundle" {
                     f = try self.scanBundle(at: url)
                 } else {
                     f = try self.scanBinary(at: url)

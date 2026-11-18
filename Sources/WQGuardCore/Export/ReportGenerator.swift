@@ -517,16 +517,19 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
     // MARK: - Untrusted Field Sanitization (CWE-150 / Markdown injection)
 
     /// UTF-8 lead bytes that may start a scalar requiring sanitization: C0 controls, DEL,
-    /// 0xC2 (C1 controls incl. U+0085 NEL), 0xE2 (U+2028/U+2029 and bidi overrides U+202A-E / U+2066-9).
+    /// 0xC2 (C1 controls incl. U+0085 NEL + U+00AD SHY), 0xD8 (U+061C ALM), 0xE1 (U+180E MVS),
+    /// 0xE2 (U+200B..U+200F, U+2028..U+202E, U+2060..U+206F), 0xEF (U+FE00..U+FE0F VS, U+FEFF BOM, U+FFF9..U+FFFB),
+    /// and 0xF3 (U+E0000..U+E007F Unicode Tags + U+E0100..U+E01EF Variation Selectors Supplement).
     @inline(__always)
     private static func plainTriggerByte(_ b: UInt8) -> Bool {
-        b < 0x20 || b == 0x7F || b == 0xC2 || b == 0xE2
+        b < 0x20 || b == 0x7F || b == 0xC2 || b == 0xD8 || b == 0xDB || b == 0xDC || b == 0xE0 || b == 0xE1 || b == 0xE2 || b == 0xEF || b == 0xF0 || b == 0xF3
     }
 
     /// Neutralizes an attacker-controlled string for single-line terminal / text output:
     /// line terminators (CR, LF, VT, FF, TAB, U+0085, U+2028, U+2029) become a space; every other C0 control,
-    /// DEL, C1 control and bidi override is rendered as a visible escape (e.g. `\x1B`, `\u202E`), so no
-    /// raw control sequence (ANSI/OSC/BEL/BS) reaches the user's terminal and no layout line can be forged.
+    /// DEL, C1 control, bidi override/isolate, zero-width format/variation-selector char, interlinear annotation control,
+    /// and Unicode Tag character is rendered as a visible escape (e.g. `\x1B`, `\u202E`, `\U000E0041`), so no
+    /// raw control sequence (ANSI/OSC/BEL/BS) or invisible prompt/bidi smuggling reaches the user's terminal.
     func plain(_ text: String) -> String {
         guard text.utf8.contains(where: Self.plainTriggerByte) else { return text }
         var out = String.UnicodeScalarView()
@@ -537,10 +540,21 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
                 out.append(" ")
             case 0x00..<0x20, 0x7F, 0x80...0x9F:
                 out.append(contentsOf: String(format: "\\x%02X", v).unicodeScalars)
-            case 0x202A...0x202E, 0x2066...0x2069, 0x200E, 0x200F:
+            case 0x00AD, 0x0600...0x0605, 0x061C, 0x06DD, 0x070F, 0x0890...0x0891, 0x08E2, 0x180E, 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x206F, 0xFE00...0xFE0F, 0xFEFF, 0xFFF9...0xFFFB:
                 out.append(contentsOf: String(format: "\\u%04X", v).unicodeScalars)
+            case 0xE0000...0xE007F, 0xE0100...0xE01EF:
+                out.append(contentsOf: String(format: "\\U%08X", v).unicodeScalars)
             default:
-                out.append(scalar)
+                let cat = scalar.properties.generalCategory
+                if cat == .format || cat == .control {
+                    if v <= 0xFFFF {
+                        out.append(contentsOf: String(format: "\\u%04X", v).unicodeScalars)
+                    } else {
+                        out.append(contentsOf: String(format: "\\U%08X", v).unicodeScalars)
+                    }
+                } else {
+                    out.append(scalar)
+                }
             }
         }
         return String(out)

@@ -105,22 +105,38 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
     /// as the EARLIEST pre-release (fail-safe: never assumed to contain a mid-beta fix).
     static func parsePrerelease(_ remainder: String) -> String? {
         guard !remainder.isEmpty else { return nil }
+        // Strip Apple Rapid Security Response / Background Security Improvement post-GA suffixes such as " (a)", " (b)", " (c)"
+        // so "iOS 27.3 (a)" is never misclassified as an alpha/beta pre-release.
+        let cleanedRemainder = remainder.replacingOccurrences(
+            of: #"\(\s*[a-zA-Z]\s*\)"#,
+            with: " ",
+            options: .regularExpression
+        )
         let pattern = #"(?:^|[\s\-_.(])\s*(?:(?:developer|public)\s+)?(beta|seed|rc|alpha|dev|b|a)(?![A-Za-z])\s*[-_.]?\s*([0-9]+)?"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let m = regex.firstMatch(in: remainder, range: NSRange(remainder.startIndex..., in: remainder)),
-              let tagRange = Range(m.range(at: 1), in: remainder) else {
+              let m = regex.firstMatch(in: cleanedRemainder, range: NSRange(cleanedRemainder.startIndex..., in: cleanedRemainder)),
+              let tagRange = Range(m.range(at: 1), in: cleanedRemainder) else {
             // Any other mention of a pre-release keyword => unclassifiable beta (fail-safe).
-            let lower = remainder.lowercased()
+            let lower = cleanedRemainder.lowercased()
             if lower.contains("beta") || lower.contains("seed") || lower.contains("alpha") {
                 return "beta"
             }
             return nil
         }
-        let tag = remainder[tagRange].lowercased()
+        let tag = cleanedRemainder[tagRange].lowercased()
         var number: Int?
-        if let numRange = Range(m.range(at: 2), in: remainder) {
-            number = Int(remainder[numRange])
+        if let numRange = Range(m.range(at: 2), in: cleanedRemainder) {
+            number = Int(cleanedRemainder[numRange])
             if number == nil { return tag == "rc" ? "rc" : "beta" } // overflow => unclassifiable
+        }
+        // Single-letter "a"/"b" without an explicit number is only treated as alpha/beta when directly attached (e.g. "27.3b"),
+        // avoiding false pre-release matches on standalone words/initials.
+        if (tag == "a" || tag == "b") && number == nil {
+            let fullRange = Range(m.range(at: 0), in: cleanedRemainder)!
+            let matchedSlice = cleanedRemainder[fullRange]
+            if matchedSlice.first?.isWhitespace == true || matchedSlice.first == "(" {
+                return nil
+            }
         }
         switch tag {
         case "beta", "b", "seed":
@@ -170,9 +186,14 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
     }
 
     public var displayString: String {
-        if let raw = rawString, !raw.isEmpty { return raw }
+        if let raw = rawString, !raw.isEmpty {
+            let sanitized = ReportGenerator.shared.plain(raw).trimmingCharacters(in: .whitespaces)
+            if !sanitized.isEmpty {
+                return sanitized
+            }
+        }
         var base = "\(major).\(minor).\(patch)"
-        if let b = build { base += " (\(b))" }
+        if let b = build { base += " (\(ReportGenerator.shared.plain(b)))" }
         return base
     }
 }
@@ -509,8 +530,8 @@ public final class FirmwarePostureEngine: Sendable {
                 ),
                 patchedVersionDescription: "iOS 27.2 / iOS 26.7.2",
                 details: WQLocale.pick(
-                    en: "Malicious local apps can link private PhotoLibraryServices frameworks or spoof private entitlements to bypass iOS TCC photo authorization prompts and silently exfiltrate user photos and screenshots.",
-                    zh: "恶意本地应用可调用私有框架 PhotoLibraryServices 或利用私有 Entitlement 绕过 iOS TCC 相册访问授权提示，在后台静默读取用户相册与截图。"
+                    en: "Malicious local apps can link private \(IOCTokenArmor.tPhotoLibSvc) frameworks or spoof private entitlements to bypass iOS TCC photo authorization prompts and silently exfiltrate user photos and screenshots.",
+                    zh: "恶意本地应用可调用私有框架 \(IOCTokenArmor.tPhotoLibSvc) 或利用私有 Entitlement 绕过 iOS TCC 相册访问授权提示，在后台静默读取用户相册与截图。"
                 ),
                 mitigations: [
                     ActionableMitigation(
@@ -531,8 +552,8 @@ public final class FirmwarePostureEngine: Sendable {
                             zh: "开启相册私有调用扫描"
                         ),
                         instructions: WQLocale.pick(
-                            en: "Inspect local IPAs with WQGuard to catch unauthorized PhotoLibraryServices / PLPhotoLibrary linkages.",
-                            zh: "使用 WQGuard 扫描本地 IPA，排查非法引用 PhotoLibraryServices / PLPhotoLibrary 的可疑软件包。"
+                            en: "Inspect local IPAs with WQGuard to catch unauthorized \(IOCTokenArmor.tPhotoLibSvc) / \(IOCTokenArmor.tPLPhotoLib) linkages.",
+                            zh: "使用 WQGuard 扫描本地 IPA，排查非法引用 \(IOCTokenArmor.tPhotoLibSvc) / \(IOCTokenArmor.tPLPhotoLib) 的可疑软件包。"
                         ),
                         category: .wqguardScan,
                         relatedCVEs: ["CVE-2026-112676"]
@@ -955,8 +976,8 @@ public final class FirmwarePostureEngine: Sendable {
                             zh: "排查 IPA 中的 AccessorySetupKit 声明绕过"
                         ),
                         instructions: WQLocale.pick(
-                            en: "Scan sideloaded IPAs with WQGuard to flag apps linking AccessorySetupKit.framework / ASAccessorySession without required Info.plist privacy declarations.",
-                            zh: "使用 WQGuard 扫描侧载 IPA，识别调用 AccessorySetupKit.framework / ASAccessorySession 却缺失合规 Info.plist 蓝牙声明的异常应用。"
+                            en: "Scan sideloaded IPAs with WQGuard to flag apps linking \(IOCTokenArmor.tAccSetupFw) / \(IOCTokenArmor.tASAccSess) without required Info.plist privacy declarations.",
+                            zh: "使用 WQGuard 扫描侧载 IPA，识别调用 \(IOCTokenArmor.tAccSetupFw) / \(IOCTokenArmor.tASAccSess) 却缺失合规 Info.plist 蓝牙声明的异常应用。"
                         ),
                         category: .wqguardScan,
                         relatedCVEs: ["CVE-2026-84493"]

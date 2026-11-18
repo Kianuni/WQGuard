@@ -15,6 +15,9 @@ public struct AuditEvidence: Codable, Sendable, Equatable {
     public let remediationGuidance: String
     public let auditDepth: AuditDepth
     public let signerIdentity: String?
+    public let correlatedPackageBundleId: String?
+    public let isWhitelistEligible: Bool
+    public let isTeamIdWhitelistVerified: Bool
 
     enum CodingKeys: String, CodingKey {
         case matchedSymbols
@@ -30,6 +33,9 @@ public struct AuditEvidence: Codable, Sendable, Equatable {
         case remediationGuidance
         case auditDepth
         case signerIdentity
+        case correlatedPackageBundleId
+        case isWhitelistEligible
+        case isTeamIdWhitelistVerified
     }
 
     public init(
@@ -45,7 +51,10 @@ public struct AuditEvidence: Codable, Sendable, Equatable {
         pathEnumerationPresent: Bool = false,
         remediationGuidance: String = "",
         auditDepth: AuditDepth = .fullBinaryAndRegistry,
-        signerIdentity: String? = nil
+        signerIdentity: String? = nil,
+        correlatedPackageBundleId: String? = nil,
+        isWhitelistEligible: Bool = true,
+        isTeamIdWhitelistVerified: Bool = true
     ) {
         self.matchedSymbols = matchedSymbols
         self.linkedDylibs = linkedDylibs
@@ -60,6 +69,9 @@ public struct AuditEvidence: Codable, Sendable, Equatable {
         self.remediationGuidance = remediationGuidance
         self.auditDepth = auditDepth
         self.signerIdentity = signerIdentity
+        self.correlatedPackageBundleId = correlatedPackageBundleId
+        self.isWhitelistEligible = isWhitelistEligible
+        self.isTeamIdWhitelistVerified = isTeamIdWhitelistVerified
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,6 +89,9 @@ public struct AuditEvidence: Codable, Sendable, Equatable {
         self.remediationGuidance = try container.decode(String.self, forKey: .remediationGuidance)
         self.auditDepth = try container.decodeIfPresent(AuditDepth.self, forKey: .auditDepth) ?? .fullBinaryAndRegistry
         self.signerIdentity = try container.decodeIfPresent(String.self, forKey: .signerIdentity)
+        self.correlatedPackageBundleId = try container.decodeIfPresent(String.self, forKey: .correlatedPackageBundleId)
+        self.isWhitelistEligible = try container.decodeIfPresent(Bool.self, forKey: .isWhitelistEligible) ?? true
+        self.isTeamIdWhitelistVerified = try container.decodeIfPresent(Bool.self, forKey: .isTeamIdWhitelistVerified) ?? true
     }
 
     /// Generates an empty baseline evidence structure

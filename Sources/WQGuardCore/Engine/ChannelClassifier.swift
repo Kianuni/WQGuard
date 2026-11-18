@@ -6,6 +6,7 @@
 //  Distinguishes between Developer Sideloaded, Enterprise In-House, TestFlight, and App Store.
 //
 
+import Darwin
 import Foundation
 
 /// Classifies application installation channels based on FairPlay DRM encryption (cryptid),
@@ -46,37 +47,146 @@ public enum ChannelClassifier {
             self.details = details
         }
     }
+
+    private static let provisioningProfileMarkerKeys: Set<String> = [
+        "ProvisionsAllDevices",
+        "ProvisionedDevices",
+        "TeamIdentifier",
+        "ApplicationIdentifierPrefix",
+        "Entitlements",
+        "BetaReportsActive",
+        "CreationDate",
+        "ExpirationDate",
+        "UUID"
+    ]
+
+    private static func looksLikeProvisioningPlist(_ dict: [String: Any]) -> Bool {
+        dict.keys.contains { provisioningProfileMarkerKeys.contains($0) }
+    }
+
+    /// Extracts encapsulated PKCS#7 `id-data` (`1.2.840.113549.1.7.1`) OCTET STRING payloads from
+    /// DER or indefinite-length BER CMS `SignedData` containers when present.
+    private static func extractCMSDataPayloads(from rawInput: Data) -> [Data] {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
+        // OID 1.2.840.113549.1.7.1 (pkcs7-data): 06 09 2A 86 48 86 F7 0D 01 07 01
+        let pkcs7DataOID = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01])
+        guard data.count > pkcs7DataOID.count + 4 else { return [] }
+
+        func readBERLength(in buf: Data, at offset: inout Int) -> Int? {
+            guard offset < buf.count else { return nil }
+            let first = buf[offset]
+            offset += 1
+            if (first & 0x80) == 0 {
+                return Int(first)
+            }
+            let numBytes = Int(first & 0x7F)
+            if numBytes == 0 {
+                return -1 // BER indefinite length
+            }
+            guard numBytes <= 4, offset + numBytes <= buf.count else { return nil }
+            var length = 0
+            for _ in 0..<numBytes {
+                length = (length << 8) | Int(buf[offset])
+                offset += 1
+            }
+            return length
+        }
+
+        func appendOctetStringPayload(in buf: Data, at cursor: inout Int, limit: Int, into out: inout Data, depth: Int) -> Bool {
+            guard cursor < limit, depth <= 8, out.count < 16 * 1024 * 1024 else { return false }
+            let tag = buf[cursor]
+            cursor += 1
+            if tag == 0x04 {
+                guard let len = readBERLength(in: buf, at: &cursor), len >= 0, cursor + len <= limit else { return false }
+                if len > 0 {
+                    let take = min(len, 16 * 1024 * 1024 - out.count)
+                    out.append(buf.subdata(in: cursor..<(cursor + take)))
+                }
+                cursor += len
+                return true
+            } else if tag == 0x24 {
+                guard let outerLen = readBERLength(in: buf, at: &cursor) else { return false }
+                let subLimit = outerLen >= 0 ? min(limit, cursor + outerLen) : limit
+                while cursor < subLimit && out.count < 16 * 1024 * 1024 {
+                    if outerLen < 0 && cursor + 1 < subLimit && buf[cursor] == 0x00 && buf[cursor + 1] == 0x00 {
+                        cursor += 2
+                        return true
+                    }
+                    if !appendOctetStringPayload(in: buf, at: &cursor, limit: subLimit, into: &out, depth: depth + 1) {
+                        return false
+                    }
+                }
+                return outerLen >= 0
+            }
+            return false
+        }
+
+        var payloads: [Data] = []
+        var searchFrom = 0
+        while searchFrom < data.count && payloads.count < 128,
+              let oidRange = data.range(of: pkcs7DataOID, options: [], in: searchFrom..<data.count) {
+            searchFrom = oidRange.upperBound
+            var cursor = oidRange.upperBound
+            // Expect [0] EXPLICIT (0xA0)
+            guard cursor < data.count, data[cursor] == 0xA0 else { continue }
+            cursor += 1
+            guard let expLen = readBERLength(in: data, at: &cursor), cursor < data.count else { continue }
+            let expLimit = expLen >= 0 ? min(data.count, cursor + expLen) : data.count
+
+            var assembled = Data()
+            if appendOctetStringPayload(in: data, at: &cursor, limit: expLimit, into: &assembled, depth: 0),
+               !assembled.isEmpty {
+                payloads.append(assembled)
+            }
+        }
+        return payloads
+    }
     
     /// Extracts an embedded XML property list from an Apple `.mobileprovision` CMS signedData blob.
     ///
-    /// Real `.mobileprovision` files are DER-encoded CMS containers wrapping an XML property list.
-    /// This method locates the XML plist payload between `<?xml`/`<plist` and `</plist>` and deserializes it.
-    public static func extractPlist(from mobileprovisionData: Data) -> [String: Any]? {
-        // 1. Direct plist deserialization if already XML/binary plist
-        if let plist = try? PropertyListSerialization.propertyList(from: mobileprovisionData, options: [], format: nil) as? [String: Any] {
+    /// Real `.mobileprovision` files are DER/BER-encoded CMS containers wrapping an XML property list.
+    /// Uses CMS `id-data` extraction followed by comment/CDATA-aware O(N) XML lexical scanning without
+    /// arbitrary 16-candidate caps so neither multi-thousand `</plist>` tokens inside comments/CDATA nor
+    /// decoy `<plist>` wrappers can blind profile extraction or trigger quadratic deserialization.
+    public static func extractPlist(from rawInput: Data) -> [String: Any]? {
+        let mobileprovisionData = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
+        guard !mobileprovisionData.isEmpty else { return nil }
+
+        // 1. Direct plist deserialization if already pure XML/UTF-16/binary plist
+        if let plist = (try? PropertyListSerialization.propertyList(from: mobileprovisionData, options: [], format: nil)) as? [String: Any] {
             return plist
         }
-        
-        // 2. Scan for XML plist tags inside CMS wrapper
-        let startTokens = ["<?xml", "<plist"].compactMap { $0.data(using: .utf8) }
-        guard let endToken = "</plist>".data(using: .utf8) else { return nil }
-        
-        var startOffset: Int? = nil
-        for token in startTokens {
-            if let range = mobileprovisionData.range(of: token) {
-                if startOffset == nil || range.lowerBound < startOffset! {
-                    startOffset = range.lowerBound
+        if let utf8Transcoded = CSBlobParser.transcodeUTF16XMLToUTF8IfNeeded(mobileprovisionData),
+           let dict = try? CSBlobParser.shared.parseXMLPlist(utf8Transcoded), !dict.isEmpty {
+            return dict
+        }
+
+        // 2. Authentic CMS PKCS#7 id-data OCTET STRING payload extraction (DER & nested BER constructed OCTET STRING)
+        var fallbackDict: [String: Any]? = nil
+        for cmsPayload in extractCMSDataPayloads(from: mobileprovisionData) {
+            if let dict = (try? PropertyListSerialization.propertyList(from: cmsPayload, options: [], format: nil)) as? [String: Any] {
+                if looksLikeProvisioningPlist(dict) { return dict }
+                if fallbackDict == nil { fallbackDict = dict }
+            } else if let dict = try? CSBlobParser.shared.parseXMLPlist(cmsPayload), !dict.isEmpty {
+                if looksLikeProvisioningPlist(dict) { return dict }
+                if fallbackDict == nil { fallbackDict = dict }
+            }
+        }
+
+        // 3. Comment/CDATA-aware O(N) XML `<plist>...</plist>` scanner across arbitrary CMS/wrapper bytes (no 16-doc truncation)
+        for docRange in CSBlobParser.scanXMLPlistDocumentRanges(in: mobileprovisionData, maxDocuments: 4096) {
+            let xmlSlice = mobileprovisionData.subdata(in: docRange)
+            if let dict = (try? PropertyListSerialization.propertyList(from: xmlSlice, options: [], format: nil)) as? [String: Any] {
+                if looksLikeProvisioningPlist(dict) {
+                    return dict
+                }
+                if fallbackDict == nil && !dict.isEmpty {
+                    fallbackDict = dict
                 }
             }
         }
-        
-        guard let start = startOffset else { return nil }
-        guard let endRange = mobileprovisionData.range(of: endToken, in: start..<mobileprovisionData.count) else {
-            return nil
-        }
-        
-        let xmlData = mobileprovisionData.subdata(in: start..<endRange.upperBound)
-        return (try? PropertyListSerialization.propertyList(from: xmlData, options: [], format: nil)) as? [String: Any]
+
+        return fallbackDict
     }
     
     /// Classifies an application based on memory metadata.
@@ -86,50 +196,117 @@ public enum ChannelClassifier {
     ///   - mobileprovisionData: Optional raw bytes of `embedded.mobileprovision`.
     ///   - receiptData: Optional raw bytes of `_MASReceipt/receipt` or `StoreKit/receipt`.
     ///   - hasSandboxReceipt: True if `StoreKit/sandboxReceipt` exists in the bundle.
+    ///   - hasMobileProvisionArtifact: True if an `embedded.mobileprovision` entry/file exists in the bundle even when empty, oversized, symlinked, or unreadable.
+    ///   - codeSignatureTrust: Optional cryptographic signature authenticity disposition from Mach-O `LC_CODE_SIGNATURE`.
     /// - Returns: A `ClassificationResult` containing the detected channel and signing metadata.
     public static func classify(
         cryptid: UInt32,
         mobileprovisionData: Data? = nil,
         receiptData: Data? = nil,
-        hasSandboxReceipt: Bool = false
+        hasSandboxReceipt: Bool = false,
+        hasMobileProvisionArtifact: Bool = false,
+        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic
     ) -> ClassificationResult {
         let isEncrypted = (cryptid != 0)
-        let hasProvision = (mobileprovisionData != nil && !mobileprovisionData!.isEmpty)
+        let hasProvision = hasMobileProvisionArtifact || (mobileprovisionData != nil)
         let hasReceipt = (receiptData != nil && !receiptData!.isEmpty) || hasSandboxReceipt
         
         var parsedPlist: [String: Any]? = nil
-        if let data = mobileprovisionData {
+        if let data = mobileprovisionData, !data.isEmpty {
             parsedPlist = extractPlist(from: data)
         }
         
         var isEnterprise = false
+        var hasProvisionedDevices = false
         var teamId: String? = nil
         var teamName: String? = nil
         var profileName: String? = nil
         var hasBetaReportsActive = false
         
         if let plist = parsedPlist {
-            if let allDevices = plist["ProvisionsAllDevices"] as? Bool, allDevices {
+            if (plist["ProvisionsAllDevices"] as? Bool == true) || ((plist["ProvisionsAllDevices"] as? NSNumber)?.boolValue == true) {
                 isEnterprise = true
             }
-            if let teamIds = plist["TeamIdentifier"] as? [String], let first = teamIds.first {
+            if let devs = plist["ProvisionedDevices"] as? [Any], !devs.isEmpty {
+                hasProvisionedDevices = true
+            }
+            let teamCandidates = (plist["TeamIdentifier"] as? [Any] ?? [])
+                .compactMap { $0 as? String }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let prefixCandidates = (plist["ApplicationIdentifierPrefix"] as? [Any] ?? [])
+                .compactMap { $0 as? String }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if let first = teamCandidates.first {
                 teamId = first
-            } else if let appPrefixes = plist["ApplicationIdentifierPrefix"] as? [String], let first = appPrefixes.first {
+            } else if let first = prefixCandidates.first {
                 teamId = first
             }
             teamName = plist["TeamName"] as? String
             profileName = plist["Name"] as? String
-            if let beta = plist["BetaReportsActive"] as? Bool, beta {
+            if (plist["BetaReportsActive"] as? Bool == true) || ((plist["BetaReportsActive"] as? NSNumber)?.boolValue == true) {
                 hasBetaReportsActive = true
             }
             if let entDict = plist["Entitlements"] as? [String: Any],
-               let betaEnt = entDict["beta-reports-active"] as? Bool, betaEnt {
+               ((entDict["beta-reports-active"] as? Bool == true) || ((entDict["beta-reports-active"] as? NSNumber)?.boolValue == true)) {
                 hasBetaReportsActive = true
             }
         }
         
-        // FairPlay Encrypted Binaries (App Store or TestFlight)
+        // FairPlay Encrypted Binaries:
+        // Official App Store releases NEVER ship an `embedded.mobileprovision` file.
+        // Whenever `hasProvision` is true (including malformed/truncated CMS/XML, 0-byte files, profiles omitting
+        // ProvisionedDevices, or escaping/oversized mobileprovision artifacts), fail closed and never classify as .appStore.
         if isEncrypted {
+            if isEnterprise {
+                return ClassificationResult(
+                    channel: .enterpriseInHouse,
+                    teamIdentifier: teamId,
+                    teamName: teamName,
+                    profileName: profileName,
+                    isEnterprise: true,
+                    hasMobileProvision: true,
+                    hasReceipt: hasReceipt,
+                    isFairPlayEncrypted: true,
+                    details: "Enterprise In-House: Encrypted binary re-signed with enterprise provisioning profile (ProvisionsAllDevices: true)."
+                )
+            }
+            if hasProvision {
+                if !codeSignatureTrust.isDisqualifiedFromAppStore && parsedPlist != nil && hasBetaReportsActive && !hasProvisionedDevices {
+                    return ClassificationResult(
+                        channel: .testFlight,
+                        teamIdentifier: teamId,
+                        teamName: teamName,
+                        profileName: profileName,
+                        isEnterprise: false,
+                        hasMobileProvision: true,
+                        hasReceipt: true,
+                        isFairPlayEncrypted: true,
+                        details: "TestFlight Beta: FairPlay DRM encrypted binary (cryptid=1) with valid beta-reports-active provisioning profile."
+                    )
+                }
+                let reason: String
+                if parsedPlist == nil {
+                    reason = "Encrypted binary carries malformed, unreadable, or unparseable embedded.mobileprovision (rejected App Store trust)."
+                } else if hasProvisionedDevices {
+                    reason = "Encrypted binary re-signed with UDID-scoped developer provisioning profile (ProvisionedDevices)."
+                } else {
+                    reason = "Encrypted binary carries non-TestFlight embedded.mobileprovision profile (re-signed or sideloaded bundle)."
+                }
+                return ClassificationResult(
+                    channel: .developerSideloaded,
+                    teamIdentifier: teamId,
+                    teamName: teamName,
+                    profileName: profileName,
+                    isEnterprise: false,
+                    hasMobileProvision: true,
+                    hasReceipt: hasReceipt,
+                    isFairPlayEncrypted: true,
+                    details: "Developer Sideloaded: \(reason)"
+                )
+            }
+
             var isTestFlight = hasSandboxReceipt || hasBetaReportsActive
             if !isTestFlight, let rData = receiptData {
                 let receiptStr = String(decoding: rData, as: UTF8.self).lowercased()
@@ -138,6 +315,37 @@ public enum ChannelClassifier {
                 }
             }
             
+            // Reject forged cryptid!=0 headers carrying CS_ADHOC / empty CMS or non-App-Store X.509 certificate chains
+            switch codeSignatureTrust {
+            case .adHocOrUnsigned:
+                return ClassificationResult(
+                    channel: .developerSideloaded,
+                    teamIdentifier: teamId,
+                    teamName: teamName,
+                    profileName: profileName,
+                    isEnterprise: false,
+                    hasMobileProvision: false,
+                    hasReceipt: hasReceipt,
+                    isFairPlayEncrypted: true,
+                    details: "Developer Sideloaded: Binary header sets cryptid!=0 while CodeDirectory/CMS is ad-hoc or unsigned (rejected App Store trust)."
+                )
+            case .nonAppStoreSigner(let subject):
+                let signerDesc = subject ?? "untrusted X.509 certificate"
+                return ClassificationResult(
+                    channel: .developerSideloaded,
+                    teamIdentifier: teamId,
+                    teamName: teamName,
+                    profileName: profileName,
+                    isEnterprise: false,
+                    hasMobileProvision: false,
+                    hasReceipt: hasReceipt,
+                    isFairPlayEncrypted: true,
+                    details: "Developer Sideloaded: Binary header sets cryptid!=0 while CMS signature is '\(signerDesc)' rather than AppleRootCA-anchored Apple iPhone OS Application Signing."
+                )
+            case .appleAppStoreVerified, .absentOrSynthetic:
+                break
+            }
+
             if isTestFlight {
                 return ClassificationResult(
                     channel: .testFlight,
@@ -145,7 +353,7 @@ public enum ChannelClassifier {
                     teamName: teamName,
                     profileName: profileName,
                     isEnterprise: false,
-                    hasMobileProvision: hasProvision,
+                    hasMobileProvision: false,
                     hasReceipt: true,
                     isFairPlayEncrypted: true,
                     details: "TestFlight Beta: FairPlay DRM encrypted binary (cryptid=1) with sandbox or beta receipt markers."
@@ -157,7 +365,7 @@ public enum ChannelClassifier {
                     teamName: teamName,
                     profileName: profileName,
                     isEnterprise: false,
-                    hasMobileProvision: hasProvision,
+                    hasMobileProvision: false,
                     hasReceipt: hasReceipt,
                     isFairPlayEncrypted: true,
                     details: "App Store: FairPlay DRM encrypted production binary (cryptid=1) released through Apple App Store."
@@ -201,31 +409,60 @@ public enum ChannelClassifier {
     /// - Parameters:
     ///   - bundleURL: The URL of the `.app` bundle directory.
     ///   - cryptid: The encryption identifier parsed from the main executable Mach-O header.
+    ///   - codeSignatureTrust: Optional cryptographic signature authenticity disposition from Mach-O `LC_CODE_SIGNATURE`.
     /// - Returns: A `ClassificationResult`.
     public static func classifyBundle(
         at bundleURL: URL,
-        cryptid: UInt32
+        cryptid: UInt32,
+        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic
     ) -> ClassificationResult {
-        let provURL = bundleURL.appendingPathComponent("embedded.mobileprovision")
-        let provData = try? Data(contentsOf: provURL, options: .mappedIfSafe)
-        
-        let sandboxReceiptURL = bundleURL.appendingPathComponent("StoreKit/sandboxReceipt")
-        let hasSandboxReceipt = FileManager.default.fileExists(atPath: sandboxReceiptURL.path)
-        
-        var receiptData: Data? = nil
-        let masReceiptURL = bundleURL.appendingPathComponent("_MASReceipt/receipt")
-        let storeKitReceiptURL = bundleURL.appendingPathComponent("StoreKit/receipt")
-        if let data = try? Data(contentsOf: masReceiptURL, options: .mappedIfSafe) {
-            receiptData = data
-        } else if let data = try? Data(contentsOf: storeKitReceiptURL, options: .mappedIfSafe) {
-            receiptData = data
+        let bundleResolved = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let bundleResolvedPrefix = bundleResolved.hasSuffix("/") ? bundleResolved : bundleResolved + "/"
+
+        func hasEntryNoFollow(_ relativeSubpath: String) -> Bool {
+            let fullPath = bundleURL.appendingPathComponent(relativeSubpath).path
+            var st = stat()
+            return lstat(fullPath, &st) == 0
         }
+
+        func readInBundleFile(_ relativeSubpath: String, maxBytes: Int = 8 * 1024 * 1024) -> Data? {
+            let comps = relativeSubpath.split(separator: "/").map(String.init)
+            if case .success(let dataOpt) = ContainerScanner.readBoundedRegularFileNoFollow(
+                rootURL: bundleURL,
+                relativeComponents: comps,
+                maxBytes: maxBytes
+            ), let d = dataOpt {
+                return d
+            }
+            // Allow strictly in-bundle symlinked regular files (e.g. versioned bundle layout), never external symlinks,
+            // while still enforcing O_NOFOLLOW | O_NONBLOCK and `maxBytes` on the resolved target.
+            let candidate = bundleURL.appendingPathComponent(relativeSubpath)
+            let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
+            guard resolved.path.hasPrefix(bundleResolvedPrefix) else {
+                return nil
+            }
+            if case .success(let dataOpt) = ContainerScanner.readBoundedRegularFileNoFollow(
+                rootURL: resolved.deletingLastPathComponent(),
+                relativeComponents: [resolved.lastPathComponent],
+                maxBytes: maxBytes
+            ) {
+                return dataOpt
+            }
+            return nil
+        }
+
+        let hasProvArtifact = hasEntryNoFollow("embedded.mobileprovision")
+        let provData = readInBundleFile("embedded.mobileprovision")
+        let hasSandboxReceipt = readInBundleFile("StoreKit/sandboxReceipt", maxBytes: 4 * 1024 * 1024) != nil
+        let receiptData = readInBundleFile("_MASReceipt/receipt") ?? readInBundleFile("StoreKit/receipt")
         
         return classify(
             cryptid: cryptid,
             mobileprovisionData: provData,
             receiptData: receiptData,
-            hasSandboxReceipt: hasSandboxReceipt
+            hasSandboxReceipt: hasSandboxReceipt,
+            hasMobileProvisionArtifact: hasProvArtifact,
+            codeSignatureTrust: codeSignatureTrust
         )
     }
 }

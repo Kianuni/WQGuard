@@ -8,6 +8,7 @@
 
 import Foundation
 import MachO
+import zlib
 
 // MARK: - Mach-O Architecture & CPU Types
 
@@ -436,7 +437,11 @@ public struct MachOFile: Sendable {
     public let encryptionInfo: MachOEncryptionInfo?
     public let linkedDylibs: [MachODylib]
     public let symtab: MachOSymtab?
+    public let symtabs: [MachOSymtab]
     public let codeSignature: MachOCodeSignature?
+    public let codeSignatures: [MachOCodeSignature]
+    public let dynamicImportSymbols: [String]
+    public let entryPointFileOffsets: [Int]
 
     public init(
         magic: UInt32,
@@ -454,7 +459,11 @@ public struct MachOFile: Sendable {
         encryptionInfo: MachOEncryptionInfo?,
         linkedDylibs: [MachODylib],
         symtab: MachOSymtab?,
-        codeSignature: MachOCodeSignature?
+        codeSignature: MachOCodeSignature?,
+        symtabs: [MachOSymtab]? = nil,
+        codeSignatures: [MachOCodeSignature]? = nil,
+        dynamicImportSymbols: [String] = [],
+        entryPointFileOffsets: [Int] = []
     ) {
         self.magic = magic
         self.cpuType = cpuType
@@ -470,8 +479,14 @@ public struct MachOFile: Sendable {
         self.segments = segments
         self.encryptionInfo = encryptionInfo
         self.linkedDylibs = linkedDylibs
-        self.symtab = symtab
-        self.codeSignature = codeSignature
+        let resolvedSymtabs = symtabs ?? (symtab.map { [$0] } ?? [])
+        self.symtabs = resolvedSymtabs
+        self.symtab = symtab ?? resolvedSymtabs.first
+        let resolvedCodeSigs = codeSignatures ?? (codeSignature.map { [$0] } ?? [])
+        self.codeSignatures = resolvedCodeSigs
+        self.codeSignature = resolvedCodeSigs.first(where: { $0.datasize > 0 }) ?? codeSignature ?? resolvedCodeSigs.first
+        self.dynamicImportSymbols = dynamicImportSymbols
+        self.entryPointFileOffsets = entryPointFileOffsets
     }
 
     public var architecture: MachOArchitecture {
@@ -512,7 +527,17 @@ public struct MachOFile: Sendable {
     }
 
     public var symbols: [String] {
-        symtab?.parseSymbols(from: sliceData, is64Bit: is64Bit, isSwapped: isSwapped) ?? []
+        var result: [String] = []
+        var seen: Set<String> = []
+        for st in symtabs {
+            for sym in st.parseSymbols(from: sliceData, is64Bit: is64Bit, isSwapped: isSwapped) where seen.insert(sym).inserted {
+                result.append(sym)
+            }
+        }
+        for sym in dynamicImportSymbols where seen.insert(sym).inserted {
+            result.append(sym)
+        }
+        return result
     }
 
     public func containsSymbol(_ symbolName: String) -> Bool {
@@ -549,11 +574,121 @@ public struct MachOFile: Sendable {
         return sliceData.subdata(in: start..<(start + Int(cs.datasize)))
     }
 
-    /// Extracts Objective-C selector strings from unencrypted `__objc_methname` sections
+    /// Returns raw SuperBlob slices across ALL `LC_CODE_SIGNATURE` load commands in the binary
+    /// so appending a decoy/empty `LC_CODE_SIGNATURE` cannot shadow an earlier signature blob.
+    public var allCodeSignatureData: [Data] {
+        var blobs: [Data] = []
+        for cs in codeSignatures where cs.datasize > 0 {
+            guard UInt64(cs.dataoff) + UInt64(cs.datasize) <= UInt64(sliceData.count) else { continue }
+            let start = sliceData.startIndex + Int(cs.dataoff)
+            blobs.append(sliceData.subdata(in: start..<(start + Int(cs.datasize))))
+        }
+        return blobs
+    }
+
+    /// Detects `LC_ENCRYPTION_INFO` (`cryptid != 0`) paired with an ad-hoc or non-App-Store code signature
+    /// whose `[cryptoff, cryptoff + cryptsize)` bytes contain unencrypted plaintext rather than FairPlay AES ciphertext.
+    internal var hasForgedPlaintextFairPlayRange: Bool {
+        guard isFairPlayEncrypted else { return false }
+        let hasMalformedCSCmd = codeSignatures.contains { cs in
+            cs.datasize < 12 || UInt64(cs.dataoff) + UInt64(cs.datasize) > UInt64(sliceData.count)
+        }
+        let blobs = allCodeSignatureData
+        let sigDisqualified: Bool
+        if hasMalformedCSCmd {
+            sigDisqualified = true
+        } else if blobs.isEmpty {
+            sigDisqualified = CSBlobParser.shared.inspectCodeSignatureTrust(from: codeSignatureData, sliceData: sliceData).isDisqualifiedFromAppStore
+        } else {
+            sigDisqualified = blobs.contains {
+                CSBlobParser.shared.inspectCodeSignatureTrust(from: $0, sliceData: sliceData).isDisqualifiedFromAppStore
+            }
+        }
+        guard sigDisqualified, let er = encryptionInfo?.encryptedRange else {
+            return false
+        }
+        let lo = max(0, min(er.lowerBound, sliceData.count))
+        let hi = max(lo, min(er.upperBound, sliceData.count))
+        let totalLen = hi - lo
+        guard totalLen >= 4 else { return false }
+        if totalLen < 256 {
+            return true
+        }
+
+        return sliceData.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
+
+            func windowEntropy(start: Int, length: Int) -> Double {
+                var counts = [Int](repeating: 0, count: 256)
+                for i in start..<(start + length) {
+                    counts[Int(base[i])] += 1
+                }
+                let invN = 1.0 / Double(length)
+                var ent = 0.0
+                for c in counts where c > 0 {
+                    let p = Double(c) * invN
+                    ent -= p * log2(p)
+                }
+                return ent
+            }
+
+            if totalLen < 4096 {
+                let threshold = totalLen < 1024 ? 7.35 : 7.6
+                return windowEntropy(start: lo, length: totalLen) < threshold
+            }
+
+            let winSize = 4096
+            let maxStart = hi - winSize
+            var candidateStarts: [Int] = []
+            let totalWindows = totalLen / winSize
+            let maxStrided = 256
+            let step = max(1, totalWindows / maxStrided)
+            var idx = 0
+            while idx < totalWindows && candidateStarts.count < maxStrided {
+                candidateStarts.append(lo + idx * winSize)
+                idx += step
+            }
+            if candidateStarts.last != maxStart {
+                candidateStarts.append(maxStart)
+            }
+            for ep in entryPointFileOffsets where ep >= lo && ep < hi {
+                candidateStarts.append(min(max(lo, ep & ~(winSize - 1)), maxStart))
+            }
+            for seg in segments {
+                for sect in seg.sections where sect.size > 0 {
+                    let sName = sect.sectionName
+                    if sName == "__text" || sName == "__cstring" || sName == "__objc_methname" {
+                        if let sOff = Int(exactly: sect.offset), sOff < hi {
+                            let clamped = min(max(lo, sOff), maxStart)
+                            if clamped + winSize <= hi {
+                                candidateStarts.append(clamped)
+                            }
+                        }
+                    }
+                }
+            }
+
+            var checked: Set<Int> = []
+            for wStart in candidateStarts where checked.insert(wStart).inserted {
+                if windowEntropy(start: wStart, length: winSize) < 7.6 {
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    /// Extracts Objective-C selector strings from unencrypted `__objc_methname` sections (or unencrypted sub-ranges
+    /// when a partial `LC_ENCRYPTION_INFO_64` overlaps only part of `__objc_methname`)
     /// so stripped release binaries without `LC_SYMTAB` entries still surface private/sensitive selectors.
     public var objcMethodNames: [String] {
-        guard !isFairPlayEncrypted else { return [] }
-        let encRange = encryptionInfo?.encryptedRange
+        let encRange: Range<Int>?
+        if isFairPlayEncrypted && !hasForgedPlaintextFairPlayRange {
+            guard let range = encryptionInfo?.encryptedRange else { return [] }
+            encRange = range
+        } else {
+            encRange = nil
+        }
         var selectors: [String] = []
 
         for seg in segments {
@@ -566,26 +701,43 @@ public struct MachOFile: Sendable {
                     continue
                 }
                 let sectRange = start..<(start + sizeInt)
-                if let er = encRange, er.overlaps(sectRange) {
-                    continue
+                var unencryptedSubranges: [Range<Int>] = []
+                if let er = encRange {
+                    if er.lowerBound <= sectRange.lowerBound && er.upperBound >= sectRange.upperBound {
+                        continue
+                    }
+                    if sectRange.lowerBound < er.lowerBound {
+                        unencryptedSubranges.append(sectRange.lowerBound..<min(sectRange.upperBound, er.lowerBound))
+                    }
+                    if er.upperBound < sectRange.upperBound {
+                        unencryptedSubranges.append(max(sectRange.lowerBound, er.upperBound)..<sectRange.upperBound)
+                    }
+                } else {
+                    unencryptedSubranges.append(sectRange)
                 }
+
                 sliceData.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress?.advanced(by: start).assumingMemoryBound(to: UInt8.self) else { return }
-                    var cur = 0
-                    while cur < sizeInt && selectors.count < 65_536 {
-                        while cur < sizeInt && base[cur] == 0 {
-                            cur += 1
+                    for subRange in unencryptedSubranges where !subRange.isEmpty {
+                        guard let base = raw.baseAddress?.advanced(by: subRange.lowerBound).assumingMemoryBound(to: UInt8.self) else {
+                            continue
                         }
-                        if cur >= sizeInt { break }
-                        let strStart = cur
-                        while cur < sizeInt && base[cur] != 0 {
-                            cur += 1
-                        }
-                        let len = cur - strStart
-                        if len >= 2 && len <= 512 {
-                            let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: strStart), count: len), as: UTF8.self)
-                            if !s.isEmpty {
-                                selectors.append(s)
+                        let subLen = subRange.count
+                        var cur = 0
+                        while cur < subLen && selectors.count < 65_536 {
+                            while cur < subLen && base[cur] == 0 {
+                                cur += 1
+                            }
+                            if cur >= subLen { break }
+                            let strStart = cur
+                            while cur < subLen && base[cur] != 0 {
+                                cur += 1
+                            }
+                            let len = cur - strStart
+                            if len >= 2 && len <= 512 {
+                                let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: strStart), count: len), as: UTF8.self)
+                                if !s.isEmpty {
+                                    selectors.append(s)
+                                }
                             }
                         }
                     }
@@ -593,6 +745,57 @@ public struct MachOFile: Sendable {
             }
         }
         return selectors
+    }
+
+    /// Extracts an embedded `__info_plist` section (`-sectcreate __TEXT __info_plist`) from unencrypted section bytes
+    /// so standalone Mach-O executables/helpers/dylibs carry full `Info.plist` metadata into threat evaluation.
+    public var embeddedInfoPlist: [String: Any]? {
+        let encRange: Range<Int>?
+        if isFairPlayEncrypted {
+            guard let range = encryptionInfo?.encryptedRange else { return nil }
+            encRange = range
+        } else {
+            encRange = nil
+        }
+
+        for seg in segments {
+            for sect in seg.sections where sect.sectionName == "__info_plist" && sect.size > 0 {
+                let start = Int(sect.offset)
+                guard let sizeInt = Int(exactly: sect.size),
+                      sizeInt <= 8 * 1024 * 1024,
+                      start >= 0, sizeInt > 0,
+                      start <= sliceData.count,
+                      sizeInt <= sliceData.count - start else {
+                    continue
+                }
+                let sectRange = start..<(start + sizeInt)
+                var candidateSlices: [Range<Int>] = []
+                if let er = encRange {
+                    if er.lowerBound <= sectRange.lowerBound && er.upperBound >= sectRange.upperBound {
+                        continue
+                    }
+                    if sectRange.lowerBound < er.lowerBound {
+                        candidateSlices.append(sectRange.lowerBound..<min(sectRange.upperBound, er.lowerBound))
+                    }
+                    if er.upperBound < sectRange.upperBound {
+                        candidateSlices.append(max(sectRange.lowerBound, er.upperBound)..<sectRange.upperBound)
+                    }
+                } else {
+                    candidateSlices.append(sectRange)
+                }
+
+                for r in candidateSlices where !r.isEmpty {
+                    let rawPlist = sliceData.subdata(in: r)
+                    if let dict = (try? PropertyListSerialization.propertyList(from: rawPlist, options: [], format: nil)) as? [String: Any] {
+                        return dict
+                    }
+                    if let dict = try? CSBlobParser.shared.parseXMLPlist(rawPlist), !dict.isEmpty {
+                        return dict
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     private static let excludedCustomRXSectionPrefixes: [String] = [
@@ -655,7 +858,7 @@ public struct MachOFile: Sendable {
         }
 
         let encRange: Range<Int>?
-        if isFairPlayEncrypted {
+        if isFairPlayEncrypted && !hasForgedPlaintextFairPlayRange {
             guard let range = encryptionInfo?.encryptedRange else {
                 return (0, [])
             }
@@ -668,6 +871,7 @@ public struct MachOFile: Sendable {
         let sampleLimit = max(0, maxSampleSites)
         var totalCount = 0
         var sampleSites: [DirectSyscallSite] = []
+        var recordedOffsets: Set<Int> = []
         let headerSize = is64Bit ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
         let commandsEnd = min(sliceData.count, headerSize + Int(sizeofcmds))
 
@@ -686,7 +890,7 @@ public struct MachOFile: Sendable {
                     continue
                 }
 
-                if insn == 0xD400_1001 {
+                if insn == 0xD400_1001, recordedOffsets.insert(wordOffset).inserted {
                     totalCount += 1
                     if sampleSites.count < sampleLimit {
                         sampleSites.append(DirectSyscallSite(
@@ -702,7 +906,8 @@ public struct MachOFile: Sendable {
         }
 
         for seg in segments {
-            for sect in seg.sections where Self.shouldScanSectionForDirectSyscalls(sect, in: seg, sliceSize: sliceData.count) {
+            let segFileStart = seg.fileOffset <= UInt64(sliceData.count) ? Int(seg.fileOffset) : 0
+            for sect in seg.sections {
                 guard let start = Int(exactly: sect.offset),
                       let sizeInt = Int(exactly: sect.size),
                       sizeInt >= 4,
@@ -711,16 +916,46 @@ public struct MachOFile: Sendable {
                       sizeInt <= sliceData.count - start else {
                     continue
                 }
+                let sectEnd = start + sizeInt
+                let containsEntryPoint = entryPointFileOffsets.contains { $0 >= start && $0 < sectEnd }
+                guard containsEntryPoint || Self.shouldScanSectionForDirectSyscalls(sect, in: seg, sliceSize: sliceData.count) else {
+                    continue
+                }
                 scanWordRange(start: start, sizeInt: sizeInt, segName: seg.name, sectName: sect.sectionName, baseVA: sect.address)
+                // Defeat unaligned section-header phase-shifting (e.g. sect.offset = 0x401 hiding 4-byte-aligned svc #0x80 at 0x404)
+                if start >= segFileStart {
+                    let rem = (start - segFileStart) % 4
+                    if rem != 0 {
+                        let alignedStart = start + (4 - rem)
+                        if alignedStart <= sectEnd - 4 {
+                            let alignedVA = seg.vmAddress &+ UInt64(alignedStart - segFileStart)
+                            scanWordRange(
+                                start: alignedStart,
+                                sizeInt: sectEnd - alignedStart,
+                                segName: seg.name,
+                                sectName: sect.sectionName,
+                                baseVA: alignedVA
+                            )
+                        }
+                    }
+                }
             }
 
-            // Also scan executable segment file bytes [fileOffset, fileOffset + fileSize) not covered by any section header
-            // (defeating header-padding code caves and nsects=0 executable segments while respecting metadata sections).
-            if (seg.initialProtection & 0x04) != 0 && seg.fileSize > 0 && seg.fileOffset < UInt64(sliceData.count) {
-                let segStart = Int(seg.fileOffset)
-                let (rawSegEnd, segOv) = seg.fileOffset.addingReportingOverflow(seg.fileSize)
-                let clampedEnd64 = segOv ? UInt64(sliceData.count) : min(rawSegEnd, UInt64(sliceData.count))
-                let segEnd = Int(clampedEnd64)
+            // Also scan executable segment file bytes [fileOffset, fileOffset + fileSize) not covered by any valid in-bounds section header
+            // (defeating header-padding code caves, OOB fake section headers, and nsects=0 executable segments while respecting metadata sections).
+            let segStartCandidate = seg.fileOffset < UInt64(sliceData.count) ? Int(seg.fileOffset) : sliceData.count
+            let (rawSegEnd, segOv) = seg.fileOffset.addingReportingOverflow(seg.fileSize)
+            let clampedEnd64 = segOv ? UInt64(sliceData.count) : min(rawSegEnd, UInt64(sliceData.count))
+            let segEndCandidate = Int(clampedEnd64)
+            let hasEntryPointInSegment = segEndCandidate > segStartCandidate && entryPointFileOffsets.contains {
+                $0 >= segStartCandidate && $0 < segEndCandidate
+            }
+            let isExecutableOrEntrySegment = ((seg.initialProtection & 0x04) != 0)
+                || (((seg.maxProtection & 0x04) != 0) && hasEntryPointInSegment)
+
+            if isExecutableOrEntrySegment && seg.fileSize > 0 && seg.fileOffset < UInt64(sliceData.count) {
+                let segStart = segStartCandidate
+                let segEnd = segEndCandidate
                 guard segEnd - segStart >= 4 else { continue }
 
                 var covered: [(Int, Int)] = []
@@ -734,9 +969,10 @@ public struct MachOFile: Sendable {
                         continue
                     }
                     guard sect.size > 0, UInt64(sect.offset) < UInt64(segEnd) else { continue }
-                    let cStart = max(segStart, Int(sect.offset))
                     let (rawCEnd, cOv) = UInt64(sect.offset).addingReportingOverflow(sect.size)
-                    let cEnd = cOv ? segEnd : Int(min(rawCEnd, UInt64(segEnd)))
+                    let clampedCEnd = cOv ? UInt64(segEnd) : min(rawCEnd, UInt64(segEnd))
+                    let cStart = max(segStart, Int(sect.offset))
+                    let cEnd = Int(clampedCEnd)
                     if cEnd > cStart {
                         covered.append((cStart, cEnd))
                     }
@@ -825,9 +1061,9 @@ public final class MachOParser: Sendable {
         try Self.extractSlice(from: data, slice: slice)
     }
 
-    /// Parses a Mach-O file from a local filesystem URL in 100% read-only mode using memory mapping.
+    /// Parses a Mach-O file from a local filesystem URL in 100% read-only mode with strict `O_NOFOLLOW` regular-file verification.
     public static func parse(url: URL, preferredCpuType: cpu_type_t? = nil) throws -> MachOFile {
-        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        let data = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: url)
         return try parse(data: data, preferredCpuType: preferredCpuType)
     }
 
@@ -852,7 +1088,7 @@ public final class MachOParser: Sendable {
         if isFat32BE || isFat32LE || isFat64BE || isFat64LE {
             let isFat64 = isFat64BE || isFat64LE
             let fatSwapped = isFat32BE || isFat64BE
-            let slices = try parseFatSlices(reader: reader, isFat64: isFat64, swapped: fatSwapped)
+            let slices = try parseFatSlices(reader: reader, isFat64: isFat64, swapped: fatSwapped, allowOutOfBoundsEntries: true)
             guard !slices.isEmpty else {
                 throw MachOParserError.fatBinaryEmpty
             }
@@ -862,11 +1098,19 @@ public final class MachOParser: Sendable {
             for slice in slices {
                 guard slice.offset <= UInt64(data.count),
                       slice.size <= UInt64(data.count) - slice.offset else {
-                    throw MachOParserError.sliceOutOfBounds(offset: slice.offset, size: slice.size, total: data.count)
+                    if firstError == nil {
+                        firstError = MachOParserError.sliceOutOfBounds(offset: slice.offset, size: slice.size, total: data.count)
+                    }
+                    continue
                 }
                 let sliceSubdata = data.subdata(in: Int(slice.offset)..<Int(slice.offset + slice.size))
                 do {
                     let file = try parseThinSlice(sliceData: sliceSubdata, containerSlices: slices)
+                    guard file.cpuType == slice.cpuType else {
+                        throw MachOParserError.corruptedFatHeader(
+                            reason: "FAT slice cpuType (\(slice.cpuType)) disagrees with thin Mach-O header cpuType (\(file.cpuType))"
+                        )
+                    }
                     parsedFiles.append(file)
                 } catch {
                     if firstError == nil { firstError = error }
@@ -914,7 +1158,13 @@ public final class MachOParser: Sendable {
             }
 
             let sliceSubdata = data.subdata(in: Int(chosenSlice.offset)..<Int(chosenSlice.offset + chosenSlice.size))
-            return try parseThinSlice(sliceData: sliceSubdata, containerSlices: slices)
+            let file = try parseThinSlice(sliceData: sliceSubdata, containerSlices: slices)
+            guard file.cpuType == chosenSlice.cpuType else {
+                throw MachOParserError.corruptedFatHeader(
+                    reason: "FAT slice cpuType (\(chosenSlice.cpuType)) disagrees with thin Mach-O header cpuType (\(file.cpuType))"
+                )
+            }
+            return file
         }
 
         // Parse Thin Mach-O binary
@@ -979,7 +1229,12 @@ public final class MachOParser: Sendable {
 
     // MARK: - Internal Helpers
 
-    private static func parseFatSlices(reader: BinaryReader, isFat64: Bool, swapped: Bool) throws -> [MachOSliceInfo] {
+    private static func parseFatSlices(
+        reader: BinaryReader,
+        isFat64: Bool,
+        swapped: Bool,
+        allowOutOfBoundsEntries: Bool = false
+    ) throws -> [MachOSliceInfo] {
         guard reader.count >= 8 else {
             throw MachOParserError.truncatedHeader(expected: 8, actual: reader.count)
         }
@@ -1038,8 +1293,10 @@ public final class MachOParser: Sendable {
                 align = al
             }
 
-            guard offset <= UInt64(reader.count), size <= UInt64(reader.count) - offset else {
-                throw MachOParserError.sliceOutOfBounds(offset: offset, size: size, total: reader.count)
+            if !allowOutOfBoundsEntries {
+                guard offset <= UInt64(reader.count), size <= UInt64(reader.count) - offset else {
+                    throw MachOParserError.sliceOutOfBounds(offset: offset, size: size, total: reader.count)
+                }
             }
 
             slices.append(MachOSliceInfo(
@@ -1150,10 +1407,15 @@ public final class MachOParser: Sendable {
 
         var cursor = headerSize
         var segments: [MachOSegment] = []
-        var encryptionInfo: MachOEncryptionInfo? = nil
+        var encryptionInfos: [MachOEncryptionInfo] = []
         var linkedDylibs: [MachODylib] = []
-        var symtab: MachOSymtab? = nil
-        var codeSignature: MachOCodeSignature? = nil
+        var symtabs: [MachOSymtab] = []
+        var codeSignatures: [MachOCodeSignature] = []
+        var dynamicImportSymbols: [String] = []
+        var dynamicSymSet: Set<String> = []
+        var deferredDyldBinds: [(offset: Int, size: Int, isLazy: Bool)] = []
+        var lcMainEntryOffsets: [UInt64] = []
+        var unixThreadEntryVAs: [UInt64] = []
 
         for _ in 0..<ncmds {
             guard cursor + minCommandSize <= commandsEnd else {
@@ -1175,6 +1437,9 @@ public final class MachOParser: Sendable {
 
             switch cmd {
             case UInt32(LC_SEGMENT_64):
+                guard is64 else {
+                    throw MachOParserError.malformedCommand(cmd: cmd, reason: "LC_SEGMENT_64 is invalid inside a 32-bit Mach-O header")
+                }
                 guard cmdsize >= MemoryLayout<segment_command_64>.size else {
                     throw MachOParserError.invalidCommandSize(cmd: cmd, cmdsize: cmdsize, offset: cmdStart)
                 }
@@ -1232,6 +1497,9 @@ public final class MachOParser: Sendable {
                 ))
 
             case UInt32(LC_SEGMENT):
+                guard !is64 else {
+                    throw MachOParserError.malformedCommand(cmd: cmd, reason: "LC_SEGMENT is invalid inside a 64-bit Mach-O header")
+                }
                 guard cmdsize >= MemoryLayout<segment_command>.size else {
                     throw MachOParserError.invalidCommandSize(cmd: cmd, cmdsize: cmdsize, offset: cmdStart)
                 }
@@ -1289,34 +1557,40 @@ public final class MachOParser: Sendable {
                 ))
 
             case UInt32(LC_ENCRYPTION_INFO_64):
+                guard is64 else {
+                    throw MachOParserError.malformedCommand(cmd: cmd, reason: "LC_ENCRYPTION_INFO_64 is invalid inside a 32-bit Mach-O header")
+                }
                 guard cmdsize >= MemoryLayout<encryption_info_command_64>.size else {
                     throw MachOParserError.invalidCommandSize(cmd: cmd, cmdsize: cmdsize, offset: cmdStart)
                 }
                 let cryptoff = reader.readUInt32(at: cmdStart + 8, swapped: isSwapped) ?? 0
                 let cryptsize = reader.readUInt32(at: cmdStart + 12, swapped: isSwapped) ?? 0
                 let cryptid = reader.readUInt32(at: cmdStart + 16, swapped: isSwapped) ?? 0
-                encryptionInfo = MachOEncryptionInfo(
+                encryptionInfos.append(MachOEncryptionInfo(
                     cryptoff: cryptoff,
                     cryptsize: cryptsize,
                     cryptid: cryptid,
                     is64Bit: true
-                )
+                ))
 
             case UInt32(LC_ENCRYPTION_INFO):
+                guard !is64 else {
+                    throw MachOParserError.malformedCommand(cmd: cmd, reason: "LC_ENCRYPTION_INFO is invalid inside a 64-bit Mach-O header")
+                }
                 guard cmdsize >= MemoryLayout<encryption_info_command>.size else {
                     throw MachOParserError.invalidCommandSize(cmd: cmd, cmdsize: cmdsize, offset: cmdStart)
                 }
                 let cryptoff = reader.readUInt32(at: cmdStart + 8, swapped: isSwapped) ?? 0
                 let cryptsize = reader.readUInt32(at: cmdStart + 12, swapped: isSwapped) ?? 0
                 let cryptid = reader.readUInt32(at: cmdStart + 16, swapped: isSwapped) ?? 0
-                encryptionInfo = MachOEncryptionInfo(
+                encryptionInfos.append(MachOEncryptionInfo(
                     cryptoff: cryptoff,
                     cryptsize: cryptsize,
                     cryptid: cryptid,
                     is64Bit: false
-                )
+                ))
 
-            case UInt32(LC_LOAD_DYLIB), UInt32(LC_LOAD_WEAK_DYLIB), UInt32(LC_REEXPORT_DYLIB), UInt32(LC_LOAD_UPWARD_DYLIB):
+            case UInt32(LC_LOAD_DYLIB), UInt32(LC_LOAD_WEAK_DYLIB), UInt32(LC_REEXPORT_DYLIB), UInt32(LC_LAZY_LOAD_DYLIB), UInt32(LC_LOAD_UPWARD_DYLIB):
                 guard cmdsize >= MemoryLayout<dylib_command>.size else {
                     throw MachOParserError.invalidCommandSize(cmd: cmd, cmdsize: cmdsize, offset: cmdStart)
                 }
@@ -1359,7 +1633,7 @@ public final class MachOParser: Sendable {
                     throw MachOParserError.stringTableOutOfBounds(offset: stroff, size: strsize, total: reader.count)
                 }
 
-                symtab = MachOSymtab(symoff: symoff, nsyms: nsyms, stroff: stroff, strsize: strsize)
+                symtabs.append(MachOSymtab(symoff: symoff, nsyms: nsyms, stroff: stroff, strsize: strsize))
 
             case UInt32(LC_CODE_SIGNATURE):
                 guard cmdsize >= MemoryLayout<linkedit_data_command>.size else {
@@ -1372,7 +1646,45 @@ public final class MachOParser: Sendable {
                     throw MachOParserError.codeSignatureOutOfBounds(offset: dataoff, size: datasize, total: reader.count)
                 }
 
-                codeSignature = MachOCodeSignature(dataoff: dataoff, datasize: datasize)
+                codeSignatures.append(MachOCodeSignature(dataoff: dataoff, datasize: datasize))
+
+            case 0x8000_0034: // LC_DYLD_CHAINED_FIXUPS
+                if cmdsize >= MemoryLayout<linkedit_data_command>.size,
+                   let dataoff = reader.readUInt32(at: cmdStart + 8, swapped: isSwapped),
+                   let datasize = reader.readUInt32(at: cmdStart + 12, swapped: isSwapped),
+                   datasize >= 28,
+                   UInt64(dataoff) + UInt64(datasize) <= UInt64(reader.count) {
+                    let syms = Self.parseChainedFixupImports(reader: reader, dataoff: Int(dataoff), datasize: Int(datasize), isSwapped: isSwapped)
+                    for s in syms where dynamicSymSet.insert(s).inserted {
+                        dynamicImportSymbols.append(s)
+                    }
+                }
+
+            case 0x0000_0022, 0x8000_0022: // LC_DYLD_INFO, LC_DYLD_INFO_ONLY
+                if cmdsize >= 48 {
+                    let bindRanges: [(UInt32, UInt32, Bool)] = [
+                        (reader.readUInt32(at: cmdStart + 16, swapped: isSwapped) ?? 0, reader.readUInt32(at: cmdStart + 20, swapped: isSwapped) ?? 0, false), // bind
+                        (reader.readUInt32(at: cmdStart + 24, swapped: isSwapped) ?? 0, reader.readUInt32(at: cmdStart + 28, swapped: isSwapped) ?? 0, false), // weak_bind
+                        (reader.readUInt32(at: cmdStart + 32, swapped: isSwapped) ?? 0, reader.readUInt32(at: cmdStart + 36, swapped: isSwapped) ?? 0, true)   // lazy_bind (random-access)
+                    ]
+                    for (off, sz, isLazy) in bindRanges where sz > 0 && UInt64(off) + UInt64(sz) <= UInt64(reader.count) {
+                        deferredDyldBinds.append((offset: Int(off), size: Int(sz), isLazy: isLazy))
+                    }
+                }
+
+            case 0x8000_0028: // LC_MAIN
+                if cmdsize >= 24, let entryoff = reader.readUInt64(at: cmdStart + 8, swapped: isSwapped) {
+                    lcMainEntryOffsets.append(entryoff)
+                }
+
+            case 0x0000_0005: // LC_UNIXTHREAD
+                // ARM_THREAD_STATE64: flavor = 6, count = 68 (u32 words), pc at offset +16 + 32*8 = +272
+                if (cpuType == CPU_TYPE_ARM64 || cpuType == CPU_TYPE_ARM64_32),
+                   cmdsize >= 280,
+                   reader.readUInt32(at: cmdStart + 8, swapped: isSwapped) == 6,
+                   let pc = reader.readUInt64(at: cmdStart + 272, swapped: isSwapped) {
+                    unixThreadEntryVAs.append(pc)
+                }
 
             default:
                 break
@@ -1380,6 +1692,56 @@ public final class MachOParser: Sendable {
 
             cursor += Int(cmdsize)
         }
+
+        if !deferredDyldBinds.isEmpty {
+            let hasLazy = deferredDyldBinds.contains(where: { $0.isLazy })
+            let stubOffsets: [Int] = hasLazy ? Self.extractStubHelperLazyBindOffsets(
+                segments: segments,
+                reader: reader,
+                cpuType: cpuType,
+                isSwapped: isSwapped
+            ) : []
+            for bindEntry in deferredDyldBinds {
+                let syms = Self.parseDyldBindSymbols(
+                    reader: reader,
+                    offset: bindEntry.offset,
+                    size: bindEntry.size,
+                    isLazyBind: bindEntry.isLazy,
+                    stubHelperOffsets: bindEntry.isLazy ? stubOffsets : []
+                )
+                for s in syms where dynamicSymSet.insert(s).inserted {
+                    dynamicImportSymbols.append(s)
+                }
+            }
+        }
+
+        let resolvedEncryptionInfo = Self.resolveEncryptionInfo(from: encryptionInfos, is64Bit: is64)
+
+        var entryPointFileOffsets: [Int] = []
+        let textFileBase = segments.first(where: { $0.name == "__TEXT" })?.fileOffset ?? 0
+        for relEntry in lcMainEntryOffsets {
+            let (absOff, ov) = textFileBase.addingReportingOverflow(relEntry)
+            if !ov, absOff < UInt64(sliceData.count), let intOff = Int(exactly: absOff) {
+                entryPointFileOffsets.append(intOff)
+            } else if relEntry < UInt64(sliceData.count), let intOff = Int(exactly: relEntry) {
+                entryPointFileOffsets.append(intOff)
+            }
+        }
+        for pc in unixThreadEntryVAs {
+            for seg in segments where seg.vmSize > 0 && pc >= seg.vmAddress {
+                let (vmEnd, ov) = seg.vmAddress.addingReportingOverflow(seg.vmSize)
+                if !ov && pc < vmEnd {
+                    let delta = pc - seg.vmAddress
+                    let (fOff, fOv) = seg.fileOffset.addingReportingOverflow(delta)
+                    if !fOv, fOff < UInt64(sliceData.count), let intOff = Int(exactly: fOff) {
+                        entryPointFileOffsets.append(intOff)
+                    }
+                }
+            }
+        }
+
+        let primarySymtab = symtabs.first(where: { $0.nsyms > 0 }) ?? symtabs.first
+        let primaryCodeSig = codeSignatures.first(where: { $0.datasize > 0 }) ?? codeSignatures.first
 
         return MachOFile(
             magic: magic,
@@ -1394,10 +1756,481 @@ public final class MachOParser: Sendable {
             sliceData: sliceData,
             slicesInContainer: containerSlices,
             segments: segments,
-            encryptionInfo: encryptionInfo,
+            encryptionInfo: resolvedEncryptionInfo,
             linkedDylibs: linkedDylibs,
-            symtab: symtab,
-            codeSignature: codeSignature
+            symtab: primarySymtab,
+            codeSignature: primaryCodeSig,
+            symtabs: symtabs,
+            codeSignatures: codeSignatures,
+            dynamicImportSymbols: dynamicImportSymbols,
+            entryPointFileOffsets: entryPointFileOffsets
         )
+    }
+
+    /// Resolves multiple `LC_ENCRYPTION_INFO[_64]` load commands conservatively:
+    /// - Single command: preserved verbatim.
+    /// - Multiple commands: if any command declares `cryptid == 0` (unencrypted), or if encrypted ranges are disjoint,
+    ///   collapses to `cryptid = 0` so an appended fake `cryptid = 1` command can never blind static code/string inspection.
+    private static func resolveEncryptionInfo(from infos: [MachOEncryptionInfo], is64Bit: Bool) -> MachOEncryptionInfo? {
+        guard let first = infos.first else { return nil }
+        if infos.count == 1 {
+            return first
+        }
+        if infos.contains(where: { !$0.isFairPlayEncrypted }) {
+            return MachOEncryptionInfo(cryptoff: 0, cryptsize: 0, cryptid: 0, is64Bit: is64Bit)
+        }
+        guard var overlap = first.encryptedRange else {
+            return MachOEncryptionInfo(cryptoff: 0, cryptsize: 0, cryptid: 0, is64Bit: is64Bit)
+        }
+        for info in infos.dropFirst() {
+            guard let r = info.encryptedRange else {
+                return MachOEncryptionInfo(cryptoff: 0, cryptsize: 0, cryptid: 0, is64Bit: is64Bit)
+            }
+            let lo = max(overlap.lowerBound, r.lowerBound)
+            let hi = min(overlap.upperBound, r.upperBound)
+            if lo >= hi {
+                return MachOEncryptionInfo(cryptoff: 0, cryptsize: 0, cryptid: 0, is64Bit: is64Bit)
+            }
+            overlap = lo..<hi
+        }
+        guard let off32 = UInt32(exactly: overlap.lowerBound),
+              let sz32 = UInt32(exactly: overlap.count) else {
+            return MachOEncryptionInfo(cryptoff: 0, cryptsize: 0, cryptid: 0, is64Bit: is64Bit)
+        }
+        return MachOEncryptionInfo(cryptoff: off32, cryptsize: sz32, cryptid: first.cryptid, is64Bit: is64Bit)
+    }
+
+    /// Parses external imported symbol names from `LC_DYLD_CHAINED_FIXUPS` (`dyld_chained_fixups_header`),
+    /// defeating `strip` / zeroed-`LC_SYMTAB` evasion on modern iOS 15+–27 ARM64/ARM64e binaries.
+    private static func parseChainedFixupImports(
+        reader: BinaryReader,
+        dataoff: Int,
+        datasize: Int,
+        isSwapped: Bool
+    ) -> [String] {
+        guard datasize >= 28, reader.inRange(offset: dataoff, length: datasize) else { return [] }
+        guard let importsOffset = reader.readUInt32(at: dataoff + 8, swapped: isSwapped),
+              let symbolsOffset = reader.readUInt32(at: dataoff + 12, swapped: isSwapped),
+              let importsCount = reader.readUInt32(at: dataoff + 16, swapped: isSwapped),
+              let importsFormat = reader.readUInt32(at: dataoff + 20, swapped: isSwapped),
+              let symbolsFormat = reader.readUInt32(at: dataoff + 24, swapped: isSwapped) else {
+            return []
+        }
+
+        guard UInt64(importsOffset) < UInt64(datasize),
+              UInt64(symbolsOffset) < UInt64(datasize) else {
+            return []
+        }
+
+        let entryStride: Int
+        switch importsFormat {
+        case 1: entryStride = 4   // DYLD_CHAINED_IMPORT
+        case 2: entryStride = 8   // DYLD_CHAINED_IMPORT_ADDEND
+        case 3: entryStride = 16  // DYLD_CHAINED_IMPORT_ADDEND64
+        default: return []
+        }
+
+        let cappedCount = Int(min(importsCount, 262_144))
+        guard cappedCount > 0 else { return [] }
+        let importsEndBound: Int
+        if symbolsOffset > importsOffset && (Int(symbolsOffset) - Int(importsOffset)) >= entryStride {
+            importsEndBound = Int(symbolsOffset)
+        } else {
+            importsEndBound = datasize
+        }
+        let maxReadableEntries = (importsEndBound - Int(importsOffset)) / entryStride
+        let availableCount = min(cappedCount, maxReadableEntries)
+        guard availableCount > 0 else { return [] }
+
+        let symPoolStart = dataoff + Int(symbolsOffset)
+        let symPoolSize = datasize - Int(symbolsOffset)
+        let symbolsPool: Data
+        if symbolsFormat == 0 {
+            guard let sub = reader.subdata(offset: symPoolStart, length: symPoolSize) else { return [] }
+            symbolsPool = sub
+        } else if symbolsFormat == 1 {
+            guard let comp = reader.subdata(offset: symPoolStart, length: symPoolSize),
+                  let inflated = inflateZlibBounded(comp, maxOutputBytes: 16 * 1024 * 1024) else {
+                return []
+            }
+            symbolsPool = inflated
+        } else {
+            return []
+        }
+
+        let symReader = BinaryReader(data: symbolsPool)
+        let importsBase = dataoff + Int(importsOffset)
+        var results: [String] = []
+        results.reserveCapacity(min(availableCount, 4096))
+
+        for i in 0..<availableCount {
+            let entryOff = importsBase + i * entryStride
+            let nameOff: Int
+            if importsFormat == 3 {
+                guard let raw64 = reader.readUInt64(at: entryOff, swapped: isSwapped) else { continue }
+                nameOff = Int(UInt32(truncatingIfNeeded: raw64 >> 32))
+            } else {
+                guard let raw32 = reader.readUInt32(at: entryOff, swapped: isSwapped) else { continue }
+                nameOff = Int(raw32 >> 9)
+            }
+            guard nameOff >= 0, nameOff < symReader.count else { continue }
+            if let sym = symReader.readNullTerminatedString(at: nameOff, maxScanLength: min(512, symReader.count - nameOff)),
+               !sym.isEmpty {
+                results.append(sym)
+            }
+        }
+        return results
+    }
+
+    private static func inflateZlibBounded(_ compressed: Data, maxOutputBytes: Int) -> Data? {
+        guard !compressed.isEmpty else { return nil }
+        var strm = z_stream()
+        guard inflateInit_(&strm, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+            return nil
+        }
+        defer { inflateEnd(&strm) }
+        var out = Data()
+        let chunkCap = 32_768
+        var chunk = [UInt8](repeating: 0, count: chunkCap)
+        let ok: Bool = compressed.withUnsafeBytes { inPtr in
+            strm.next_in = UnsafeMutablePointer(mutating: inPtr.bindMemory(to: Bytef.self).baseAddress)
+            strm.avail_in = uInt(compressed.count)
+            while true {
+                let status: Int32 = chunk.withUnsafeMutableBufferPointer { buf in
+                    strm.next_out = buf.baseAddress
+                    strm.avail_out = uInt(chunkCap)
+                    return inflate(&strm, Z_NO_FLUSH)
+                }
+                let produced = chunkCap - Int(strm.avail_out)
+                if produced > 0 {
+                    if out.count + produced >= maxOutputBytes {
+                        let keep = max(0, maxOutputBytes - out.count)
+                        if keep > 0 {
+                            out.append(contentsOf: chunk[0..<keep])
+                        }
+                        // Return bounded prefix rather than discarding recovered symbols when trailing zlib padding exceeds cap
+                        return true
+                    }
+                    out.append(contentsOf: chunk[0..<produced])
+                }
+                if status == Z_STREAM_END { return true }
+                if status == Z_OK && strm.avail_in > 0 { continue }
+                if status == Z_OK && produced > 0 { continue }
+                return false
+            }
+        }
+        return ok ? out : nil
+    }
+
+    /// Extracts exact `lazy_bind` stream offsets from `__TEXT,__stub_helper` trampolines
+    /// (ARM64 `ldr w16, #8; b prologue; .long lazy_offset` and x86_64/i386 `push $lazy_offset; jmp helper`).
+    private static func extractStubHelperLazyBindOffsets(
+        segments: [MachOSegment],
+        reader: BinaryReader,
+        cpuType: cpu_type_t,
+        isSwapped: Bool
+    ) -> [Int] {
+        var offsets: [Int] = []
+        var seen: Set<Int> = []
+        for seg in segments {
+            for sect in seg.sections where sect.sectionName == "__stub_helper" && sect.size >= 10 {
+                guard let start = Int(exactly: sect.offset),
+                      let sizeInt = Int(exactly: sect.size),
+                      sizeInt <= 4 * 1024 * 1024,
+                      reader.inRange(offset: start, length: sizeInt) else {
+                    continue
+                }
+                if cpuType == CPU_TYPE_ARM64 || cpuType == CPU_TYPE_ARM64_32 {
+                    var pos = start
+                    let limit = start + sizeInt - 12
+                    while pos <= limit && offsets.count < 16_384 {
+                        if let w0 = reader.readUInt32(at: pos, swapped: isSwapped),
+                           w0 == 0x1800_0050,
+                           let w1 = reader.readUInt32(at: pos + 4, swapped: isSwapped),
+                           (w1 & 0xFC00_0000) == 0x1400_0000,
+                           let lazyOff = reader.readUInt32(at: pos + 8, swapped: isSwapped),
+                           let intOff = Int(exactly: lazyOff) {
+                            if seen.insert(intOff).inserted {
+                                offsets.append(intOff)
+                            }
+                            pos += 12
+                            continue
+                        }
+                        pos += 4
+                    }
+                } else if cpuType == CPU_TYPE_X86_64 || cpuType == CPU_TYPE_I386 {
+                    if let sub = reader.subdata(offset: start, length: sizeInt) {
+                        sub.withUnsafeBytes { raw in
+                            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                            var pos = 0
+                            while pos + 10 <= raw.count && offsets.count < 16_384 {
+                                if base[pos] == 0x68 && base[pos + 5] == 0xE9 {
+                                    let imm = UInt32(base[pos + 1])
+                                        | (UInt32(base[pos + 2]) << 8)
+                                        | (UInt32(base[pos + 3]) << 16)
+                                        | (UInt32(base[pos + 4]) << 24)
+                                    let resolved = Int(isSwapped ? imm.byteSwapped : imm)
+                                    if resolved >= 0 && seen.insert(resolved).inserted {
+                                        offsets.append(resolved)
+                                    }
+                                    pos += 10
+                                    continue
+                                }
+                                pos += 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return offsets
+    }
+
+    /// Parses bound symbol names from `LC_DYLD_INFO` / `LC_DYLD_INFO_ONLY` opcode streams (`bind`, `weak_bind`, `lazy_bind`).
+    /// For `lazy_bind`, `dyld_stub_binder` jumps directly into per-symbol random-access offsets (`__stub_helper`), so dead
+    /// invalid opcodes or desynchronizing prefix opcodes placed before active offsets must never abort symbol extraction.
+    private static func parseDyldBindSymbols(
+        reader: BinaryReader,
+        offset: Int,
+        size: Int,
+        isLazyBind: Bool = false,
+        stubHelperOffsets: [Int] = []
+    ) -> [String] {
+        guard size > 0, reader.inRange(offset: offset, length: size),
+              let stream = reader.subdata(offset: offset, length: size) else {
+            return []
+        }
+        var results: [String] = []
+        var seen: Set<String> = []
+        stream.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            let end = raw.count
+
+            func appendSymbol(_ s: String) {
+                guard !s.isEmpty, results.count < 65_536 else { return }
+                if seen.insert(s).inserted {
+                    results.append(s)
+                }
+            }
+
+            func skipLEB128(at cursor: inout Int) -> Bool {
+                var count = 0
+                while cursor < end && count < 16 {
+                    let b = base[cursor]
+                    cursor += 1
+                    count += 1
+                    if (b & 0x80) == 0 { return true }
+                }
+                return false
+            }
+
+            // 1. For random-access `lazy_bind`, execute exact `dyld_stub_binder` single-record interpreter from every `__stub_helper` target offset.
+            if isLazyBind && !stubHelperOffsets.isEmpty {
+                for startOff in stubHelperOffsets where startOff >= 0 && startOff < end {
+                    var cur = startOff
+                    var steps = 0
+                    recordLoop: while cur < end && steps < 4096 {
+                        steps += 1
+                        let opByte = base[cur]
+                        cur += 1
+                        let op = opByte & 0xF0
+                        let im = opByte & 0x0F
+                        switch op {
+                        case 0x00:
+                            break recordLoop
+                        case 0x90, 0xA0, 0xB0, 0xC0:
+                            break recordLoop
+                        case 0x10, 0x30, 0x50:
+                            continue
+                        case 0x20, 0x60, 0x70, 0x80:
+                            if !skipLEB128(at: &cur) { break recordLoop }
+                        case 0xD0:
+                            if im == 0x00 {
+                                if !skipLEB128(at: &cur) { break recordLoop }
+                            } else if im != 0x01 {
+                                break recordLoop
+                            }
+                        case 0x40:
+                            let symStart = cur
+                            while cur < end && base[cur] != 0 { cur += 1 }
+                            let symLen = cur - symStart
+                            if cur < end { cur += 1 }
+                            if symLen > 0 && symLen <= 512 {
+                                let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: symStart), count: symLen), as: UTF8.self)
+                                appendSymbol(s)
+                            }
+                        default:
+                            break recordLoop
+                        }
+                    }
+                }
+            }
+
+            // 2. Sequential opcode stream pass from offset 0.
+            var idx = 0
+            func recoverLazyRecord() {
+                while idx < end && base[idx] != 0x00 {
+                    idx += 1
+                }
+                while idx < end && base[idx] == 0x00 {
+                    idx += 1
+                }
+            }
+
+            sequentialLoop: while idx < end && results.count < 65_536 {
+                let byte = base[idx]
+                idx += 1
+                let opcode = byte & 0xF0
+                let imm = byte & 0x0F
+
+                switch opcode {
+                case 0x00: // BIND_OPCODE_DONE
+                    if !isLazyBind && imm != 0x00 {
+                        break sequentialLoop
+                    }
+                    continue
+                case 0x10, 0x30, 0x50, 0x90, 0xB0:
+                    continue
+                case 0x20, 0x60, 0x70, 0x80, 0xA0:
+                    if !skipLEB128(at: &idx) {
+                        if isLazyBind { recoverLazyRecord(); continue }
+                        break sequentialLoop
+                    }
+                case 0xC0:
+                    if !skipLEB128(at: &idx) || !skipLEB128(at: &idx) {
+                        if isLazyBind { recoverLazyRecord(); continue }
+                        break sequentialLoop
+                    }
+                case 0xD0:
+                    if imm == 0x00 {
+                        if !skipLEB128(at: &idx) {
+                            if isLazyBind { recoverLazyRecord(); continue }
+                            break sequentialLoop
+                        }
+                    } else if imm != 0x01 {
+                        if isLazyBind { recoverLazyRecord(); continue }
+                        break sequentialLoop
+                    }
+                case 0x40: // BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM
+                    let start = idx
+                    while idx < end && base[idx] != 0 {
+                        idx += 1
+                    }
+                    let len = idx - start
+                    if idx < end { idx += 1 } // consume NUL
+                    if len > 0 && len <= 512 {
+                        let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: start), count: len), as: UTF8.self)
+                        appendSymbol(s)
+                    }
+                default:
+                    if isLazyBind {
+                        recoverLazyRecord()
+                        continue
+                    }
+                    break sequentialLoop
+                }
+            }
+
+            // 3. Random-access resynchronization pass for `lazy_bind`:
+            // Defeats desynchronizing prefix bytes (including dead ULEB128 operands taking values `0x40..0x4F` right before
+            // a real `0x40..0x4F` `SET_SYMBOL` opcode, long >32-opcode padding before `DO_BIND`, or stripped `__stub_helper`).
+            if isLazyBind {
+                @inline(__always)
+                func isValidSymbolStart(_ b: UInt8) -> Bool {
+                    b == 0x5F || b == 0x24 || b == 0x2E || b == 0x3F
+                        || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+                }
+
+                @inline(__always)
+                func isValidSymbolBody(_ b: UInt8) -> Bool {
+                    b >= 0x21 && b <= 0x7E
+                }
+
+                func reachesDoBind(from tailStart: Int) -> Bool {
+                    var cur = tailStart
+                    var steps = 0
+                    while cur < end && steps < 4096 {
+                        steps += 1
+                        let opByte = base[cur]
+                        cur += 1
+                        let op = opByte & 0xF0
+                        let im = opByte & 0x0F
+                        switch op {
+                        case 0x90: // BIND_OPCODE_DO_BIND
+                            return true
+                        case 0xA0, 0xB0: // DO_BIND_ADD_ADDR_*
+                            if op == 0xA0 && !skipLEB128(at: &cur) { return false }
+                            return true
+                        case 0xC0: // DO_BIND_ULEB_TIMES_SKIPPING_ULEB
+                            if !skipLEB128(at: &cur) || !skipLEB128(at: &cur) { return false }
+                            return true
+                        case 0x00: // BIND_OPCODE_DONE before DO_BIND
+                            return false
+                        case 0x10, 0x30, 0x50:
+                            continue
+                        case 0x20, 0x60, 0x70, 0x80:
+                            if !skipLEB128(at: &cur) { return false }
+                        case 0xD0:
+                            if im == 0x00 {
+                                if !skipLEB128(at: &cur) { return false }
+                            } else if im != 0x01 {
+                                return false
+                            }
+                        case 0x40:
+                            while cur < end && base[cur] != 0 { cur += 1 }
+                            guard cur < end else { return false }
+                            cur += 1
+                        default:
+                            return false
+                        }
+                    }
+                    return false
+                }
+
+                var pos = 0
+                while pos + 3 <= end && results.count < 65_536 {
+                    if (base[pos] & 0xF0) == 0x40, isValidSymbolStart(base[pos + 1]) {
+                        var nulPos = pos + 1
+                        var allPrintable = true
+                        while nulPos < end && base[nulPos] != 0 && (nulPos - (pos + 1)) <= 512 {
+                            if !isValidSymbolBody(base[nulPos]) {
+                                allPrintable = false
+                                break
+                            }
+                            nulPos += 1
+                        }
+                        let symLen = nulPos - (pos + 1)
+                        if allPrintable, nulPos < end, base[nulPos] == 0, symLen >= 1, symLen <= 512,
+                           reachesDoBind(from: nulPos + 1) {
+                            let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: pos + 1), count: symLen), as: UTF8.self)
+                            appendSymbol(s)
+                            // Also inspect any interior `0x40..0x4F` opcode immediately followed by `'_'` (`0x5F`) or `'$'` (`0x24`)
+                            // inside `[pos + 1, nulPos - 1)` so a dead `0x40..0x4F` prefix byte (e.g., `[0x72, 0x40, 0x41, "_fsgetpath\0"]`
+                            // where `0x41` is `'A'`) cannot swallow the real `SET_SYMBOL` opcode via `pos = nulPos + 1`.
+                            if nulPos - (pos + 1) >= 2 {
+                                for innerPos in (pos + 1)..<(nulPos - 1) {
+                                    let ib = base[innerPos]
+                                    let nextB = base[innerPos + 1]
+                                    if (ib & 0xF0) == 0x40 && (nextB == 0x5F || nextB == 0x24) {
+                                        let innerLen = nulPos - (innerPos + 1)
+                                        if innerLen >= 1 && innerLen <= 512 {
+                                            let innerSym = String(
+                                                decoding: UnsafeBufferPointer(start: base.advanced(by: innerPos + 1), count: innerLen),
+                                                as: UTF8.self
+                                            )
+                                            appendSymbol(innerSym)
+                                        }
+                                    }
+                                }
+                            }
+                            pos = nulPos + 1
+                            continue
+                        }
+                    }
+                    pos += 1
+                }
+            }
+        }
+        return results
     }
 }

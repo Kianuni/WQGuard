@@ -6,6 +6,7 @@
 //  progress reporting, findings filtering, firmware posture evaluation, and report export.
 //
 
+import Darwin
 import SwiftUI
 import Combine
 import UniformTypeIdentifiers
@@ -122,18 +123,30 @@ public final class ScanViewModel: ObservableObject {
         self.selectedTab = 1
     }
 
+    private static let maxPairingFileBytes = 4 * 1024 * 1024
+    private static let maxSnapshotFileBytes = 128 * 1024 * 1024
+    private static let maxPackageFileBytes = 1024 * 1024 * 1024
+
+    private static func ensureSafeNonSymlinkDirectory(at dirURL: URL) -> URL {
+        let clean = IPAPackageScanner.stripTrailingSlashes(dirURL.path)
+        var st = stat()
+        if lstat(clean, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK {
+            try? FileManager.default.removeItem(at: dirURL)
+        }
+        try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        return dirURL
+    }
+
     private var appSupportDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         let dir = base.appendingPathComponent("WQGuardRegistry", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return Self.ensureSafeNonSymlinkDirectory(at: dir)
     }
 
     private var syncedPackagesDirectory: URL {
         let dir = appSupportDirectory.appendingPathComponent("SyncedPackages", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return Self.ensureSafeNonSymlinkDirectory(at: dir)
     }
 
     private var savedPairingURL: URL {
@@ -145,13 +158,14 @@ public final class ScanViewModel: ObservableObject {
     }
 
     private func loadActivePairingFile() -> LockdownPairingFile? {
-        guard FileManager.default.fileExists(atPath: savedPairingURL.path) else { return nil }
         return try? LockdownPairingFile.parse(from: savedPairingURL)
     }
 
     private func loadSavedSnapshotData() -> Data? {
-        guard FileManager.default.fileExists(atPath: savedSnapshotURL.path) else { return nil }
-        return try? Data(contentsOf: savedSnapshotURL, options: .mappedIfSafe)
+        return try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(
+            at: savedSnapshotURL,
+            maxBytes: Self.maxSnapshotFileBytes
+        )
     }
 
     public func refreshRegistrySourceState() {
@@ -196,7 +210,10 @@ public final class ScanViewModel: ObservableObject {
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
         do {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let data = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(
+                at: url,
+                maxBytes: Self.maxPairingFileBytes
+            )
             let stem = url.deletingPathExtension().lastPathComponent
             return importPairingDataWithResult(data, fallbackUDID: stem)
         } catch {
@@ -209,8 +226,11 @@ public final class ScanViewModel: ObservableObject {
 
     private func importPairingDataWithResult(_ data: Data, fallbackUDID: String?) -> Result<String, Error> {
         do {
+            guard data.count <= Self.maxPairingFileBytes else {
+                throw LockdownClientError.invalidPairingFile("Pairing payload exceeds \(Self.maxPairingFileBytes) bytes")
+            }
             let pairing = try LockdownPairingFile.parse(data: data, fallbackUDID: fallbackUDID)
-            try data.write(to: savedPairingURL, options: .atomic)
+            try IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(data, to: savedPairingURL)
             refreshRegistrySourceState()
             let summary = WQStrings.pairingImportedSummary(hostPrefix: String(pairing.hostID.prefix(8)))
             lastScanEngineSummary = summary
@@ -238,7 +258,9 @@ public final class ScanViewModel: ObservableObject {
         let pb = UIPasteboard.general
 
         // 1. Plain XML / Base64 string on clipboard
-        if let str = pb.string?.trimmingCharacters(in: .whitespacesAndNewlines), !str.isEmpty {
+        if let str = pb.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !str.isEmpty,
+           str.utf8.count <= Self.maxPairingFileBytes {
             let utf8Data = Data(str.utf8)
             if case .success(let msg) = importPairingDataWithResult(utf8Data, fallbackUDID: nil) {
                 return .success(msg)
@@ -249,10 +271,10 @@ public final class ScanViewModel: ObservableObject {
             }
         }
 
-        // 2. Copied `.plist` / `.mobiledevicepairing` file item from iOS Files App
+        // 2. Copied `.plist` / `.mobiledevicepairing` file item from iOS Files App (bounded to prevent clipboard DoS)
         var lastParseError: Error?
-        for itemDict in pb.items {
-            for (_, rawVal) in itemDict {
+        for itemDict in pb.items.prefix(16) {
+            for (_, rawVal) in itemDict.prefix(16) {
                 if let d = rawVal as? Data {
                     switch importPairingDataWithResult(d, fallbackUDID: nil) {
                     case .success(let msg): return .success(msg)
@@ -260,25 +282,35 @@ public final class ScanViewModel: ObservableObject {
                     }
                 } else if let s = rawVal as? String {
                     if let fileURL = URL(string: s), fileURL.isFileURL,
-                       let fileData = try? Data(contentsOf: fileURL) {
+                       let fileData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(
+                           at: fileURL,
+                           maxBytes: Self.maxPairingFileBytes
+                       ) {
                         switch importPairingDataWithResult(fileData, fallbackUDID: fileURL.deletingPathExtension().lastPathComponent) {
                         case .success(let msg): return .success(msg)
                         case .failure(let err): lastParseError = err
                         }
-                    } else if let strData = s.data(using: .utf8) {
+                    } else if s.utf8.count <= Self.maxPairingFileBytes, let strData = s.data(using: .utf8) {
                         switch importPairingDataWithResult(strData, fallbackUDID: nil) {
                         case .success(let msg): return .success(msg)
                         case .failure(let err): lastParseError = err
                         }
                     }
                 } else if let fileURL = rawVal as? URL,
-                          let fileData = try? Data(contentsOf: fileURL) {
+                          fileURL.isFileURL,
+                          let fileData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(
+                              at: fileURL,
+                              maxBytes: Self.maxPairingFileBytes
+                          ) {
                     switch importPairingDataWithResult(fileData, fallbackUDID: fileURL.deletingPathExtension().lastPathComponent) {
                     case .success(let msg): return .success(msg)
                     case .failure(let err): lastParseError = err
                     }
-                } else if PropertyListSerialization.propertyList(rawVal, isValidFor: .xml),
-                          let plistData = try? PropertyListSerialization.data(fromPropertyList: rawVal, format: .xml, options: 0) {
+                } else if let dictVal = rawVal as? [String: Any],
+                          dictVal.count <= 64,
+                          PropertyListSerialization.propertyList(dictVal, isValidFor: .xml),
+                          let plistData = try? PropertyListSerialization.data(fromPropertyList: dictVal, format: .xml, options: 0),
+                          plistData.count <= Self.maxPairingFileBytes {
                     switch importPairingDataWithResult(plistData, fallbackUDID: nil) {
                     case .success(let msg): return .success(msg)
                     case .failure(let err): lastParseError = err
@@ -308,14 +340,15 @@ public final class ScanViewModel: ObservableObject {
         var syncedNewIPA = false
 
         for dir in scanDirs {
-            guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+            guard IPAPackageScanner.isNonSymlinkDirectory(at: dir),
+                  let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
                 continue
             }
             for item in items {
                 let ext = item.pathExtension.lowercased()
                 if ext == "ipa" || ext == "tipa" {
                     let targetName = item.lastPathComponent
-                    if !syncedPackageNames.contains(targetName), persistPackageToSyncedCacheIfApplicable(item) != nil {
+                    if !syncedPackageNames.contains(targetName), stagePackageIntoSyncedFolder(item) != nil {
                         syncedNewIPA = true
                     }
                     continue
@@ -323,7 +356,9 @@ public final class ScanViewModel: ObservableObject {
                 guard ext == "mobiledevicepairing" || ext == "plist" || ext == "xml" || ext == "json" else {
                     continue
                 }
-                guard let data = try? Data(contentsOf: item, options: .mappedIfSafe), !data.isEmpty else {
+                let maxImportBytes = (ext == "mobiledevicepairing") ? Self.maxPairingFileBytes : Self.maxSnapshotFileBytes
+                guard let data = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: item, maxBytes: maxImportBytes),
+                      !data.isEmpty else {
                     continue
                 }
                 let stem = item.deletingPathExtension().lastPathComponent
@@ -360,7 +395,10 @@ public final class ScanViewModel: ObservableObject {
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
         do {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let data = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(
+                at: url,
+                maxBytes: Self.maxSnapshotFileBytes
+            )
             return importRegistrySnapshotDataWithResult(data, filename: url.lastPathComponent, autoScan: autoScan)
         } catch {
             #if os(iOS)
@@ -372,8 +410,11 @@ public final class ScanViewModel: ObservableObject {
 
     private func importRegistrySnapshotDataWithResult(_ data: Data, filename: String, autoScan: Bool = true) -> Result<String, Error> {
         do {
+            guard data.count <= Self.maxSnapshotFileBytes else {
+                throw IPAPackageScannerError.quotaExceeded("Snapshot exceeds \(Self.maxSnapshotFileBytes) bytes")
+            }
             let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(data)
-            try data.write(to: savedSnapshotURL, options: .atomic)
+            try IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(data, to: savedSnapshotURL)
             UserDefaults.standard.set(filename, forKey: Self.snapshotNameKey)
             refreshRegistrySourceState()
             let summary = WQStrings.snapshotImportedSummary(count: records.count)
@@ -401,6 +442,14 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func removeSyncedPackage(named filename: String) {
+        guard !filename.isEmpty,
+              !filename.contains("/"),
+              !filename.contains("\\"),
+              !filename.contains("\0"),
+              filename != ".",
+              filename != ".." else {
+            return
+        }
         let target = syncedPackagesDirectory.appendingPathComponent(filename)
         try? FileManager.default.removeItem(at: target)
         refreshSyncedPackageNames()
@@ -423,54 +472,122 @@ public final class ScanViewModel: ObservableObject {
     }
 
     private func refreshSyncedPackageNames() {
+        let dir = syncedPackagesDirectory
+        guard IPAPackageScanner.isNonSymlinkDirectory(at: dir) else {
+            self.syncedPackageNames = []
+            return
+        }
         let items = (try? FileManager.default.contentsOfDirectory(
-            at: syncedPackagesDirectory,
+            at: dir,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         )) ?? []
         let names = items.compactMap { url -> String? in
             let ext = url.pathExtension.lowercased()
             guard ext == "ipa" || ext == "tipa" else { return nil }
+            var lst = stat()
+            guard lstat(IPAPackageScanner.stripTrailingSlashes(url.path), &lst) == 0,
+                  (lst.st_mode & S_IFMT) == S_IFREG else {
+                return nil
+            }
             return url.lastPathComponent
         }
         self.syncedPackageNames = names.sorted()
     }
 
     @discardableResult
-    private func persistPackageToSyncedCacheIfApplicable(_ src: URL) -> URL? {
+    private func stagePackageIntoSyncedFolder(_ src: URL) -> URL? {
+        var emptyReserved: Set<String> = []
+        return stagePackageIntoSyncedFolder(src, reservedBatchNames: &emptyReserved)
+    }
+
+    @discardableResult
+    private func stagePackageIntoSyncedFolder(_ src: URL, reservedBatchNames: inout Set<String>) -> URL? {
         let ext = src.pathExtension.lowercased()
         guard ext == "ipa" || ext == "tipa" else { return nil }
         let rawName = src.lastPathComponent
-        // Strip temporary 8-hex UUID prefix added by `stageCopiedFilesIfNeeded` (`A1B2C3D4_App.ipa` -> `App.ipa`)
-        let cleanName: String
-        if rawName.count > 9,
+        let isFromPickedStage = src.deletingLastPathComponent().lastPathComponent == "WQGuardPicked"
+        // Strip temporary `<8 uppercase hex>_` prefix ONLY when staged by `SystemDocumentPicker.stageCopiedFilesIfNeeded`
+        // (never stripping legitimate 8-letter app names such as `MetaMask_App.ipa` or `Telegram_App.ipa`).
+        let baseName: String
+        if isFromPickedStage,
+           rawName.count > 9,
            let underscoreIdx = rawName.firstIndex(of: "_"),
-           rawName.distance(from: rawName.startIndex, to: underscoreIdx) == 8 {
-            cleanName = String(rawName[rawName.index(after: underscoreIdx)...])
+           rawName.distance(from: rawName.startIndex, to: underscoreIdx) == 8,
+           rawName[..<underscoreIdx].utf8.allSatisfy({ ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x46) }) {
+            baseName = String(rawName[rawName.index(after: underscoreIdx)...])
         } else {
-            cleanName = rawName
+            baseName = rawName
         }
+        guard !baseName.isEmpty,
+              baseName.count <= 230,
+              !baseName.contains("/"),
+              !baseName.contains("\\"),
+              !baseName.contains("\0"),
+              baseName != ".",
+              baseName != ".." else {
+            return nil
+        }
+
+        // Disambiguate colliding filenames within the same multi-select batch so no selected IPA overwrites another
+        var cleanName = baseName
+        if reservedBatchNames.contains(cleanName.lowercased()) {
+            let nsBase = baseName as NSString
+            let stem = nsBase.deletingPathExtension
+            let pathExt = nsBase.pathExtension
+            var suffix = 2
+            while suffix <= 999 {
+                let candidate = pathExt.isEmpty ? "\(stem) (\(suffix))" : "\(stem) (\(suffix)).\(pathExt)"
+                if !reservedBatchNames.contains(candidate.lowercased()) {
+                    cleanName = candidate
+                    break
+                }
+                suffix += 1
+            }
+        }
+
         let dst = syncedPackagesDirectory.appendingPathComponent(cleanName)
-        guard src.standardizedFileURL != dst.standardizedFileURL else { return dst }
-        try? FileManager.default.removeItem(at: dst)
-        if (try? FileManager.default.copyItem(at: src, to: dst)) != nil {
+        let cleanSrcPath = IPAPackageScanner.stripTrailingSlashes(src.path)
+        let cleanDstPath = IPAPackageScanner.stripTrailingSlashes(dst.path)
+        if cleanSrcPath == cleanDstPath {
+            var lst = stat()
+            guard lstat(cleanDstPath, &lst) == 0, (lst.st_mode & S_IFMT) == S_IFREG else { return nil }
+            reservedBatchNames.insert(cleanName.lowercased())
+            return dst
+        }
+        if (try? IPAPackageScanner.copyBoundedRegularFileNoFollow(
+            from: src,
+            to: dst,
+            maxBytes: Self.maxPackageFileBytes
+        )) != nil {
+            reservedBatchNames.insert(cleanName.lowercased())
+            if isFromPickedStage {
+                _ = Darwin.unlink(cleanSrcPath)
+            }
             return dst
         }
         return nil
     }
 
+    @discardableResult
+    private func persistPackageToSyncedCacheIfApplicable(_ src: URL, reservedBatchNames: inout Set<String>) -> URL? {
+        stagePackageIntoSyncedFolder(src, reservedBatchNames: &reservedBatchNames)
+    }
+
     public func handleIncomingURL(_ url: URL) {
+        guard url.isFileURL else { return }
         let ext = url.pathExtension.lowercased()
         if ext == "ipa" || ext == "tipa" {
             scanIPAPackage(at: url)
             return
         }
 
-        // Read security-scoped data ONCE inside a single start/stop pair so one-shot Open-In grants are never lost!
+        // Read security-scoped data ONCE inside a single start/stop pair using O_NOFOLLOW + size cap
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
-        guard let rawData = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+        let maxBytes = (ext == "mobiledevicepairing") ? Self.maxPairingFileBytes : Self.maxSnapshotFileBytes
+        guard let rawData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: url, maxBytes: maxBytes) else {
             activeAlertMessage = WQStrings.incomingFileReadFailed(url.lastPathComponent)
             showGlobalAlert = true
             return
@@ -516,8 +633,8 @@ public final class ScanViewModel: ObservableObject {
                     preferredHost: host
                 )
                 // Cache live records to local snapshot store so future offline scans remain instant even when VPN is off
-                if let encoded = try? JSONEncoder().encode(liveRecords) {
-                    try? encoded.write(to: self.savedSnapshotURL, options: .atomic)
+                if let encoded = try? JSONEncoder().encode(liveRecords), encoded.count <= Self.maxSnapshotFileBytes {
+                    try? IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(encoded, to: self.savedSnapshotURL)
                     UserDefaults.standard.set(WQStrings.localDevVPNCacheName, forKey: Self.snapshotNameKey)
                     self.refreshRegistrySourceState()
                 }
@@ -578,6 +695,7 @@ public final class ScanViewModel: ObservableObject {
     // MARK: - Unified Installed Application Scan Actions (Registry + Synced IPA Queue + On-Device Probe)
     public func startSystemScan() {
         guard !isScanning else { return }
+        _ = autoImportFromDocumentsFolderIfNeeded()
         isScanning = true
         scanProgress = ScanProgress(currentTarget: WQStrings.scanEngineInitializing, completedCount: 0, totalCount: 0)
         let extraScanDirs = [syncedPackagesDirectory]
@@ -741,12 +859,13 @@ public final class ScanViewModel: ObservableObject {
         // Synchronously acquire security scope and persist all selected `.ipa` / `.tipa` files into `SyncedPackages`
         var preScopedPairs: [(URL, Bool)] = []
         var cachedTargets: [URL] = []
+        var reservedBatchNames: Set<String> = []
         for u in urls {
             let accessed = u.startAccessingSecurityScopedResource()
             preScopedPairs.append((u, accessed))
             let ext = u.pathExtension.lowercased()
             if ext == "ipa" || ext == "tipa" {
-                if let cached = persistPackageToSyncedCacheIfApplicable(u) {
+                if let cached = persistPackageToSyncedCacheIfApplicable(u, reservedBatchNames: &reservedBatchNames) {
                     cachedTargets.append(cached)
                 } else {
                     cachedTargets.append(u)
@@ -829,6 +948,19 @@ public final class ScanViewModel: ObservableObject {
                         } catch {
                             lastError = error
                             completed += 1
+                            if total > 1 {
+                                let malformedFinding = SecurityPipeline.makeMalformedPackageFinding(for: target, error: error)
+                                results.append(malformedFinding)
+                                let progress = ScanProgress(
+                                    currentTarget: target.lastPathComponent,
+                                    completedCount: completed,
+                                    totalCount: total,
+                                    currentFinding: malformedFinding
+                                )
+                                Task { @MainActor [weak self] in
+                                    self?.scanProgress = progress
+                                }
+                            }
                         }
                     }
 
@@ -892,13 +1024,19 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func addCustomWhitelistRule(bundleId: String, name: String, appGroup: String = "") {
-        guard !bundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? bundleId : name
-        let groups = appGroup.isEmpty ? [] : [appGroup]
+        let trimmedBid = bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBid.isEmpty else { return }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? trimmedBid : name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let existing = WhitelistEngine.shared.tool(named: cleanName), existing.isBuiltIn {
+            return
+        }
+        let groups = appGroup.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? []
+            : [appGroup.trimmingCharacters(in: .whitespacesAndNewlines)]
 
         let newTool = WhitelistedTool(
             name: cleanName,
-            allowedBundleIds: [bundleId],
+            allowedBundleIds: [trimmedBid],
             allowedAppGroups: groups,
             description: WQStrings.customRuleDefaultDescription,
             isEnabled: true,
@@ -910,6 +1048,9 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func removeCustomWhitelistRule(named name: String) {
+        if let existing = WhitelistEngine.shared.tool(named: name), existing.isBuiltIn {
+            return
+        }
         WhitelistEngine.shared.removeTool(named: name)
         self.whitelistedTools = WhitelistEngine.shared.allTools
         recalculateSessionTiers()
@@ -926,23 +1067,23 @@ public final class ScanViewModel: ObservableObject {
         var updatedFindings: [ScanFinding] = []
 
         for finding in session.findings {
-            let wlResult = WhitelistEngine.shared.isWhitelisted(
-                bundleId: finding.bundleId,
-                appGroups: finding.evidence.appGroups,
-                matchedSignatures: finding.evidence.matchedSymbols,
-                teamId: finding.teamId
-            )
-
-            let newTier: RiskTier
-            if wlResult.isWhitelisted {
-                newTier = .knownTool
-            } else if finding.indicators.contains(where: { $0.severity == .highRisk }) {
-                newTier = .highRisk
+            let provisionalRisk: RiskTier
+            if finding.indicators.contains(where: { $0.severity == .highRisk }) {
+                provisionalRisk = .highRisk
             } else if finding.indicators.contains(where: { $0.severity == .caution }) {
-                newTier = .caution
+                provisionalRisk = .caution
             } else {
-                newTier = .safe
+                provisionalRisk = .safe
             }
+
+            let wlResult: (isWhitelisted: Bool, toolName: String?)
+            if provisionalRisk == .highRisk || provisionalRisk == .caution {
+                wlResult = WhitelistEngine.shared.evaluateFindingWhitelist(finding)
+            } else {
+                wlResult = (false, nil)
+            }
+
+            let newTier: RiskTier = wlResult.isWhitelisted ? .knownTool : provisionalRisk
 
             let updated = ScanFinding(
                 bundleId: finding.bundleId,
@@ -983,15 +1124,16 @@ public final class ScanViewModel: ObservableObject {
             return
         }
 
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WQGuardAuditReports", isDirectory: true)
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempDir = Self.ensureSafeNonSymlinkDirectory(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent("WQGuardAuditReports", isDirectory: true)
+        )
 
         switch exportFormat {
         case .markdown:
             let md = ReportGenerator.shared.generateMarkdownReport(session: session)
             self.exportedReportText = md
             let url = tempDir.appendingPathComponent("WQGuard-Audit-Report-\(session.sessionId).md")
-            try? md.write(to: url, atomically: true, encoding: .utf8)
+            try? IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(Data(md.utf8), to: url)
             self.exportedReportURL = url
 
         case .json:
@@ -999,7 +1141,7 @@ public final class ScanViewModel: ObservableObject {
                let jsonStr = String(data: data, encoding: .utf8) {
                 self.exportedReportText = jsonStr
                 let url = tempDir.appendingPathComponent("WQGuard-Audit-Report-\(session.sessionId).json")
-                try? data.write(to: url, options: .atomic)
+                try? IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(data, to: url)
                 self.exportedReportURL = url
             }
 
@@ -1007,7 +1149,7 @@ public final class ScanViewModel: ObservableObject {
             let text = ReportGenerator.shared.generatePlainTextReport(session: session)
             self.exportedReportText = text
             let url = tempDir.appendingPathComponent("WQGuard-Audit-Report-\(session.sessionId).txt")
-            try? text.write(to: url, atomically: true, encoding: .utf8)
+            try? IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(Data(text.utf8), to: url)
             self.exportedReportURL = url
         }
     }

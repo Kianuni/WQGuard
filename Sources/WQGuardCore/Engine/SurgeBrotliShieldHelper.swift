@@ -7,6 +7,7 @@
 //  and Stash (.stoverride) to mitigate CVE-2026-111497 (HTTP2Shell).
 //
 
+import Darwin
 import Foundation
 
 public enum ProxyShieldPlatform: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -185,7 +186,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
     public static let rawModuleTemplate: String = """
     #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
     #!desc=Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write (CVE-2026-111497 / HTTP2Shell, CVSS 9.2) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 针对未修复 libbrotli 堆越界写漏洞，剥离 br 压缩声明并拦截强推响应；内置 16 项苹果与网银负向排除。
-    #!version=1.3.1
+    #!version=1.3.2
     #!category=Security / 安全防护
     #!arguments=EXTRA_MITM_HOSTS:*.example.invalid
     #!arguments-desc=Extra hostnames/wildcards for Brotli downgrade protection (set * to cover all Safari/WebView domains; Apple & banking domains remain excluded). | 可追加高风险自定义域名（填 * 可覆盖全站流量，内置排除列表保障苹果与网银不受影响）。
@@ -210,9 +211,23 @@ public final class SurgeBrotliShieldHelper: Sendable {
         generateShieldContent(for: .surge, extraHosts: extraHosts)
     }
 
+    /// Sanitizes user-supplied positive MITM hostnames/wildcards so newline/section/comment/YAML injection
+    /// or leading-hyphen negative exclusions (`-*`) can never corrupt or disable generated shields.
+    private static func sanitizeExtraHost(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 253, !trimmed.hasPrefix("-") else { return nil }
+        let isValid = trimmed.utf8.allSatisfy { b in
+            (b >= 0x41 && b <= 0x5A)
+                || (b >= 0x61 && b <= 0x7A)
+                || (b >= 0x30 && b <= 0x39)
+                || b == 0x2E || b == 0x2D || b == 0x2A || b == 0x5F
+        }
+        return isValid ? trimmed : nil
+    }
+
     /// Generates ready-to-import shield configuration for any of the 5 supported iOS proxy clients.
     public func generateShieldContent(for platform: ProxyShieldPlatform, extraHosts: [String] = []) -> String {
-        let cleanExtra = extraHosts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let cleanExtra = extraHosts.compactMap(Self.sanitizeExtraHost)
         let exclusionsCSV = Self.mandatoryNegativeExclusions.joined(separator: ", ")
         let tldsCSV = Self.defaultHighRiskTLDs.joined(separator: ", ")
         let appendedCSV = cleanExtra.isEmpty ? "" : ", \(cleanExtra.joined(separator: ", "))"
@@ -229,7 +244,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
             return """
             #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
             #!desc=Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求头并拦截恶意强推响应，内置 16 项苹果与网银负向排除。
-            #!version=1.3.1
+            #!version=1.3.2
             #!category=Security / 安全防护
 
             [Header Rewrite]
@@ -247,7 +262,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
         case .quantumultX:
             return """
             ; WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497 / HTTP2Shell) — Quantumult X Rewrite Resource
-            ; #!version=1.3.1
+            ; #!version=1.3.2
             ; Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write by stripping br requests & blocking unsolicited br responses.
             ; Usage / 使用方式: Add under Quantumult X Rewrite -> Resources and enable Rewrite + MitM + CA certificate trust.
 
@@ -266,7 +281,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
             return """
             #!name = WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
             #!desc = Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding to gzip,deflate & blocking unsolicited br responses; 16 Apple/banking exclusions. | 强制降级 Accept-Encoding 并阻断强推 br 响应，内置 16 项负向排除。
-            #!version=1.3.1
+            #!version=1.3.2
             #!openUrl = https://github.com/Kianuni/WQGuard
             #!author = WQGuard Contributors
             #!tag = Security / 安全防护
@@ -289,7 +304,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
             let allHosts = Self.mandatoryNegativeExclusions + Self.defaultHighRiskTLDs + cleanExtra
             let yamlMitmLines = allHosts.map { "    - \"\($0)\"" }.joined(separator: "\n")
             return """
-            #!version=1.3.1
+            #!version=1.3.2
             name: "WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)"
             desc: "Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (HTTP2Shell) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求声明并阻断强推响应，内置 16 项负向排除。"
             category: "Security / 安全防护"
@@ -312,15 +327,16 @@ public final class SurgeBrotliShieldHelper: Sendable {
               brotli-response-guard:
                 payload: |
                   const headers = ($response && $response.headers) || {};
-                  const ceParts = [];
+                  const encParts = [];
                   for (const k of Object.keys(headers)) {
-                    if (String(k).toLowerCase() === 'content-encoding') {
+                    const lk = String(k).trim().toLowerCase();
+                    if (lk === 'content-encoding' || lk === 'transfer-encoding') {
                       const v = headers[k];
-                      ceParts.push(Array.isArray(v) ? v.join(', ') : String(v ?? ''));
+                      encParts.push(Array.isArray(v) ? v.join(', ') : String(v ?? ''));
                     }
                   }
-                  const ce = ceParts.join(', ');
-                  if (/(^|[,\\s])br($|[,\\s;])/i.test(ce)) {
+                  const rawEnc = encParts.join(', ');
+                  if (/(^|[^A-Za-z0-9_.-])((?:x-)?(?:br|brotli|dcb|sbr))($|[^A-Za-z0-9_.-])/i.test(rawEnc)) {
                     $done({
                       status: 403,
                       headers: {
@@ -440,6 +456,17 @@ public final class SurgeBrotliShieldHelper: Sendable {
             ))
         }
 
+        let hasBlanketNegativeMITMKillSwitch = content.range(
+            of: #"(?:^|[\s,='"])-\*(?:$|[\s,'"])"#,
+            options: .regularExpression
+        ) != nil
+        if hasBlanketNegativeMITMKillSwitch {
+            errors.append(WQLocale.pick(
+                en: "Blanket negative MITM exclusion (-*) disables Brotli shield protection",
+                zh: "存在全局负向排除 (-*)，会导致 Brotli 降级护盾失效"
+            ))
+        }
+
         let isCompliant = errors.isEmpty && missing.isEmpty
         return ValidationResult(
             isCompliant: isCompliant,
@@ -464,9 +491,26 @@ public final class SurgeBrotliShieldHelper: Sendable {
     ) throws -> URL {
         let content = generateShieldContent(for: platform, extraHosts: extraHosts)
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WQGuardSurgeExports", isDirectory: true)
+        var dirSt = stat()
+        if lstat(IPAPackageScanner.stripTrailingSlashes(tempDir.path), &dirSt) == 0,
+           (dirSt.st_mode & S_IFMT) == S_IFLNK {
+            try FileManager.default.removeItem(at: tempDir)
+        }
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        let fileURL = tempDir.appendingPathComponent(customFilename ?? platform.defaultFilename)
-        try content.write(to: fileURL, atomically: true, encoding: .utf8)
+        let safeFilename: String = {
+            guard let raw = customFilename?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  !raw.contains("/"),
+                  !raw.contains("\\"),
+                  !raw.contains("\0"),
+                  raw != ".",
+                  raw != ".." else {
+                return platform.defaultFilename
+            }
+            return raw
+        }()
+        let fileURL = tempDir.appendingPathComponent(safeFilename)
+        try IPAPackageScanner.writeBoundedRegularFileAtomicNoFollow(Data(content.utf8), to: fileURL)
         return fileURL
     }
 }

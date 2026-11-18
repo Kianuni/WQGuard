@@ -75,8 +75,9 @@ public enum EntitlementGating {
     
     /// Evaluates gating from a parsed entitlements dictionary (from XML or DER CSBlob).
     public static func evaluate(entitlements: [String: Any]) -> EntitlementGatingResult {
-        if let rawGroups = entitlements["com.apple.security.application-groups"] as? [String], !rawGroups.isEmpty {
-            return evaluate(hasAppGroups: true, appGroups: rawGroups)
+        let extractedGroups = CSBlobParser.shared.extractAppGroups(fromPlistDict: entitlements)
+        if !extractedGroups.isEmpty {
+            return evaluate(hasAppGroups: true, appGroups: extractedGroups)
         }
         return evaluate(hasAppGroups: false, appGroups: [])
     }
