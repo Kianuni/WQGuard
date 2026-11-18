@@ -2,7 +2,7 @@
 //  FirmwareRadarView.swift
 //  WQGuard
 //
-//  Evaluates device firmware against 8 2026 iOS vulnerabilities and provides
+//  Evaluates device firmware against 13 2026 iOS vulnerabilities and provides
 //  actionable non-upgrade mitigations with Surge module export.
 //
 
@@ -145,7 +145,7 @@ public struct FirmwareRadarView: View {
                 )
                 .padding(.horizontal)
 
-                // 8 CVE Status Cards Grid
+                // 13 CVE Status Cards Grid
                 VStack(alignment: .leading, spacing: 12) {
                     Text(WQStrings.radarKnownVulnerabilitiesHeader(count: FirmwarePostureEngine.allVulnerabilities.count))
                         .font(.headline)

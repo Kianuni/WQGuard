@@ -125,6 +125,11 @@ public enum FirmwareCVEID: String, Codable, Sendable, CaseIterable {
     case appIntentsBypass = "CVE-2026-113963"
     case imessageGroup = "CVE-2026-113960"
     case bluetoothAirPlay = "CVE-2026-113964-70"
+    case audioMxdBypass = "CVE-2026-65339"
+    case dyldZeroDay = "CVE-2026-20700"
+    case webkitSandboxEscape = "CVE-2026-113897"
+    case accessorySetupBluetooth = "CVE-2026-84493"
+    case bookRestoreEscape = "PoC:BookRestore"
 }
 
 public struct FirmwareVulnerability: Codable, Sendable, Identifiable, Equatable {
@@ -210,81 +215,108 @@ public final class FirmwarePostureEngine: Sendable {
     public func isVulnerable(_ cve: FirmwareCVEID, in version: SystemOSVersion) -> Bool {
         switch cve {
         case .worseQuery0day:
-            // Unpatched 0day: affects all iOS 26.x and 27.x versions currently known (26.0 - 27.2.1+)
-            return version.major >= 26
-
-        case .photosBypass:
-            // CVE-2026-112676: Affects iOS < 27.2 and iOS 26 < 26.7.2
-            if version.major == 26 {
-                return version < SystemOSVersion(major: 26, minor: 7, patch: 2)
+            // Patched in iOS 27.3 beta 2+ / iOS 27.3; iOS 26.0 - 26.7.3 and 27.0 - 27.2.1 remain exposed
+            if version.major < 26 {
+                return false
+            } else if version.major == 26 {
+                return true
             } else if version.major == 27 {
-                return version < SystemOSVersion(major: 27, minor: 2, patch: 0)
+                return version < SystemOSVersion(major: 27, minor: 3, patch: 0)
             } else {
-                return version.major < 26
+                return false
             }
 
-        case .brotliOOB:
-            // CVE-2026-111497 (HTTP2Shell): Affects iOS < 27.2.1 and iOS 26 < 26.7.3
-            if version.major == 26 {
-                return version < SystemOSVersion(major: 26, minor: 7, patch: 3)
-            } else if version.major == 27 {
-                return version < SystemOSVersion(major: 27, minor: 2, patch: 1)
-            } else {
-                return version.major < 26
-            }
+        case .photosBypass, .coreGraphicsPDF, .webkitSandboxEscape:
+            // Patched in iOS 27.2 and iOS 26.7.2
+            return isExposedBranchMatrix(
+                version: version,
+                ios26Patch: SystemOSVersion(major: 26, minor: 7, patch: 2),
+                ios27Patch: SystemOSVersion(major: 27, minor: 2, patch: 0)
+            )
 
-        case .coreGraphicsPDF:
-            // CVE-2026-112611: Affects iOS < 27.2 and iOS 26 < 26.7.2
-            if version.major == 26 {
-                return version < SystemOSVersion(major: 26, minor: 7, patch: 2)
-            } else if version.major == 27 {
-                return version < SystemOSVersion(major: 27, minor: 2, patch: 0)
-            } else {
-                return version.major < 26
-            }
+        case .brotliOOB, .appIntentsBypass, .imessageGroup, .bluetoothAirPlay:
+            // Patched in iOS 27.2.1 and iOS 26.7.3
+            return isExposedBranchMatrix(
+                version: version,
+                ios26Patch: SystemOSVersion(major: 26, minor: 7, patch: 3),
+                ios27Patch: SystemOSVersion(major: 27, minor: 2, patch: 1)
+            )
 
         case .coreGraphics2D:
             // CVE-2026-86950: Patched in iOS 27.0, iOS 26.7.1, and iOS 18.7.11
-            if version.major >= 27 {
-                return false
-            } else if version.major == 26 {
-                return version < SystemOSVersion(major: 26, minor: 7, patch: 1)
-            } else if version.major == 18 {
-                return version < SystemOSVersion(major: 18, minor: 7, patch: 11)
-            } else {
-                return true
-            }
+            return isExposedBranchMatrix(
+                version: version,
+                ios18Patch: SystemOSVersion(major: 18, minor: 7, patch: 11),
+                ios26Patch: SystemOSVersion(major: 26, minor: 7, patch: 1),
+                ios27Patch: nil
+            )
 
-        case .appIntentsBypass:
-            // CVE-2026-113963: Affects iOS < 27.2.1 and iOS 26 < 26.7.3
-            if version.major == 26 {
-                return version < SystemOSVersion(major: 26, minor: 7, patch: 3)
-            } else if version.major == 27 {
-                return version < SystemOSVersion(major: 27, minor: 2, patch: 1)
-            } else {
-                return version.major < 26
-            }
+        case .audioMxdBypass:
+            // CVE-2026-65339: Patched in iOS 27.0, iOS 26.6.1, and iOS 18.7.11
+            return isExposedBranchMatrix(
+                version: version,
+                ios18Patch: SystemOSVersion(major: 18, minor: 7, patch: 11),
+                ios26Patch: SystemOSVersion(major: 26, minor: 6, patch: 1),
+                ios27Patch: nil
+            )
 
-        case .imessageGroup:
-            // CVE-2026-113960 & CVE-2026-113961: Affects iOS < 27.2.1 and iOS 26 < 26.7.3
-            if version.major == 26 {
-                return version < SystemOSVersion(major: 26, minor: 7, patch: 3)
-            } else if version.major == 27 {
-                return version < SystemOSVersion(major: 27, minor: 2, patch: 1)
-            } else {
-                return version.major < 26
-            }
+        case .dyldZeroDay:
+            // CVE-2026-20700: Patched in iOS 27.0, iOS 26.3, and iOS 18.7.5
+            return isExposedBranchMatrix(
+                version: version,
+                ios18Patch: SystemOSVersion(major: 18, minor: 7, patch: 5),
+                ios26Patch: SystemOSVersion(major: 26, minor: 3, patch: 0),
+                ios27Patch: nil
+            )
 
-        case .bluetoothAirPlay:
-            // CVE-2026-113964-70: Affects iOS < 27.2.1 and iOS 26 < 26.7.3
-            if version.major == 26 {
-                return version < SystemOSVersion(major: 26, minor: 7, patch: 3)
-            } else if version.major == 27 {
-                return version < SystemOSVersion(major: 27, minor: 2, patch: 1)
-            } else {
-                return version.major < 26
-            }
+        case .accessorySetupBluetooth:
+            // CVE-2026-84493: Patched in iOS 27.2 and iOS 26.7.2 (iOS 18+ only)
+            return isExposedBranchMatrix(
+                version: version,
+                minMajor: 18,
+                ios26Patch: SystemOSVersion(major: 26, minor: 7, patch: 2),
+                ios27Patch: SystemOSVersion(major: 27, minor: 2, patch: 0)
+            )
+
+        case .bookRestoreEscape:
+            // PoC:BookRestore / bl_sbx: Patched in iOS 27.0 and iOS 26.2 (iOS 18+ only)
+            return isExposedBranchMatrix(
+                version: version,
+                minMajor: 18,
+                ios26Patch: SystemOSVersion(major: 26, minor: 2, patch: 0),
+                ios27Patch: nil
+            )
         }
+    }
+
+    private func isExposedBranchMatrix(
+        version: SystemOSVersion,
+        minMajor: Int = 0,
+        ios18Patch: SystemOSVersion? = nil,
+        ios26Patch: SystemOSVersion,
+        ios27Patch: SystemOSVersion?
+    ) -> Bool {
+        if version.major < minMajor {
+            return false
+        }
+        if let p27 = ios27Patch {
+            if version.major >= 28 {
+                return false
+            }
+            if version.major == 27 {
+                return version < p27
+            }
+        } else if version.major >= 27 {
+            return false
+        }
+
+        if version.major == 26 {
+            return version < ios26Patch
+        }
+        if let p18 = ios18Patch, version.major == 18 {
+            return version < p18
+        }
+        return true
     }
 
     /// Evaluates firmware posture against all cataloged vulnerabilities.
@@ -335,16 +367,16 @@ public final class FirmwarePostureEngine: Sendable {
                 cvssScore: 8.8,
                 severity: .highRisk,
                 affectedDescription: WQLocale.pick(
-                    en: "iOS 26.0 – 27.2.1+ (Unpatched 0-day)",
-                    zh: "iOS 26.0 – 27.2.1+ (未修复 0day)"
+                    en: "iOS 26.0 – 26.7.3 and iOS 27.0 – 27.2.1",
+                    zh: "iOS 26.0 – 26.7.3 及 iOS 27.0 – 27.2.1"
                 ),
                 patchedVersionDescription: WQLocale.pick(
-                    en: "No official patch yet (Unpatched 0-day)",
-                    zh: "暂无官方补丁 (未修复 0day)"
+                    en: "iOS 27.3 (patched in iOS 27.3 beta 2+)",
+                    zh: "iOS 27.3（已于 iOS 27.3 beta 2+ 修复）"
                 ),
                 details: WQLocale.pick(
-                    en: "Confused-deputy flaw in containermanagerd when handling class=7 (App Group) part=3 (Library/Caches) queries without prefix containment checks. Combined with escaping symlinks and fsgetpath inode enumeration, it tricks the kernel into issuing sandbox extension tokens for arbitrary app containers.",
-                    zh: "利用 containermanagerd 在处理 class=7 (App Group) part=3 (Library/Caches) 查询时，缺少路径前缀隔离校验的 Confused Deputy 漏洞，结合 escaping symlink 诱导内核签发任意 App 容器的沙盒扩展令牌。"
+                    en: "Confused-deputy flaw in containermanagerd when handling class=7 (App Group) part=3 (Library/Caches) queries without prefix containment checks. Combined with escaping symlinks and fsgetpath inode enumeration, it tricks the kernel into issuing sandbox extension tokens for arbitrary app containers. Patched by Apple in iOS 27.3 beta 2+ / iOS 27.3, while iOS 26.0–26.7.3 and 27.0–27.2.1 remain exposed.",
+                    zh: "利用 containermanagerd 在处理 class=7 (App Group) part=3 (Library/Caches) 查询时缺少路径前缀隔离校验的 Confused Deputy 漏洞，结合 escaping symlink 与 fsgetpath 诱导内核签发任意 App 容器的沙盒扩展令牌。Apple 已在 iOS 27.3 beta 2+ / iOS 27.3 修复，iOS 26.0–26.7.3 与 27.0–27.2.1 仍受影响。"
                 ),
                 mitigations: [
                     ActionableMitigation(
@@ -643,6 +675,223 @@ public final class FirmwarePostureEngine: Sendable {
                         category: .systemSettings,
                         actionUrl: "App-Prefs:root=Bluetooth",
                         relatedCVEs: ["CVE-2026-113964-70"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .audioMxdBypass,
+                name: WQLocale.pick(
+                    en: "AudioMxd Microphone TCC & MediaExperience Bypass (CVE-2026-65339)",
+                    zh: "AudioMxd 麦克风隐私权限与 MediaExperience 绕过 (CVE-2026-65339)"
+                ),
+                subsystem: "CoreMedia / audiomxd / MediaExperience",
+                cvssScore: 7.8,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.0, iOS 26 < 26.6.1, iOS 18 < 18.7.11 (and unpatched legacy branches)",
+                    zh: "iOS < 27.0、iOS 26 < 26.6.1、iOS 18 < 18.7.11（及未获补丁旧分支）"
+                ),
+                patchedVersionDescription: "iOS 27.0 / iOS 26.6.1 / iOS 18.7.11",
+                details: WQLocale.pick(
+                    en: "Privilege validation flaw in audiomxd and MediaExperience allows crafted apps to invoke private CMSession/AudioSession properties or spoof entitlements to bypass microphone TCC consent checks. Patched in iOS 27.0, 26.6.1, and 18.7.11.",
+                    zh: "audiomxd 与 MediaExperience 进程存在权限校验缺陷，恶意应用可通过调用私有 CMSession/AudioSession 属性或伪造私有 Entitlement 绕过系统麦克风 TCC 授权提示。已于 iOS 27.0、26.6.1 及 18.7.11 修复。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Audit Microphone Permissions & Indicator",
+                            zh: "核查麦克风权限与状态栏橙点"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Review Settings -> Privacy & Security -> Microphone and revoke access for untrusted sideloaded apps; watch for unexpected orange microphone indicators in Control Center.",
+                            zh: "前往「设置 -> 隐私与安全性 -> 麦克风」撤回非必要应用的麦克风授权，并留意控制中心顶部的橙色麦克风调用指示灯。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=Privacy&path=MICROPHONE",
+                        relatedCVEs: ["CVE-2026-65339"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Scan IPAs for AudioMxd Bypass Signatures",
+                            zh: "扫描 IPA 中的 AudioMxd 越权特征"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Run WQGuard static IPA analysis to detect unauthorized MediaExperience.framework linkage, CMSessionSetProperty symbols, or \(IOCTokenArmor.tAudioDaemon) XPC targeting.",
+                            zh: "使用 WQGuard 扫描本地 IPA，排查非法引用 MediaExperience.framework、CMSessionSetProperty 符号或访问 \(IOCTokenArmor.tAudioDaemon) 服务的可疑应用。"
+                        ),
+                        category: .wqguardScan,
+                        relatedCVEs: ["CVE-2026-65339"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .dyldZeroDay,
+                name: WQLocale.pick(
+                    en: "dyld Dynamic Linker Arbitrary Memory Write 0-day (CVE-2026-20700)",
+                    zh: "dyld 动态链接器任意内存写入 0day (CVE-2026-20700)"
+                ),
+                subsystem: "dyld / Mach-O Dynamic Linker",
+                cvssScore: 7.8,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.0, iOS 26 < 26.3, iOS 18 < 18.7.5 (and unpatched legacy branches)",
+                    zh: "iOS < 27.0、iOS 26 < 26.3、iOS 18 < 18.7.5（及未获补丁旧分支）"
+                ),
+                patchedVersionDescription: "iOS 27.0 / iOS 26.3 / iOS 18.7.5",
+                details: WQLocale.pick(
+                    en: "Memory corruption vulnerability in dyld dynamic linker image loading and Mach-O fixup parsing, exploited in the wild for arbitrary code execution via crafted binaries or web content chains. Patched in iOS 27.0, 26.3, and 18.7.5.",
+                    zh: "dyld 动态链接器在解析 Mach-O 镜像加载与重定位数据时存在任意内存写入漏洞，可在恶意二进制或组合攻击链中触发越权代码执行。已于 iOS 27.0、26.3 及 18.7.5 修复。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Enable Lockdown Mode for High-Risk Targets",
+                            zh: "高风险目标开启锁定模式 (Lockdown Mode)"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Enable Settings -> Privacy & Security -> Lockdown Mode to harden JIT/dyld attack surfaces against targeted exploit chains, and avoid installing unverified Mach-O binaries.",
+                            zh: "前往「设置 -> 隐私与安全性 -> 锁定模式」启用严格防护以收紧 JIT 与动态加载攻击面，切勿安装来源不明的 Mach-O 应用。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=Privacy&path=LOCKDOWN_MODE",
+                        relatedCVEs: ["CVE-2026-20700"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Audit Sideloaded Mach-O Binaries with WQGuard",
+                            zh: "使用 WQGuard 审查侧载 Mach-O 二进制"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Inspect sideloaded IPAs with WQGuard prior to execution to catch anomalous dylibs, direct syscall evasion (svc #0x80), and unsigned executable payloads.",
+                            zh: "在运行外部侧载 IPA 前使用 WQGuard 审查可疑动态库注入、内联直接系统调用 (svc #0x80) 与异常 Mach-O 载荷。"
+                        ),
+                        category: .wqguardScan,
+                        relatedCVEs: ["CVE-2026-20700"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .webkitSandboxEscape,
+                name: WQLocale.pick(
+                    en: "WebKit GPU & WebContent Sandbox Escape Chain (CVE-2026-113897)",
+                    zh: "WebKit 渲染与 GPU 进程沙盒逃逸链 (CVE-2026-113897)"
+                ),
+                subsystem: "WebKit / WebContent / GPU Process",
+                cvssScore: 8.8,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS < 27.2 and iOS 26 < 26.7.2 (and unpatched legacy branches)",
+                    zh: "iOS < 27.2 且 iOS 26 < 26.7.2（及未获补丁旧分支）"
+                ),
+                patchedVersionDescription: "iOS 27.2 / iOS 26.7.2",
+                details: WQLocale.pick(
+                    en: "Sandbox escape flaw in WebKit IPC and GPU process resource validation allowing compromised WebContent renderers to break out of the browser sandbox via malicious web pages. Patched in iOS 27.2 and 26.7.2.",
+                    zh: "WebKit 进程间通信与 GPU 进程资源校验存在缺陷，受恶意网页攻破的 WebContent 渲染进程可借此突破浏览器沙盒隔离边界。已于 iOS 27.2 及 26.7.2 修复。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Harden Safari & WebView via Lockdown Mode",
+                            zh: "通过锁定模式加固 Safari 与 WebView"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Enable Lockdown Mode (Settings -> Privacy & Security -> Lockdown Mode) or disable JavaScript for untrusted sites under Safari -> Settings -> Advanced.",
+                            zh: "开启系统锁定模式（设置 -> 隐私与安全性 -> 锁定模式），或在「设置 -> Safari 浏览器 -> 高级」中对不可信站点限制 JavaScript 执行。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=Privacy&path=LOCKDOWN_MODE",
+                        relatedCVEs: ["CVE-2026-113897"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Isolate Wallet & Untrusted Web Browsing",
+                            zh: "隔离钱包操作与不可信网页浏览"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Avoid opening unverified DApp links or phishing URLs inside in-app WebViews alongside sensitive cryptocurrency wallets or signing sessions.",
+                            zh: "避免在持有高价值加密钱包或登录会话的设备中使用 App 内置 WebView 打开不明 DApp 或可疑短链接。"
+                        ),
+                        category: .appHygiene,
+                        relatedCVEs: ["CVE-2026-113897"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .accessorySetupBluetooth,
+                name: WQLocale.pick(
+                    en: "AccessorySetupKit Bluetooth Pairing & Privacy Bypass (CVE-2026-84493)",
+                    zh: "AccessorySetupKit 蓝牙配对与隐私授权绕过 (CVE-2026-84493)"
+                ),
+                subsystem: "AccessorySetupKit / CoreBluetooth",
+                cvssScore: 6.5,
+                severity: .caution,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS 18+ (< 27.2 and iOS 26 < 26.7.2)",
+                    zh: "iOS 18+（< 27.2 且 iOS 26 < 26.7.2）"
+                ),
+                patchedVersionDescription: "iOS 27.2 / iOS 26.7.2",
+                details: WQLocale.pick(
+                    en: "Authorization validation bypass in AccessorySetupKit allows sideloaded apps lacking proper Bluetooth privacy usage declarations or AccessorySetupKitSupports entries to silently discover or interact with nearby Bluetooth accessories on iOS 18+. Patched in iOS 27.2 and 26.7.2.",
+                    zh: "AccessorySetupKit 权限校验绕过缺陷允许缺少合规蓝牙隐私声明或 NSAccessorySetupKitSupports 配置的侧载应用，在 iOS 18+ 上静默发现或访问邻近蓝牙外设。已于 iOS 27.2 及 26.7.2 修复。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Restrict App Bluetooth & Accessory Permissions",
+                            zh: "收紧应用蓝牙与外设访问权限"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Review Settings -> Privacy & Security -> Bluetooth and disable access for unknown or sideloaded apps that do not require hardware accessories.",
+                            zh: "前往「设置 -> 隐私与安全性 -> 蓝牙」，关闭无需连接硬件外设的未知或侧载应用蓝牙权限。"
+                        ),
+                        category: .systemSettings,
+                        actionUrl: "App-Prefs:root=Privacy&path=BT_PERIPHERAL",
+                        relatedCVEs: ["CVE-2026-84493"]
+                    ),
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Audit IPAs for AccessorySetupKit Info.plist Bypass",
+                            zh: "排查 IPA 中的 AccessorySetupKit 声明绕过"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Scan sideloaded IPAs with WQGuard to flag apps linking AccessorySetupKit.framework / ASAccessorySession without required Info.plist privacy declarations.",
+                            zh: "使用 WQGuard 扫描侧载 IPA，识别调用 AccessorySetupKit.framework / ASAccessorySession 却缺失合规 Info.plist 蓝牙声明的异常应用。"
+                        ),
+                        category: .wqguardScan,
+                        relatedCVEs: ["CVE-2026-84493"]
+                    )
+                ]
+            ),
+            FirmwareVulnerability(
+                cveId: .bookRestoreEscape,
+                name: WQLocale.pick(
+                    en: "BookRestore / bl_sbx Arbitrary System File Overwrite (PoC:BookRestore)",
+                    zh: "BookRestore / bl_sbx 系统文件越权覆写逃逸 (PoC:BookRestore)"
+                ),
+                subsystem: "bookassetd / itunesstored / MobileGestalt",
+                cvssScore: 7.8,
+                severity: .highRisk,
+                affectedDescription: WQLocale.pick(
+                    en: "iOS 18+ (< 27.0 and iOS 26 < 26.2)",
+                    zh: "iOS 18+（< 27.0 且 iOS 26 < 26.2）"
+                ),
+                patchedVersionDescription: "iOS 27.0 / iOS 26.2",
+                details: WQLocale.pick(
+                    en: "Path traversal and SQLite restoration abuse in bookassetd / itunesstored (\(IOCTokenArmor.tBookSQLite) / \(IOCTokenArmor.tDownloadsSQLite)), allowing unprivileged apps on iOS 18+ to overwrite protected system files such as MobileGestalt caches outside the app sandbox. Patched in iOS 27.0 and 26.2.",
+                    zh: "bookassetd 与 itunesstored（\(IOCTokenArmor.tBookSQLite) / \(IOCTokenArmor.tDownloadsSQLite)）恢复流程存在路径穿越缺陷，可在 iOS 18+ 上越权覆写沙盒外的系统文件（如 MobileGestalt 缓存）。已于 iOS 27.0 及 26.2 修复。"
+                ),
+                mitigations: [
+                    ActionableMitigation(
+                        title: WQLocale.pick(
+                            en: "Block BookRestore & MobileGestalt Tamper IPAs",
+                            zh: "拦截 BookRestore 与 MobileGestalt 篡改应用"
+                        ),
+                        instructions: WQLocale.pick(
+                            en: "Run WQGuard static IPA analysis before installing sideloaded packages to detect BookLibraryPrivate.framework, bookassetd/itunesstored XPC targeting, \(IOCTokenArmor.tBookSQLite), or MobileGestalt cache strings.",
+                            zh: "安装外部侧载包前通过 WQGuard 静态审查，拦截包含 BookLibraryPrivate.framework、bookassetd/itunesstored 交互、\(IOCTokenArmor.tBookSQLite) 或 MobileGestalt 缓存路径的越权包。"
+                        ),
+                        category: .wqguardScan,
+                        relatedCVEs: ["PoC:BookRestore"]
                     )
                 ]
             )

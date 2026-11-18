@@ -594,7 +594,11 @@ public final class IPAPackageScanner: @unchecked Sendable {
             var allMatchedSymbols: Set<String> = []
             var allLinkedDylibs: Set<String> = Set(mainDetails.linkedDylibs)
             var unencryptedSymbols: Set<String> = mainDetails.isFairPlayEncrypted ? [] : Set(mainDetails.symbols)
+            var unencryptedTextStrings: Set<String> = mainDetails.isFairPlayEncrypted ? [] : Set(mainDetails.textStrings)
             var hasUnencryptedBinary = !mainDetails.isFairPlayEncrypted
+            var appLinkedDylibs: Set<String> = Set(mainDetails.linkedDylibs)
+            var appUnencryptedSymbols: Set<String> = mainDetails.isFairPlayEncrypted ? [] : Set(mainDetails.symbols)
+            var appHasUnencryptedBinary = !mainDetails.isFairPlayEncrypted
             var dynamicLoadingFound = false
             var pathEnumerationFound = false
             
@@ -628,7 +632,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
                     let isFrameworkBinary = itemURL.deletingLastPathComponent().pathExtension.lowercased() == "framework" && itemURL.pathExtension.isEmpty
                     
                     if isDylib || isFrameworkBinary {
-                        let relPath = itemURL.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
+                        let relPath = Self.bundleRelativePath(of: itemURL, in: bundleURL)
                         if isDylib {
                             allLinkedDylibs.insert("@executable_path/\(relPath)")
                         }
@@ -666,9 +670,16 @@ public final class IPAPackageScanner: @unchecked Sendable {
                             }
                             allMatchedSymbols.formUnion(fwFinding.evidence.matchedSymbols)
                             allLinkedDylibs.formUnion(fwDetails.linkedDylibs)
+                            appLinkedDylibs.formUnion(fwDetails.linkedDylibs)
+                            if isDylib {
+                                appLinkedDylibs.insert("@executable_path/\(relPath)")
+                            }
                             if !fwDetails.isFairPlayEncrypted {
                                 hasUnencryptedBinary = true
+                                appHasUnencryptedBinary = true
                                 unencryptedSymbols.formUnion(fwDetails.symbols)
+                                appUnencryptedSymbols.formUnion(fwDetails.symbols)
+                                unencryptedTextStrings.formUnion(fwDetails.textStrings)
                             }
                             if fwFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
                             if fwFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
@@ -692,10 +703,12 @@ public final class IPAPackageScanner: @unchecked Sendable {
                        !plugSlices.isEmpty {
                         let plugDetails = MachOScanner.shared.parseMachO(files: plugSlices, rawData: binData)
                         var plugGroups: [String] = []
+                        var plugEntitlementsDict: [String: Any] = [:]
                         for s in plugSlices {
                             let (_, sg) = CSBlobParser.shared.extractAppGroups(from: s.codeSignatureData)
                             for g in sg where !plugGroups.contains(g) { plugGroups.append(g) }
                             let sEnts = CSBlobParser.shared.parseMergedEntitlements(from: s.codeSignatureData)
+                            plugEntitlementsDict = CSBlobParser.mergeEntitlementDictionaries(plugEntitlementsDict, sEnts)
                             entitlementsDict = CSBlobParser.mergeEntitlementDictionaries(entitlementsDict, sEnts)
                         }
                         let plugGating = EntitlementGating.evaluate(hasAppGroups: !plugGroups.isEmpty, appGroups: plugGroups)
@@ -714,7 +727,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
                         )
                         let plugFinding = MachOScanner.shared.scan(details: plugDetails, context: plugContext)
                         
-                        let relPath = plugBinURL.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
+                        let relPath = Self.bundleRelativePath(of: plugBinURL, in: bundleURL)
                         for ind in plugFinding.indicators {
                             allIndicators.append(ThreatIndicator(
                                 signature: ind.signature,
@@ -726,9 +739,13 @@ public final class IPAPackageScanner: @unchecked Sendable {
                         }
                         allMatchedSymbols.formUnion(plugFinding.evidence.matchedSymbols)
                         allLinkedDylibs.formUnion(plugDetails.linkedDylibs)
+                        var plugLinkedDylibs: Set<String> = Set(plugDetails.linkedDylibs)
+                        var plugUnencryptedSymbols: Set<String> = plugDetails.isFairPlayEncrypted ? [] : Set(plugDetails.symbols)
+                        var plugHasUnencryptedBinary = !plugDetails.isFairPlayEncrypted
                         if !plugDetails.isFairPlayEncrypted {
                             hasUnencryptedBinary = true
                             unencryptedSymbols.formUnion(plugDetails.symbols)
+                            unencryptedTextStrings.formUnion(plugDetails.textStrings)
                             if let extClip = ExpandedThreatCatalog.evaluateClipboardSnooping(
                                 backgroundModes: plugBgModes,
                                 symbols: plugDetails.symbols,
@@ -752,9 +769,10 @@ public final class IPAPackageScanner: @unchecked Sendable {
                                    let subData = try? Data(contentsOf: subURL, options: .mappedIfSafe),
                                    let subSlices = try? MachOParser.shared.parseAllSlices(data: subData),
                                    !subSlices.isEmpty {
-                                    let subRel = subURL.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
+                                    let subRel = Self.bundleRelativePath(of: subURL, in: bundleURL)
                                     if subIsDylib {
                                         allLinkedDylibs.insert("@executable_path/\(subRel)")
+                                        plugLinkedDylibs.insert("@executable_path/\(subRel)")
                                     }
                                     let subDetails = MachOScanner.shared.parseMachO(files: subSlices, rawData: subData)
                                     let subFinding = MachOScanner.shared.scan(details: subDetails, context: plugContext)
@@ -769,61 +787,56 @@ public final class IPAPackageScanner: @unchecked Sendable {
                                     }
                                     allMatchedSymbols.formUnion(subFinding.evidence.matchedSymbols)
                                     allLinkedDylibs.formUnion(subDetails.linkedDylibs)
+                                    plugLinkedDylibs.formUnion(subDetails.linkedDylibs)
                                     if !subDetails.isFairPlayEncrypted {
                                         hasUnencryptedBinary = true
+                                        plugHasUnencryptedBinary = true
                                         unencryptedSymbols.formUnion(subDetails.symbols)
+                                        plugUnencryptedSymbols.formUnion(subDetails.symbols)
+                                        unencryptedTextStrings.formUnion(subDetails.textStrings)
                                     }
                                     if subFinding.evidence.dynamicLoadingPresent { dynamicLoadingFound = true }
                                     if subFinding.evidence.pathEnumerationPresent { pathEnumerationFound = true }
                                 }
                             }
                         }
+
+                        Self.appendAppexAccessorySetupIndicators(
+                            linkedDylibs: plugLinkedDylibs,
+                            unencryptedSymbols: plugUnencryptedSymbols,
+                            hasUnencryptedBinary: plugHasUnencryptedBinary,
+                            fallbackCryptid: plugDetails.cryptid,
+                            infoPlist: pDict,
+                            entitlements: plugEntitlementsDict,
+                            installChannel: channelResult.channel,
+                            relPath: relPath,
+                            allIndicators: &allIndicators,
+                            allMatchedSymbols: &allMatchedSymbols
+                        )
                     }
                 }
             }
             
             // 5b. Expanded Local Threat Signatures (propagate all matched threat signatures into allMatchedSymbols so Trojanized bundles can never spoof WhitelistEngine)
-            var expandedIndicators: [ThreatIndicator] = []
-            expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateImpersonation(
+            Self.appendExpandedThreatIndicators(
                 bundleId: bundleId,
                 displayName: appName,
                 installChannel: channelResult.channel,
-                cryptid: mainDetails.cryptid
-            ))
-            
-            let dylibList = Array(allLinkedDylibs)
-            if hasUnencryptedBinary {
-                let symbolList = Array(unencryptedSymbols)
-                expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluatePhotosBypass(
-                    linkedDylibs: dylibList,
-                    symbols: symbolList,
-                    entitlements: entitlementsDict,
-                    cryptid: 0
-                ))
-                expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateBrotliSupplyChain(
-                    linkedDylibs: dylibList,
-                    symbols: symbolList
-                ))
-                expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateInjectedDylibs(
-                    linkedDylibs: dylibList
-                ))
-                if !mainDetails.isFairPlayEncrypted,
-                   let clipboardInd = ExpandedThreatCatalog.evaluateClipboardSnooping(
-                       backgroundModes: backgroundModes,
-                       symbols: symbolList,
-                       cryptid: mainDetails.cryptid
-                   ) {
-                    expandedIndicators.append(clipboardInd)
-                }
-            } else if channelResult.channel != .appStore {
-                expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateInjectedDylibs(
-                    linkedDylibs: dylibList
-                ))
-            }
-            for expInd in expandedIndicators {
-                allIndicators.append(expInd)
-                allMatchedSymbols.insert(expInd.signature)
-            }
+                mainCryptid: mainDetails.cryptid,
+                mainIsFairPlayEncrypted: mainDetails.isFairPlayEncrypted,
+                mainBackgroundModes: backgroundModes,
+                infoDict: infoDict,
+                entitlementsDict: entitlementsDict,
+                allLinkedDylibs: allLinkedDylibs,
+                appLinkedDylibs: appLinkedDylibs,
+                unencryptedSymbols: unencryptedSymbols,
+                appUnencryptedSymbols: appUnencryptedSymbols,
+                unencryptedTextStrings: unencryptedTextStrings,
+                hasUnencryptedBinary: hasUnencryptedBinary,
+                appHasUnencryptedBinary: appHasUnencryptedBinary,
+                allIndicators: &allIndicators,
+                allMatchedSymbols: &allMatchedSymbols
+            )
             
             // 6. Layer 4: Final Risk Grading & Whitelist Evaluation
             var provisionalRisk: RiskTier = .safe
@@ -854,8 +867,8 @@ public final class IPAPackageScanner: @unchecked Sendable {
             var remediation = ""
             if finalRisk == .highRisk {
                 remediation = WQLocale.pick(
-                    en: "Unauthorized containermanagerd sandbox escape primitives, privacy bypass APIs, or impersonation traits detected. Do NOT install on unpatched devices.",
-                    zh: "该 IPA 包检测到未经授权的 containermanagerd 跨沙盒利用特征或私有越权 API 引用，严禁在未修补的设备上安装。"
+                    en: "Unauthorized containermanagerd sandbox escape primitives, inline svc #0x80 direct syscalls, local exploit primitives, privacy bypass APIs, or impersonation traits detected. Do NOT install on unpatched devices.",
+                    zh: "该 IPA 包检测到未经授权的 containermanagerd 跨沙盒利用特征、内联 svc #0x80 直接系统调用、本地越权原语、私有隐私绕过 API 或仿冒特征，严禁在未修补的设备上安装。"
                 )
             } else if finalRisk == .knownTool {
                 remediation = WQLocale.pick(
@@ -903,6 +916,150 @@ public final class IPAPackageScanner: @unchecked Sendable {
                 evidence: evidence,
                 scanTimestamp: Date()
             )
+        }
+    }
+
+    internal static func bundleRelativePath(of itemURL: URL, in bundleURL: URL) -> String {
+        let itemStd = itemURL.standardizedFileURL.path
+        for root in [bundleURL.standardizedFileURL.path, bundleURL.resolvingSymlinksInPath().standardizedFileURL.path] {
+            let prefix = root.hasSuffix("/") ? root : root + "/"
+            if itemStd.hasPrefix(prefix) {
+                return String(itemStd.dropFirst(prefix.count))
+            }
+        }
+        let itemResolved = itemURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootResolved = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let resolvedPrefix = rootResolved.hasSuffix("/") ? rootResolved : rootResolved + "/"
+        if itemResolved.hasPrefix(resolvedPrefix) {
+            return String(itemResolved.dropFirst(resolvedPrefix.count))
+        }
+        return itemURL.lastPathComponent
+    }
+
+    internal static func appendAppexAccessorySetupIndicators(
+        linkedDylibs: Set<String>,
+        unencryptedSymbols: Set<String>,
+        hasUnencryptedBinary: Bool,
+        fallbackCryptid: UInt32,
+        infoPlist: [String: Any],
+        entitlements: [String: Any],
+        installChannel: InstallChannel,
+        relPath: String,
+        allIndicators: inout [ThreatIndicator],
+        allMatchedSymbols: inout Set<String>
+    ) {
+        let appexAccessoryInds = ExpandedThreatCatalog.evaluateAccessorySetupBypass(
+            linkedDylibs: Array(linkedDylibs),
+            symbols: Array(unencryptedSymbols),
+            infoPlist: infoPlist,
+            entitlements: entitlements,
+            installChannel: installChannel,
+            cryptid: hasUnencryptedBinary ? 0 : fallbackCryptid
+        )
+        for accInd in appexAccessoryInds {
+            let annotated = ThreatIndicator(
+                signature: accInd.signature,
+                description: "\(accInd.description) [\(relPath)]",
+                category: accInd.category,
+                location: "\(relPath): \(accInd.location)",
+                severity: accInd.severity
+            )
+            allIndicators.append(annotated)
+            allMatchedSymbols.insert(annotated.signature)
+        }
+    }
+
+    internal static func appendExpandedThreatIndicators(
+        bundleId: String,
+        displayName: String,
+        installChannel: InstallChannel,
+        mainCryptid: UInt32,
+        mainIsFairPlayEncrypted: Bool,
+        mainBackgroundModes: [String],
+        infoDict: [String: Any],
+        entitlementsDict: [String: Any],
+        allLinkedDylibs: Set<String>,
+        appLinkedDylibs: Set<String>,
+        unencryptedSymbols: Set<String>,
+        appUnencryptedSymbols: Set<String>,
+        unencryptedTextStrings: Set<String>,
+        hasUnencryptedBinary: Bool,
+        appHasUnencryptedBinary: Bool,
+        allIndicators: inout [ThreatIndicator],
+        allMatchedSymbols: inout Set<String>
+    ) {
+        var expandedIndicators: [ThreatIndicator] = []
+        expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateImpersonation(
+            bundleId: bundleId,
+            displayName: displayName,
+            installChannel: installChannel,
+            cryptid: mainCryptid
+        ))
+
+        let dylibList = Array(allLinkedDylibs)
+        let symbolList = Array(unencryptedSymbols)
+        let textStringList = Array(unencryptedTextStrings)
+        if hasUnencryptedBinary {
+            expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluatePhotosBypass(
+                linkedDylibs: dylibList,
+                symbols: symbolList,
+                entitlements: entitlementsDict,
+                cryptid: 0
+            ))
+            expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateBrotliSupplyChain(
+                linkedDylibs: dylibList,
+                symbols: symbolList
+            ))
+            expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateInjectedDylibs(
+                linkedDylibs: dylibList
+            ))
+            if !mainIsFairPlayEncrypted,
+               let clipboardInd = ExpandedThreatCatalog.evaluateClipboardSnooping(
+                   backgroundModes: mainBackgroundModes,
+                   symbols: symbolList,
+                   cryptid: mainCryptid
+               ) {
+                expandedIndicators.append(clipboardInd)
+            }
+        } else if installChannel != .appStore {
+            expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateInjectedDylibs(
+                linkedDylibs: dylibList
+            ))
+        }
+
+        // Run 2026 local exploit & private-entitlement checks even when binaries are FairPlay-encrypted (passing appropriate cryptid)
+        expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateAudioMxdBypass(
+            linkedDylibs: hasUnencryptedBinary ? dylibList : [],
+            symbols: hasUnencryptedBinary ? symbolList : [],
+            entitlements: entitlementsDict,
+            cryptid: hasUnencryptedBinary ? 0 : mainCryptid
+        ))
+        expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateBookRestoreAndGestalt(
+            linkedDylibs: hasUnencryptedBinary ? dylibList : [],
+            textStrings: hasUnencryptedBinary ? textStringList : [],
+            entitlements: entitlementsDict,
+            cryptid: hasUnencryptedBinary ? 0 : mainCryptid
+        ))
+        expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateAccessorySetupBypass(
+            linkedDylibs: appHasUnencryptedBinary ? Array(appLinkedDylibs) : [],
+            symbols: appHasUnencryptedBinary ? Array(appUnencryptedSymbols) : [],
+            infoPlist: infoDict,
+            entitlements: entitlementsDict,
+            installChannel: installChannel,
+            cryptid: appHasUnencryptedBinary ? 0 : mainCryptid
+        ))
+
+        let preExistingSignatures = Set(allIndicators.map(\.signature))
+        var seenExpandedKeys: Set<String> = []
+        for expInd in expandedIndicators {
+            allMatchedSymbols.insert(expInd.signature)
+            if expInd.signature != "CVE-2026-84493:AccessorySetupKitBypass" && preExistingSignatures.contains(expInd.signature) {
+                continue
+            }
+            let key = "\(expInd.signature)\u{0}\(expInd.location)"
+            if seenExpandedKeys.insert(key).inserted {
+                allIndicators.append(expInd)
+            }
         }
     }
 }

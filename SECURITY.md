@@ -33,7 +33,7 @@ let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
 ```swift
 let data = try Data(contentsOf: url, options: [.mappedIfSafe])
 ```
-底层对应 `mmap(..., PROT_READ, MAP_SHARED | MAP_RESILIENT_CODESIGN, ...)`，虚拟内存页仅授予 `PROT_READ` 只读权限，并且所有 Mach-O Load Command 偏移与切片范围均经过 64 位无溢出边界校验，防止畸形二进制引发越界崩溃。
+底层对应 `mmap(..., PROT_READ, MAP_SHARED | MAP_RESILIENT_CODESIGN, ...)`，虚拟内存页仅授予 `PROT_READ` 只读权限，并且所有 Mach-O Load Command 偏移与切片范围均经过 64 位无溢出边界校验，防止畸形二进制引发越界崩溃。在 `v1.3.0` 新增的 ARM64 直接系统调用（`svc #0x80` / `0xD4001001`）指令级扫描中，解析器亦在纯只读映射页上运行，通过 `LC_ENCRYPTION_INFO_64` 的 `encryptedRange` 精准跳过 FairPlay 加密字节区间，覆盖 `__text` / `__stubs` 与自定义可执行 RX 段（跳过 `S_ZEROFILL` 与只读元数据段），严守零写入铁律。
 
 #### 2.3 非递归软链接穿越防御 (`lstat` + `readlink`)
 针对利用 `worse_query` 将 `<AppGroup>/Library/Caches` 替换为逃逸软链接的攻击场景，普通文件遍历 API（如 `stat()` 或默认目录枚举）会跟随软链接跨入受害者容器。WQGuard 在 `ContainerScanner.swift` 中严格执行：
@@ -52,7 +52,7 @@ iOS 内核为单个进程分配的沙盒扩展槽位（Sandbox Extension Slots�
 
 ### 3. 自动化只读回归验证体系
 
-WQGuard 的只读承诺由 **685 项自动化单元测试**（含 `ReadOnlyAssertions.swift`、`LocalizationBilingualTests.swift` 与 `SecurityAuditV121RegressionTests.swift` 对抗测试套件）在每次构建时强制校验：
+WQGuard 的只读承诺由 **37 个 XCTest 测试套件、共计 750 项自动化单元测试**（含 `ReadOnlyAssertions.swift`、`LocalizationBilingualTests.swift`、`SecurityAuditV121RegressionTests.swift`、`V130FeatureUnitTests.swift` 与 v1.3.0 Round 1–3 红蓝对抗套件）在每次构建时强制校验：
 1. **全目录逐字节 SHA-256 前后比对**：扫描前后对目标目录全部文件计算 SHA-256，任何 1 比特变化立即判定测试失败。
 2. **纳秒级文件系统时间戳校验**：比对 `st_mtimespec.tv_sec` 与 `st_mtimespec.tv_nsec`，确保扫描绝不污染文件修改时间。
 3. **描述符只读模式断言**：通过 `fcntl(fd, F_GETFL)` 校验 `flags & O_ACCMODE == O_RDONLY`。
@@ -76,7 +76,7 @@ WQGuard 的只读承诺由 **685 项自动化单元测试**（含 `ReadOnlyAsser
 ### 2. Core Engineering Safeguards
 
 1. **POSIX Descriptor Locking (`O_RDONLY | O_NOFOLLOW | O_CLOEXEC`)**: Direct file reads enforce read-only kernel descriptors and immediately fail with `ELOOP` on symbolic links rather than dereferencing untrusted targets.
-2. **Read-Only Memory Mapping (`.mappedIfSafe` / `PROT_READ`)**: Binary parsers operate on read-only mapped pages guarded by overflow-checked 64-bit bounds validation.
+2. **Read-Only Memory Mapping (`.mappedIfSafe` / `PROT_READ`)**: Binary parsers operate on read-only mapped pages guarded by overflow-checked 64-bit bounds validation. Instruction-level ARM64 direct syscall (`svc #0x80` / `0xD4001001`) scanning inspects `__text`/`__stubs` and custom RX executable sections on those read-only pages while strictly skipping FairPlay `encryptedRange` intervals and zero-fill/metadata sections.
 3. **Non-Recursive Symlink Forensics (`lstat` + `readlink`)**: `ContainerScanner` never calls `stat()` or recurses into symbolic links, capturing escaping destinations safely without traversing outside container boundaries.
 4. **Scoped RAII Sandbox Token Release (`ScopedSandboxToken`)**: Immediately releases Seatbelt extension handles upon scope exit to prevent kernel table exhaustion (`EXFULL`).
 5. **Ephemeral Scratch Unpacking & Fail-Closed Loopback TLS**: Uninstalled `.ipa` / `.tipa` archives selectively unpack binaries and metadata (stripping ZIP `S_IFLNK` symlink entries and enforcing inflate byte ceilings) into randomized `NSTemporaryDirectory()/wqguard_ipa_<UUID>/` directories guaranteed to be wiped via `defer`; `LocalDevVPN` pairing connections communicate strictly over local virtual loopback with fail-closed certificate pinning against the device's own `lockdownd` service.
@@ -85,7 +85,7 @@ WQGuard 的只读承诺由 **685 项自动化单元测试**（含 `ReadOnlyAsser
 
 ### 3. Automated Read-Only Regression Verification
 
-Continuously enforced across **685 automated unit tests** (`ReadOnlyAssertions.swift`, `LocalizationBilingualTests.swift` & `SecurityAuditV121RegressionTests.swift`):
+Continuously enforced across **750 automated unit tests across 37 XCTest suites** (`ReadOnlyAssertions.swift`, `LocalizationBilingualTests.swift`, `SecurityAuditV121RegressionTests.swift`, `V130FeatureUnitTests.swift`, and v1.3.0 Round 1–3 adversarial suites):
 - Pre/post bit-for-bit **SHA-256 checksum equality** across all scanned files;
 - Pre/post **nanosecond `st_mtimespec` timestamp equality**;
 - Descriptor access mode verification (`fcntl(fd, F_GETFL) & O_ACCMODE == O_RDONLY`);

@@ -248,7 +248,7 @@ final class AdversarialM4CLITests: XCTestCase {
         let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
         XCTAssertNotNil(json)
         XCTAssertEqual(json?["overallRiskTier"] as? String, "HIGH_RISK")
-        XCTAssertEqual(json?["totalEvaluated"] as? Int, 8)
+        XCTAssertEqual(json?["totalEvaluated"] as? Int, 13)
         let exposed = json?["exposedVulnerabilities"] as? [[String: Any]]
         XCTAssertNotNil(exposed)
         XCTAssertTrue(exposed?.contains { ($0["cveId"] as? String) == "0day:worse_query" } == true)

@@ -394,6 +394,28 @@ public struct MachOCodeSignature: Sendable, Equatable {
     }
 }
 
+public struct DirectSyscallSite: Sendable, Equatable, Hashable {
+    public let segmentName: String
+    public let sectionName: String
+    public let fileOffset: Int
+    public let virtualAddress: UInt64
+    public let immediate: UInt16
+
+    public init(
+        segmentName: String,
+        sectionName: String,
+        fileOffset: Int,
+        virtualAddress: UInt64,
+        immediate: UInt16
+    ) {
+        self.segmentName = segmentName
+        self.sectionName = sectionName
+        self.fileOffset = fileOffset
+        self.virtualAddress = virtualAddress
+        self.immediate = immediate
+    }
+}
+
 // MARK: - Parsed Mach-O File Model
 
 public struct MachOFile: Sendable {
@@ -569,6 +591,109 @@ public struct MachOFile: Sendable {
             }
         }
         return selectors
+    }
+
+    private static let excludedCustomRXSectionPrefixes: [String] = [
+        "__const", "__swift", "__objc_",
+        "__cstring", "__ustring", "__oslogstring",
+        "__unwind_info", "__eh_frame", "__gcc_except_tab",
+        "__entitlements", "__info_plist", "__dof_"
+    ]
+
+    private static func shouldScanSectionForDirectSyscalls(_ sect: MachOSection, in segment: MachOSegment) -> Bool {
+        let sectType = sect.flags & UInt32(SECTION_TYPE)
+        if sectType == UInt32(S_ZEROFILL) || sectType == UInt32(S_GB_ZEROFILL) {
+            return false
+        }
+
+        let instructionAttrsMask = UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS)
+        if (sect.flags & instructionAttrsMask) != 0 {
+            return true
+        }
+
+        let name = sect.sectionName
+        if name == "__text" || name == "__stubs" {
+            return true
+        }
+
+        let hasExecuteProt = (segment.initialProtection & 0x04) != 0
+        guard hasExecuteProt && sectType == UInt32(S_REGULAR) else {
+            return false
+        }
+
+        return !excludedCustomRXSectionPrefixes.contains { name.hasPrefix($0) }
+    }
+
+    /// Scans unencrypted ARM64/ARM64_32 executable sections for inline `svc #0x80` (`0xD400_1001`) instructions.
+    public func scanDirectSyscalls(maxSampleSites: Int = 16) -> (totalCount: Int, sampleSites: [DirectSyscallSite]) {
+        guard cpuType == CPU_TYPE_ARM64 || cpuType == CPU_TYPE_ARM64_32 else {
+            return (0, [])
+        }
+
+        let encRange: Range<Int>?
+        if isFairPlayEncrypted {
+            guard let range = encryptionInfo?.encryptedRange else {
+                return (0, [])
+            }
+            encRange = range
+        } else {
+            encRange = nil
+        }
+
+        let reader = BinaryReader(data: sliceData)
+        let sampleLimit = max(0, maxSampleSites)
+        var totalCount = 0
+        var sampleSites: [DirectSyscallSite] = []
+
+        for seg in segments {
+            for sect in seg.sections where Self.shouldScanSectionForDirectSyscalls(sect, in: seg) {
+                guard let start = Int(exactly: sect.offset),
+                      let sizeInt = Int(exactly: sect.size),
+                      sizeInt >= 4,
+                      start >= 0,
+                      start <= sliceData.count,
+                      sizeInt <= sliceData.count - start else {
+                    continue
+                }
+
+                for relOff in stride(from: 0, through: sizeInt - 4, by: 4) {
+                    let wordOffset = start + relOff
+                    if let er = encRange {
+                        let wordRange = wordOffset..<(wordOffset + 4)
+                        if wordRange.overlaps(er) {
+                            continue
+                        }
+                    }
+
+                    guard let insn = reader.readUInt32(at: wordOffset, swapped: isSwapped) else {
+                        continue
+                    }
+
+                    if insn == 0xD400_1001 {
+                        totalCount += 1
+                        if sampleSites.count < sampleLimit {
+                            sampleSites.append(DirectSyscallSite(
+                                segmentName: seg.name,
+                                sectionName: sect.sectionName,
+                                fileOffset: wordOffset,
+                                virtualAddress: sect.address &+ UInt64(relOff),
+                                immediate: 0x0080
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+
+        return (totalCount, sampleSites)
+    }
+
+    public var directSyscallSites: [DirectSyscallSite] {
+        scanDirectSyscalls().sampleSites
+    }
+
+    public var directSyscallCount: Int {
+        scanDirectSyscalls().totalCount
     }
 }
 

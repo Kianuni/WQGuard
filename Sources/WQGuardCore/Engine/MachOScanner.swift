@@ -52,19 +52,25 @@ public final class MachOScanner: @unchecked Sendable {
         public let symbols: [String]
         public let textStrings: [String]
         public let isFairPlayEncrypted: Bool
+        public let directSyscallSites: [DirectSyscallSite]
+        public let directSyscallCount: Int
         
         public init(
             cryptid: UInt32,
             linkedDylibs: [String],
             symbols: [String],
             textStrings: [String],
-            isFairPlayEncrypted: Bool
+            isFairPlayEncrypted: Bool,
+            directSyscallSites: [DirectSyscallSite] = [],
+            directSyscallCount: Int = 0
         ) {
             self.cryptid = cryptid
             self.linkedDylibs = linkedDylibs
             self.symbols = symbols
             self.textStrings = textStrings
             self.isFairPlayEncrypted = isFairPlayEncrypted
+            self.directSyscallSites = directSyscallSites
+            self.directSyscallCount = directSyscallCount
         }
     }
     
@@ -97,6 +103,9 @@ public final class MachOScanner: @unchecked Sendable {
         var dylibSet: Set<String> = []
         var symbols: [String] = []
         var symbolSet: Set<String> = []
+        var directSyscallSites: [DirectSyscallSite] = []
+        var directSyscallCount = 0
+        let maxSyscallSamples = 16
 
         for f in targetFiles {
             for dylib in f.linkedDylibPaths where dylibSet.insert(dylib).inserted {
@@ -110,11 +119,17 @@ public final class MachOScanner: @unchecked Sendable {
                     symbols.append(sel)
                 }
             }
+            let remainingSampleCapacity = max(0, maxSyscallSamples - directSyscallSites.count)
+            let syscallScan = f.scanDirectSyscalls(maxSampleSites: remainingSampleCapacity)
+            directSyscallCount += syscallScan.totalCount
+            if remainingSampleCapacity > 0 && !syscallScan.sampleSites.isEmpty {
+                directSyscallSites.append(contentsOf: syscallScan.sampleSites.prefix(remainingSampleCapacity))
+            }
         }
         
         var textStrings: [String] = []
         if !isFairPlayEncrypted {
-            let candidateStrings: [String] = [
+            var candidateStrings: [String] = [
                 "com.apple.containermanagerd.system",
                 "com.apple.containermanagerd",
                 "/Containers/Data/",
@@ -126,6 +141,9 @@ public final class MachOScanner: @unchecked Sendable {
                 "com.apple.LaunchServices-",
                 "libsystem_containermanager.dylib"
             ]
+            for extra in SignatureCatalog.standaloneExploitCandidateStrings where !candidateStrings.contains(extra) {
+                candidateStrings.append(extra)
+            }
             
             let unencryptedSlices = targetFiles.filter { !$0.isFairPlayEncrypted }
             let checkRawToo = (files.count == 1 && rawData != nil && rawData!.count != primary.sliceData.count)
@@ -146,7 +164,9 @@ public final class MachOScanner: @unchecked Sendable {
             linkedDylibs: linkedDylibs,
             symbols: symbols,
             textStrings: textStrings,
-            isFairPlayEncrypted: isFairPlayEncrypted
+            isFairPlayEncrypted: isFairPlayEncrypted,
+            directSyscallSites: directSyscallSites,
+            directSyscallCount: directSyscallCount
         )
     }
     
@@ -157,15 +177,57 @@ public final class MachOScanner: @unchecked Sendable {
     ) -> ScanFinding {
         let hasAppGroups = !context.appGroups.isEmpty
 
-        // Pre-gating check for App-Group-independent APFS inode enumeration primitives (`bad_query` / CM-05 `fsgetpath`).
+        // Pre-gating checks for App-Group-independent primitives:
+        // - APFS inode enumeration (`bad_query` / CM-05 `fsgetpath`, `container_object_get_path`)
+        // - Inline ARM64 `svc #0x80` direct syscalls
+        // - Standalone 2026 exploit dylibs, symbols, and strings (audiomxd, BookRestore, MobileGestalt)
         let standalonePathEnumMatches: [SignatureCatalog.Rule] = details.symbols.compactMap { sym in
             let cleanSym = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
             return SignatureCatalog.pathEnumerationSymbols[cleanSym] ?? SignatureCatalog.pathEnumerationSymbols[sym]
         }
+        let hasDirectSyscalls = details.directSyscallCount > 0
+
+        var standaloneDylibMatches: [(rule: SignatureCatalog.Rule, dylib: String)] = []
+        if !details.isFairPlayEncrypted || context.installChannel != .appStore {
+            let sortedDylibRules = SignatureCatalog.standaloneExploitDylibRules.sorted { $0.key < $1.key }
+            for dylib in details.linkedDylibs {
+                for (pattern, rule) in sortedDylibRules {
+                    if dylib.contains(pattern) || dylib.hasSuffix(pattern) {
+                        standaloneDylibMatches.append((rule: rule, dylib: dylib))
+                    }
+                }
+            }
+        }
+
+        var standaloneSymbolMatches: [(rule: SignatureCatalog.Rule, symbol: String)] = []
+        var standaloneStringMatches: [(rule: SignatureCatalog.Rule, pattern: String)] = []
+        if !details.isFairPlayEncrypted {
+            for sym in details.symbols {
+                let cleanSym = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
+                if let rule = SignatureCatalog.standaloneExploitSymbolRules[cleanSym] ?? SignatureCatalog.standaloneExploitSymbolRules[sym] {
+                    standaloneSymbolMatches.append((rule: rule, symbol: sym))
+                }
+            }
+
+            let sortedStringRules = SignatureCatalog.standaloneExploitStringRules.sorted { $0.key < $1.key }
+            for str in details.textStrings {
+                for (pattern, rule) in sortedStringRules {
+                    if str.contains(pattern) {
+                        standaloneStringMatches.append((rule: rule, pattern: pattern))
+                    }
+                }
+            }
+        }
+
+        let hasStandaloneExploits = !standalonePathEnumMatches.isEmpty
+            || hasDirectSyscalls
+            || !standaloneDylibMatches.isEmpty
+            || !standaloneSymbolMatches.isEmpty
+            || !standaloneStringMatches.isEmpty
         
-        // 1. Layer 1 Gating Check (only fast-paths when both App Groups AND standalone fsgetpath are absent)
+        // 1. Layer 1 Gating Check (only fast-paths when both App Groups AND all App-Group-independent exploits are absent)
         let gating = EntitlementGating.evaluate(hasAppGroups: hasAppGroups, appGroups: context.appGroups)
-        if gating.isGatedOut && standalonePathEnumMatches.isEmpty {
+        if gating.isGatedOut && !hasStandaloneExploits {
             let emptyEvidence = AuditEvidence(
                 matchedSymbols: [],
                 linkedDylibs: details.linkedDylibs,
@@ -197,17 +259,51 @@ public final class MachOScanner: @unchecked Sendable {
         }
         
         var indicators: [ThreatIndicator] = []
+        var seenIndicatorKeys: Set<String> = []
+        func appendUniqueIndicator(_ indicator: ThreatIndicator) {
+            let key = "\(indicator.signature)\u{0}\(indicator.location)"
+            if seenIndicatorKeys.insert(key).inserted {
+                indicators.append(indicator)
+            }
+        }
         var matchedSymbols: [String] = []
         var pathEnumerationDetected = false
         var dynamicLoadingDetected = false
         var symlinkDetected = false
+
+        // 1b. App-Group-Independent Direct Syscalls (`svc #0x80`) & Standalone 2026 Exploit Indicators
+        if hasDirectSyscalls {
+            let syscallLocation: String
+            if let site = details.directSyscallSites.first {
+                syscallLocation = "\(site.segmentName),\(site.sectionName) @ \(String(format: "0x%llx", site.virtualAddress)) (\(details.directSyscallCount)x svc #0x80)"
+            } else {
+                syscallLocation = "__TEXT,__text (\(details.directSyscallCount)x svc #0x80)"
+            }
+            appendUniqueIndicator(SignatureCatalog.directSyscallRule.toIndicator(at: syscallLocation))
+            matchedSymbols.append(SignatureCatalog.directSyscallRule.pattern)
+        }
+
+        for match in standaloneDylibMatches {
+            appendUniqueIndicator(match.rule.toIndicator(at: "LC_LOAD_DYLIB: \(match.dylib)"))
+            matchedSymbols.append(match.rule.pattern)
+        }
+
+        for match in standaloneSymbolMatches {
+            appendUniqueIndicator(match.rule.toIndicator(at: "LC_SYMTAB: \(match.symbol)"))
+            matchedSymbols.append(match.rule.pattern)
+        }
+
+        for match in standaloneStringMatches {
+            appendUniqueIndicator(match.rule.toIndicator(at: "__TEXT: \(match.pattern)"))
+            matchedSymbols.append(match.rule.pattern)
+        }
         
         // 2. Scan Linked Dylibs (requires App Group precondition)
         if !gating.isGatedOut {
             for dylib in details.linkedDylibs {
                 for (pattern, rule) in SignatureCatalog.dylibRules {
                     if dylib.contains(pattern) || dylib.hasSuffix(pattern) {
-                        indicators.append(rule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
+                        appendUniqueIndicator(rule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
                         matchedSymbols.append(pattern)
                     }
                 }
@@ -221,7 +317,7 @@ public final class MachOScanner: @unchecked Sendable {
             // Check Private containermanager APIs (requires App Group precondition)
             if !gating.isGatedOut,
                let rule = SignatureCatalog.privateContainerSymbols[cleanSym] ?? SignatureCatalog.privateContainerSymbols[sym] {
-                indicators.append(rule.toIndicator(at: "LC_SYMTAB: \(sym)"))
+                appendUniqueIndicator(rule.toIndicator(at: "LC_SYMTAB: \(sym)"))
                 matchedSymbols.append(rule.pattern)
             }
             
@@ -257,7 +353,7 @@ public final class MachOScanner: @unchecked Sendable {
                 // Direct XPC
                 for (pattern, rule) in SignatureCatalog.directXPCRules {
                     if str.contains(pattern) {
-                        indicators.append(rule.toIndicator(at: "__TEXT: \(pattern)"))
+                        appendUniqueIndicator(rule.toIndicator(at: "__TEXT: \(pattern)"))
                         matchedSymbols.append(pattern)
                     }
                 }
@@ -265,7 +361,7 @@ public final class MachOScanner: @unchecked Sendable {
                 // Container metadata files
                 for (pattern, rule) in SignatureCatalog.metadataFileRules {
                     if str.contains(pattern) {
-                        indicators.append(rule.toIndicator(at: "__TEXT: \(pattern)"))
+                        appendUniqueIndicator(rule.toIndicator(at: "__TEXT: \(pattern)"))
                         matchedSymbols.append(pattern)
                     }
                 }
@@ -283,7 +379,7 @@ public final class MachOScanner: @unchecked Sendable {
             if hasContainerPathStr {
                 let targetSub = details.textStrings.first { s in SignatureCatalog.containerPathSubstrings.contains { s.contains($0) } } ?? "/Containers/Data/"
                 let sig = "\(primarySym):\(targetSub)"
-                indicators.append(ThreatIndicator(
+                appendUniqueIndicator(ThreatIndicator(
                     signature: sig,
                     description: WQLocale.pick(
                         en: "Path leak brute-force targeting application containers (\(primarySym) combined with container prefix)",
@@ -295,7 +391,7 @@ public final class MachOScanner: @unchecked Sendable {
                 ))
             } else {
                 if hasFsgetpath {
-                    indicators.append(ThreatIndicator(
+                    appendUniqueIndicator(ThreatIndicator(
                         signature: "fsgetpath",
                         description: WQLocale.pick(
                             en: "APFS file system inode brute-force primitive",
@@ -307,7 +403,7 @@ public final class MachOScanner: @unchecked Sendable {
                     ))
                 }
                 if hasContainerObjGetPath, let objRule = SignatureCatalog.pathEnumerationSymbols["container_object_get_path"] {
-                    indicators.append(objRule.toIndicator(at: "LC_SYMTAB"))
+                    appendUniqueIndicator(objRule.toIndicator(at: "LC_SYMTAB"))
                 }
             }
         }
@@ -318,7 +414,7 @@ public final class MachOScanner: @unchecked Sendable {
         if details.cryptid == 0 && !gating.isGatedOut && dynamicLoadingDetected && (symlinkDetected || hasSandboxConsume || pathEnumerationDetected) {
             let alreadyHasExplicitExploit = indicators.contains { $0.severity == .highRisk && $0.category == "Private API Symbol" }
             if !alreadyHasExplicitExploit {
-                indicators.append(SignatureCatalog.behavioralTupleRule.toIndicator())
+                appendUniqueIndicator(SignatureCatalog.behavioralTupleRule.toIndicator())
                 matchedSymbols.append(SignatureCatalog.behavioralTupleRule.pattern)
             }
         }
@@ -327,7 +423,7 @@ public final class MachOScanner: @unchecked Sendable {
         // App Groups + dlopen + dlsym without high risk exploit APIs -> Caution
         let hasHighRisk = indicators.contains { $0.severity == .highRisk }
         if !hasHighRisk && dynamicLoadingDetected && !gating.isGatedOut {
-            indicators.append(SignatureCatalog.dynamicLoadingCautionRule.toIndicator())
+            appendUniqueIndicator(SignatureCatalog.dynamicLoadingCautionRule.toIndicator())
         }
         
         // 7. Determine Final Risk Tier and Whitelist Status
@@ -359,8 +455,8 @@ public final class MachOScanner: @unchecked Sendable {
         var remediation = ""
         if finalRisk == .highRisk {
             remediation = WQLocale.pick(
-                en: "Unauthorized containermanagerd sandbox escape indicators detected. Immediately uninstall or isolate this application.",
-                zh: "检测到未经授权的 containermanagerd 跨沙盒利用特征，建议立即卸载或隔离该应用。"
+                en: "Unauthorized high-risk exploit indicators detected (containermanagerd sandbox escape, inline svc #0x80 direct syscalls, or local privacy/system bypass primitives). Immediately uninstall or isolate this application.",
+                zh: "检测到未经授权的高危利用特征（containermanagerd 跨沙盒逃逸、内联 svc #0x80 直接系统调用或本地隐私/系统绕过原语），建议立即卸载或隔离该应用。"
             )
         } else if finalRisk == .knownTool {
             remediation = WQLocale.pick(

@@ -143,13 +143,27 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         ]
         var boolEnts: [String: Bool] = [:]
         var strEnts: [String: String] = [:]
+        func parseIntegerBool(_ value: Any) -> Bool? {
+            if let i = value as? Int { return i != 0 }
+            if let i64 = value as? Int64 { return i64 != 0 }
+            if let u64 = value as? UInt64 { return u64 != 0 }
+            if let i32 = value as? Int32 { return i32 != 0 }
+            if let num = value as? NSNumber {
+                return num.int64Value != 0 || num.doubleValue != 0.0
+            }
+            return nil
+        }
         for (k, v) in entDict {
+            let isRestrictedNumericBool = numericBoolKeys.contains(k)
+                || InstalledAppRegistryScanner.matchesRestricted2026PrivateEntitlementPrefix(k)
+                || k.hasPrefix(ExpandedThreatCatalog.photosEntitlementPrefix)
+                || k == ExpandedThreatCatalog.photosBourgeoisieEntitlement
             if let b = v as? Bool {
                 boolEnts[k] = b
             } else if let num = v as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() {
                 boolEnts[k] = num.boolValue
-            } else if let num = v as? NSNumber, numericBoolKeys.contains(k) {
-                boolEnts[k] = (num.intValue != 0)
+            } else if isRestrictedNumericBool, let parsed = parseIntegerBool(v) {
+                boolEnts[k] = parsed
             } else if let s = v as? String {
                 strEnts[k] = s
             }
@@ -521,6 +535,48 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         return nil
     }
 
+    private static let restricted2026PrivateEntitlementPrefixes: [String] = [
+        "com.apple.private.mediaexperience",
+        "com.apple.private.cmsession",
+        "com.apple.private.bookassetd",
+        IOCTokenArmor.tStorePrivPrefix,
+        "com.apple.private.MobileGestalt",
+        "com.apple.private.accessorysetupkit"
+    ]
+
+    internal static func matchesRestricted2026PrivateEntitlementPrefix(_ key: String) -> Bool {
+        restricted2026PrivateEntitlementPrefixes.contains { key.hasPrefix($0) }
+    }
+
+    private func rawRestricted2026EntitlementKeys(in record: InstalledAppRegistryRecord) -> [String] {
+        let candidateKeys = Set(record.allEntitlementKeys)
+            .union(record.booleanEntitlements.keys)
+            .union(record.stringEntitlements.keys)
+            .sorted()
+        return candidateKeys.filter { key in
+            guard Self.matchesRestricted2026PrivateEntitlementPrefix(key) else {
+                return false
+            }
+            return record.booleanEntitlements[key] == true
+                || (record.stringEntitlements[key] != nil)
+                || (record.allEntitlementKeys.contains(key) && record.booleanEntitlements[key] != false)
+        }
+    }
+
+    /// Returns restricted 2026 private bypass entitlement keys held by a non-Apple app record,
+    /// ignoring explicit `false` / integer `0` values and genuine Apple system/first-party apps.
+    public func restricted2026BypassEntitlements(for record: InstalledAppRegistryRecord) -> [String] {
+        guard !isAppleSystemOrFirstPartyApp(record) else {
+            return []
+        }
+        return rawRestricted2026EntitlementKeys(in: record)
+    }
+
+    /// Returns `true` when a non-Apple app record holds any restricted 2026 private bypass entitlement.
+    public func hasRestricted2026PrivateEntitlements(_ record: InstalledAppRegistryRecord) -> Bool {
+        !restricted2026BypassEntitlements(for: record).isEmpty
+    }
+
     public func classifyChannel(for record: InstalledAppRegistryRecord) -> (channel: InstallChannel, isFairPlayEncrypted: Bool) {
         if isAppleSystemOrFirstPartyApp(record) {
             return (.appStore, true)
@@ -534,7 +590,8 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         let hasDangerousPrivateEscape =
             record.booleanEntitlements["com.apple.private.security.no-container"] == true ||
             record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true ||
-            !record.tccAllowedServices.isEmpty
+            !record.tccAllowedServices.isEmpty ||
+            !rawRestricted2026EntitlementKeys(in: record).isEmpty
 
         // TestFlight Beta builds:
         // On iOS, TestFlight apps embed a 90-day beta provisioning profile (`profileValidated == true`),
@@ -582,10 +639,11 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if channel.isSideloadedOrEnterprise {
             return true
         }
-        // Even if marked App Store, inspect if carrying dangerous private sandbox-escape entitlements
+        // Even if marked App Store, inspect if carrying dangerous private sandbox-escape or 2026 bypass entitlements
         if record.booleanEntitlements["com.apple.private.security.no-container"] == true ||
            record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true ||
-           !record.tccAllowedServices.isEmpty {
+           !record.tccAllowedServices.isEmpty ||
+           hasRestricted2026PrivateEntitlements(record) {
             return true
         }
         return false
@@ -693,10 +751,18 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             matchedSignatures.insert("com.apple.private.tcc.allow")
         }
 
-        // 3. Private Photos Entitlements
+        // 3. Private Photos & Restricted 2026 Bypass Entitlements
         var rawEntMap: [String: Any] = [:]
         for k in record.allEntitlementKeys {
-            rawEntMap[k] = record.booleanEntitlements[k] ?? true
+            rawEntMap[k] = record.booleanEntitlements[k] ?? record.stringEntitlements[k] ?? true
+        }
+        for (k, v) in record.booleanEntitlements {
+            rawEntMap[k] = v
+        }
+        for (k, v) in record.stringEntitlements {
+            if rawEntMap[k] == nil {
+                rawEntMap[k] = v
+            }
         }
         let photoInds = ExpandedThreatCatalog.evaluatePhotosBypass(
             linkedDylibs: [],
@@ -707,6 +773,46 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         for p in photoInds {
             indicators.append(p)
             matchedSignatures.insert(p.signature)
+        }
+
+        if !isAppleSystemOrFirstPartyApp(record) {
+            let audioMxdInds = ExpandedThreatCatalog.evaluateAudioMxdBypass(
+                linkedDylibs: [],
+                symbols: [],
+                entitlements: rawEntMap,
+                cryptid: cryptid
+            )
+            for ind in audioMxdInds {
+                indicators.append(ind)
+                matchedSignatures.insert(ind.signature)
+            }
+
+            let bookGestaltInds = ExpandedThreatCatalog.evaluateBookRestoreAndGestalt(
+                linkedDylibs: [],
+                textStrings: [],
+                entitlements: rawEntMap,
+                cryptid: cryptid
+            )
+            for ind in bookGestaltInds {
+                indicators.append(ind)
+                matchedSignatures.insert(ind.signature)
+            }
+
+            // Non-Apple records in installation_proxy holding restricted com.apple.private.accessorysetupkit*
+            // (even when disguised with App Store metadata) must be flagged .highRisk; Info.plist usage checks
+            // still do not fire here since linkedDylibs/symbols are empty.
+            let accessoryInds = ExpandedThreatCatalog.evaluateAccessorySetupBypass(
+                linkedDylibs: [],
+                symbols: [],
+                infoPlist: [:],
+                entitlements: rawEntMap,
+                installChannel: .developerSideloaded,
+                cryptid: cryptid
+            )
+            for ind in accessoryInds {
+                indicators.append(ind)
+                matchedSignatures.insert(ind.signature)
+            }
         }
 
         // 4. Keychain Wildcard Access

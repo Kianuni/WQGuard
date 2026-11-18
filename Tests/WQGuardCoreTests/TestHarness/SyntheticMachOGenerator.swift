@@ -43,6 +43,9 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
         public var corruptMagic: UInt32?
         public var corruptNCmds: UInt32?
         public var corruptSizeOfCmds: UInt32?
+        public var textInstructions: [UInt32]
+        public var customSections: [(segName: String, sectName: String, flags: UInt32, payload: Data)]
+        public var extraCStringLiterals: [String]
 
         public init(
             arch: Architecture = .arm64,
@@ -58,7 +61,10 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
             includeCodeSignature: Bool = true,
             corruptMagic: UInt32? = nil,
             corruptNCmds: UInt32? = nil,
-            corruptSizeOfCmds: UInt32? = nil
+            corruptSizeOfCmds: UInt32? = nil,
+            textInstructions: [UInt32] = [],
+            customSections: [(segName: String, sectName: String, flags: UInt32, payload: Data)] = [],
+            extraCStringLiterals: [String] = []
         ) {
             self.arch = arch
             self.cryptid = cryptid
@@ -74,6 +80,9 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
             self.corruptMagic = corruptMagic
             self.corruptNCmds = corruptNCmds
             self.corruptSizeOfCmds = corruptSizeOfCmds
+            self.textInstructions = textInstructions
+            self.customSections = customSections
+            self.extraCStringLiterals = extraCStringLiterals
         }
     }
 
@@ -131,33 +140,123 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
 
     // MARK: - Mach-O Generation
 
+    private struct SectionSpec {
+        let segName: String
+        let sectName: String
+        let flags: UInt32
+        let alignPower: UInt32
+        let payload: Data
+    }
+
+    private struct ExtraSegmentLayout {
+        let segName: String
+        var sections: [SectionSpec]
+        var cmdPos: Int = 0
+        var sectHeaderPositions: [Int] = []
+    }
+
     /// Generates a Thin 64-bit Mach-O binary Data matching the configuration.
     public func generateThin(config: MachOConfig) -> Data {
+        var textSectionSpecs: [SectionSpec] = []
+        if !config.textInstructions.isEmpty {
+            var payload = Data()
+            payload.reserveCapacity(config.textInstructions.count * 4)
+            for insn in config.textInstructions {
+                var le = insn.littleEndian
+                withUnsafeBytes(of: &le) { payload.append(contentsOf: $0) }
+            }
+            textSectionSpecs.append(SectionSpec(
+                segName: "__TEXT",
+                sectName: "__text",
+                flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
+                alignPower: 2,
+                payload: payload
+            ))
+        }
+        if !config.extraCStringLiterals.isEmpty {
+            var payload = Data()
+            for literal in config.extraCStringLiterals {
+                payload.append(contentsOf: literal.utf8)
+                payload.append(0)
+            }
+            textSectionSpecs.append(SectionSpec(
+                segName: "__TEXT",
+                sectName: "__cstring",
+                flags: UInt32(S_CSTRING_LITERALS),
+                alignPower: 0,
+                payload: payload
+            ))
+        }
+
+        var extraSegments: [ExtraSegmentLayout] = []
+        var extraSegIndexByName: [String: Int] = [:]
+        for custom in config.customSections {
+            let spec = SectionSpec(
+                segName: custom.segName,
+                sectName: custom.sectName,
+                flags: custom.flags,
+                alignPower: 2,
+                payload: custom.payload
+            )
+            if custom.segName == "__TEXT" {
+                textSectionSpecs.append(spec)
+            } else if let idx = extraSegIndexByName[custom.segName] {
+                extraSegments[idx].sections.append(spec)
+            } else {
+                extraSegIndexByName[custom.segName] = extraSegments.count
+                extraSegments.append(ExtraSegmentLayout(segName: custom.segName, sections: [spec]))
+            }
+        }
+
+        let hasAnySections = !textSectionSpecs.isEmpty || !extraSegments.isEmpty
         var loadCommandsData = Data()
         var ncmds: UInt32 = 0
 
         // 1. LC_SEGMENT_64: __TEXT
-        var textSeg = segment_command_64()
-        textSeg.cmd = UInt32(LC_SEGMENT_64)
-        textSeg.cmdsize = UInt32(MemoryLayout<segment_command_64>.size)
-        withUnsafeMutableBytes(of: &textSeg.segname) { ptr in
-            let name = "__TEXT"
-            _ = name.withCString { cstr in
-                strncpy(ptr.baseAddress!.assumingMemoryBound(to: CChar.self), cstr, 16)
-            }
-        }
-        textSeg.vmaddr = 0x100000000
-        textSeg.vmsize = 0x4000
-        textSeg.fileoff = 0
-        textSeg.filesize = 0x4000
-        textSeg.maxprot = 7
-        textSeg.initprot = 5
-        textSeg.nsects = 0
-        textSeg.flags = 0
+        let textSegCmdPos = loadCommandsData.count
+        var textSeg = makeSegmentCommand64(
+            name: "__TEXT",
+            vmaddr: 0x100000000,
+            vmsize: 0x4000,
+            fileoff: 0,
+            filesize: 0x4000,
+            maxprot: 7,
+            initprot: 5,
+            nsects: UInt32(textSectionSpecs.count)
+        )
         loadCommandsData.append(Data(bytes: &textSeg, count: MemoryLayout<segment_command_64>.size))
+        var textSectHeaderPositions: [Int] = []
+        for _ in textSectionSpecs {
+            textSectHeaderPositions.append(loadCommandsData.count)
+            var placeholder = section_64()
+            loadCommandsData.append(Data(bytes: &placeholder, count: MemoryLayout<section_64>.size))
+        }
         ncmds += 1
 
+        // 1b. Additional LC_SEGMENT_64 commands for custom non-__TEXT segments
+        for i in extraSegments.indices {
+            extraSegments[i].cmdPos = loadCommandsData.count
+            var segCmd = makeSegmentCommand64(
+                name: extraSegments[i].segName,
+                vmaddr: 0,
+                vmsize: 0,
+                fileoff: 0,
+                filesize: 0,
+                maxprot: 7,
+                initprot: 5,
+                nsects: UInt32(extraSegments[i].sections.count)
+            )
+            loadCommandsData.append(Data(bytes: &segCmd, count: MemoryLayout<segment_command_64>.size))
+            for _ in extraSegments[i].sections {
+                extraSegments[i].sectHeaderPositions.append(loadCommandsData.count)
+                var placeholder = section_64()
+                loadCommandsData.append(Data(bytes: &placeholder, count: MemoryLayout<section_64>.size))
+            }
+            ncmds += 1
+        }
+
         // 2. LC_ENCRYPTION_INFO_64
+        let encCmdPos = loadCommandsData.count
         var encCmd = encryption_info_command_64(
             cmd: UInt32(LC_ENCRYPTION_INFO_64),
             cmdsize: UInt32(MemoryLayout<encryption_info_command_64>.size),
@@ -203,6 +302,7 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
         }
 
         // Assemble Mach-O Header
+        let headerSize = MemoryLayout<mach_header_64>.size
         let magic = config.corruptMagic ?? MH_MAGIC_64
         let finalNcmds = config.corruptNCmds ?? ncmds
         let finalSizeofcmds = config.corruptSizeOfCmds ?? UInt32(loadCommandsData.count)
@@ -218,13 +318,76 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
             reserved: 0
         )
 
-        var result = Data(bytes: &header, count: MemoryLayout<mach_header_64>.size)
+        var result = Data(bytes: &header, count: headerSize)
         result.append(loadCommandsData)
 
         // Align to 16 bytes
-        let pad16 = (16 - (result.count % 16)) % 16
-        if pad16 > 0 {
-            result.append(Data(repeating: 0, count: pad16))
+        alignData(&result, to: 16)
+
+        // Emit __TEXT and custom segment payloads when configured
+        var textSegmentEnd = result.count
+        if hasAnySections {
+            for (idx, spec) in textSectionSpecs.enumerated() {
+                alignData(&result, to: 16)
+                let sectOffset = result.count
+                let sectAddr = textSeg.vmaddr &+ UInt64(sectOffset)
+                result.append(spec.payload)
+
+                var sect64 = makeSection64(
+                    sectName: spec.sectName,
+                    segName: "__TEXT",
+                    addr: sectAddr,
+                    size: UInt64(spec.payload.count),
+                    offset: UInt32(sectOffset),
+                    align: spec.alignPower,
+                    flags: spec.flags
+                )
+                patchBytes(of: &sect64, into: &result, at: headerSize + textSectHeaderPositions[idx])
+            }
+            alignData(&result, to: 16)
+            textSegmentEnd = result.count
+
+            var nextVmAddr = (textSeg.vmaddr + UInt64(textSegmentEnd) + 0x3FFF) & ~0x3FFF
+            for seg in extraSegments {
+                alignData(&result, to: 16)
+                let segFileStart = result.count
+                let segVmAddr = nextVmAddr
+
+                for (sIdx, spec) in seg.sections.enumerated() {
+                    alignData(&result, to: 16)
+                    let sectOffset = result.count
+                    let sectAddr = segVmAddr + UInt64(sectOffset - segFileStart)
+                    result.append(spec.payload)
+
+                    var sect64 = makeSection64(
+                        sectName: spec.sectName,
+                        segName: seg.segName,
+                        addr: sectAddr,
+                        size: UInt64(spec.payload.count),
+                        offset: UInt32(sectOffset),
+                        align: spec.alignPower,
+                        flags: spec.flags
+                    )
+                    patchBytes(of: &sect64, into: &result, at: headerSize + seg.sectHeaderPositions[sIdx])
+                }
+
+                alignData(&result, to: 16)
+                let segFileSize = UInt64(result.count - segFileStart)
+                var updatedSeg = makeSegmentCommand64(
+                    name: seg.segName,
+                    vmaddr: segVmAddr,
+                    vmsize: segFileSize,
+                    fileoff: UInt64(segFileStart),
+                    filesize: segFileSize,
+                    maxprot: 7,
+                    initprot: 5,
+                    nsects: UInt32(seg.sections.count)
+                )
+                patchBytes(of: &updatedSeg, into: &result, at: headerSize + seg.cmdPos)
+
+                let segVmEnd = segVmAddr + max(segFileSize, 1)
+                nextVmAddr = (segVmEnd + 0x3FFF) & ~0x3FFF
+            }
         }
 
         // Build Symbol Table Data
@@ -252,7 +415,7 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
         result.append(stringTable)
 
         // Patch symtab command in load commands
-        let symtabFileOffset = MemoryLayout<mach_header_64>.size + symtabCmdPos
+        let symtabFileOffset = headerSize + symtabCmdPos
         var updatedSymtab = symtab_command(
             cmd: UInt32(LC_SYMTAB),
             cmdsize: UInt32(MemoryLayout<symtab_command>.size),
@@ -261,16 +424,11 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
             stroff: stroff,
             strsize: strsize
         )
-        withUnsafeBytes(of: &updatedSymtab) { raw in
-            result.replaceSubrange(symtabFileOffset..<symtabFileOffset + MemoryLayout<symtab_command>.size, with: raw)
-        }
+        patchBytes(of: &updatedSymtab, into: &result, at: symtabFileOffset)
 
         // Build Code Signature SuperBlob if requested
         if let csPos = csCmdPos {
-            let csPad = (16 - (result.count % 16)) % 16
-            if csPad > 0 {
-                result.append(Data(repeating: 0, count: csPad))
-            }
+            alignData(&result, to: 16)
             let csOff = UInt32(result.count)
 
             let superBlob = buildSuperBlob(
@@ -281,35 +439,34 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
             result.append(superBlob)
             let csSize = UInt32(superBlob.count)
 
-            let csFileOffset = MemoryLayout<mach_header_64>.size + csPos
+            let csFileOffset = headerSize + csPos
             var updatedCS = linkedit_data_command(
                 cmd: UInt32(LC_CODE_SIGNATURE),
                 cmdsize: UInt32(MemoryLayout<linkedit_data_command>.size),
                 dataoff: csOff,
                 datasize: csSize
             )
-            withUnsafeBytes(of: &updatedCS) { raw in
-                result.replaceSubrange(csFileOffset..<csFileOffset + MemoryLayout<linkedit_data_command>.size, with: raw)
-            }
+            patchBytes(of: &updatedCS, into: &result, at: csFileOffset)
         }
 
         // Adjust TEXT segment filesize and encryption offsets to be valid within generated binary
-        let segOffset = MemoryLayout<mach_header_64>.size
+        let segOffset = headerSize + textSegCmdPos
         var updatedTextSeg = textSeg
-        updatedTextSeg.filesize = UInt64(result.count)
-        updatedTextSeg.vmsize = UInt64(result.count)
-        withUnsafeBytes(of: &updatedTextSeg) { raw in
-            result.replaceSubrange(segOffset..<segOffset + MemoryLayout<segment_command_64>.size, with: raw)
+        if extraSegments.isEmpty {
+            updatedTextSeg.filesize = UInt64(result.count)
+            updatedTextSeg.vmsize = UInt64(result.count)
+        } else {
+            updatedTextSeg.filesize = UInt64(textSegmentEnd)
+            updatedTextSeg.vmsize = UInt64(textSegmentEnd)
         }
+        patchBytes(of: &updatedTextSeg, into: &result, at: segOffset)
 
-        let encOffset = MemoryLayout<mach_header_64>.size + MemoryLayout<segment_command_64>.size
+        let encOffset = headerSize + encCmdPos
         var updatedEnc = encCmd
         if config.cryptsize > UInt32(result.count) || config.cryptoff >= UInt32(result.count) {
             updatedEnc.cryptoff = 0
             updatedEnc.cryptsize = UInt32(result.count)
-            withUnsafeBytes(of: &updatedEnc) { raw in
-                result.replaceSubrange(encOffset..<encOffset + MemoryLayout<encryption_info_command_64>.size, with: raw)
-            }
+            patchBytes(of: &updatedEnc, into: &result, at: encOffset)
         }
 
         return result
@@ -365,6 +522,73 @@ public final class SyntheticMachOGenerator: @unchecked Sendable {
     }
 
     // MARK: - Private Helpers
+
+    private func copyFixed16(_ value: String, into ptr: UnsafeMutableRawBufferPointer) {
+        ptr.initializeMemory(as: UInt8.self, repeating: 0)
+        let bytes = Array(value.utf8.prefix(16))
+        for (idx, byte) in bytes.enumerated() {
+            ptr[idx] = byte
+        }
+    }
+
+    private func makeSegmentCommand64(
+        name: String,
+        vmaddr: UInt64,
+        vmsize: UInt64,
+        fileoff: UInt64,
+        filesize: UInt64,
+        maxprot: Int32,
+        initprot: Int32,
+        nsects: UInt32
+    ) -> segment_command_64 {
+        var seg = segment_command_64()
+        seg.cmd = UInt32(LC_SEGMENT_64)
+        seg.cmdsize = UInt32(MemoryLayout<segment_command_64>.size + Int(nsects) * MemoryLayout<section_64>.size)
+        withUnsafeMutableBytes(of: &seg.segname) { copyFixed16(name, into: $0) }
+        seg.vmaddr = vmaddr
+        seg.vmsize = vmsize
+        seg.fileoff = fileoff
+        seg.filesize = filesize
+        seg.maxprot = maxprot
+        seg.initprot = initprot
+        seg.nsects = nsects
+        seg.flags = 0
+        return seg
+    }
+
+    private func makeSection64(
+        sectName: String,
+        segName: String,
+        addr: UInt64,
+        size: UInt64,
+        offset: UInt32,
+        align: UInt32,
+        flags: UInt32
+    ) -> section_64 {
+        var sect = section_64()
+        withUnsafeMutableBytes(of: &sect.sectname) { copyFixed16(sectName, into: $0) }
+        withUnsafeMutableBytes(of: &sect.segname) { copyFixed16(segName, into: $0) }
+        sect.addr = addr
+        sect.size = size
+        sect.offset = offset
+        sect.align = align
+        sect.flags = flags
+        return sect
+    }
+
+    private func alignData(_ data: inout Data, to alignment: Int) {
+        let remainder = data.count % alignment
+        if remainder != 0 {
+            data.append(Data(repeating: 0, count: alignment - remainder))
+        }
+    }
+
+    private func patchBytes<T>(of value: inout T, into data: inout Data, at offset: Int) {
+        let size = MemoryLayout<T>.size
+        withUnsafeBytes(of: &value) { raw in
+            data.replaceSubrange(offset..<(offset + size), with: raw)
+        }
+    }
 
     private func buildDylibCommand(path: String, isWeak: Bool) -> Data {
         var cPath = Array(path.utf8)

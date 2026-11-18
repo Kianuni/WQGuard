@@ -4,7 +4,7 @@
 //
 //  Empirical Adversarial Stress-Test Suite by Challenger m3_2.
 //  Rigorous testing of:
-//  1. Dual-branch version boundaries (iOS 26.7.2 vs 26.7.3, iOS 27.2.0 vs 27.2.1) across all 8 cataloged CVEs.
+//  1. Dual-branch version boundaries (iOS 26.7.2 vs 26.7.3, iOS 27.2.0 vs 27.2.1) across all 13 cataloged CVEs.
 //  2. All 16 negative MITM exclusions in Surge/WQGuard-Brotli-Shield.sgmodule and SurgeBrotliShieldHelper.
 //  3. Sideloaded clone impersonation detection (cryptid == 0) vs App Store official app exemption (cryptid == 1).
 //  4. Background clipboard snooping behavioral tuple (UIBackgroundModes + UIPasteboard).
@@ -15,14 +15,14 @@ import XCTest
 
 final class AdversarialM3It2Challenger2Tests: XCTestCase {
 
-    // MARK: - 1. Dual-Branch Version Boundaries Across All 8 Cataloged CVEs
+    // MARK: - 1. Dual-Branch Version Boundaries Across All 13 Cataloged CVEs
 
     func testDualBranchBoundary_iOS26_7_2_vs_26_7_3() {
         let engine = FirmwarePostureEngine.shared
         let v26_7_2 = SystemOSVersion(major: 26, minor: 7, patch: 2)
         let v26_7_3 = SystemOSVersion(major: 26, minor: 7, patch: 3)
 
-        // 1. worseQuery0day (unpatched 0day: vulnerable on both)
+        // 1. worseQuery0day (patched in 27.3+: vulnerable on both 26.7.2 and 26.7.3)
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v26_7_2))
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v26_7_3))
 
@@ -54,15 +54,27 @@ final class AdversarialM3It2Challenger2Tests: XCTestCase {
         XCTAssertTrue(engine.isVulnerable(.bluetoothAirPlay, in: v26_7_2))
         XCTAssertFalse(engine.isVulnerable(.bluetoothAirPlay, in: v26_7_3))
 
+        // 9-13. 2026 additions (all patched by 26.7.2 or earlier: false on both)
+        XCTAssertFalse(engine.isVulnerable(.audioMxdBypass, in: v26_7_2))
+        XCTAssertFalse(engine.isVulnerable(.audioMxdBypass, in: v26_7_3))
+        XCTAssertFalse(engine.isVulnerable(.dyldZeroDay, in: v26_7_2))
+        XCTAssertFalse(engine.isVulnerable(.dyldZeroDay, in: v26_7_3))
+        XCTAssertFalse(engine.isVulnerable(.webkitSandboxEscape, in: v26_7_2))
+        XCTAssertFalse(engine.isVulnerable(.webkitSandboxEscape, in: v26_7_3))
+        XCTAssertFalse(engine.isVulnerable(.accessorySetupBluetooth, in: v26_7_2))
+        XCTAssertFalse(engine.isVulnerable(.accessorySetupBluetooth, in: v26_7_3))
+        XCTAssertFalse(engine.isVulnerable(.bookRestoreEscape, in: v26_7_2))
+        XCTAssertFalse(engine.isVulnerable(.bookRestoreEscape, in: v26_7_3))
+
         // Check aggregate counts
         let report_26_7_2 = engine.evaluate(osVersion: v26_7_2)
-        XCTAssertEqual(report_26_7_2.totalEvaluated, 8)
+        XCTAssertEqual(report_26_7_2.totalEvaluated, 13)
         XCTAssertEqual(report_26_7_2.exposedCount, 5, "iOS 26.7.2 must have exactly 5 exposed CVEs")
         XCTAssertEqual(report_26_7_2.overallRiskTier, .highRisk)
 
         let report_26_7_3 = engine.evaluate(osVersion: v26_7_3)
-        XCTAssertEqual(report_26_7_3.totalEvaluated, 8)
-        XCTAssertEqual(report_26_7_3.exposedCount, 1, "iOS 26.7.3 must have exactly 1 exposed CVE (unpatched worse_query 0day)")
+        XCTAssertEqual(report_26_7_3.totalEvaluated, 13)
+        XCTAssertEqual(report_26_7_3.exposedCount, 1, "iOS 26.7.3 must have exactly 1 exposed CVE (worse_query 0day)")
         XCTAssertEqual(report_26_7_3.overallRiskTier, .highRisk)
     }
 
@@ -71,7 +83,7 @@ final class AdversarialM3It2Challenger2Tests: XCTestCase {
         let v27_2_0 = SystemOSVersion(major: 27, minor: 2, patch: 0)
         let v27_2_1 = SystemOSVersion(major: 27, minor: 2, patch: 1)
 
-        // 1. worseQuery0day (unpatched 0day: vulnerable on both)
+        // 1. worseQuery0day (patched in 27.3+: vulnerable on both 27.2.0 and 27.2.1)
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v27_2_0))
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v27_2_1))
 
@@ -103,14 +115,26 @@ final class AdversarialM3It2Challenger2Tests: XCTestCase {
         XCTAssertTrue(engine.isVulnerable(.bluetoothAirPlay, in: v27_2_0))
         XCTAssertFalse(engine.isVulnerable(.bluetoothAirPlay, in: v27_2_1))
 
+        // 9-13. 2026 additions (all patched by 27.2.0 or earlier: false on both)
+        XCTAssertFalse(engine.isVulnerable(.audioMxdBypass, in: v27_2_0))
+        XCTAssertFalse(engine.isVulnerable(.audioMxdBypass, in: v27_2_1))
+        XCTAssertFalse(engine.isVulnerable(.dyldZeroDay, in: v27_2_0))
+        XCTAssertFalse(engine.isVulnerable(.dyldZeroDay, in: v27_2_1))
+        XCTAssertFalse(engine.isVulnerable(.webkitSandboxEscape, in: v27_2_0))
+        XCTAssertFalse(engine.isVulnerable(.webkitSandboxEscape, in: v27_2_1))
+        XCTAssertFalse(engine.isVulnerable(.accessorySetupBluetooth, in: v27_2_0))
+        XCTAssertFalse(engine.isVulnerable(.accessorySetupBluetooth, in: v27_2_1))
+        XCTAssertFalse(engine.isVulnerable(.bookRestoreEscape, in: v27_2_0))
+        XCTAssertFalse(engine.isVulnerable(.bookRestoreEscape, in: v27_2_1))
+
         // Check aggregate counts
         let report_27_2_0 = engine.evaluate(osVersion: v27_2_0)
-        XCTAssertEqual(report_27_2_0.totalEvaluated, 8)
+        XCTAssertEqual(report_27_2_0.totalEvaluated, 13)
         XCTAssertEqual(report_27_2_0.exposedCount, 5, "iOS 27.2.0 must have exactly 5 exposed CVEs")
         XCTAssertEqual(report_27_2_0.overallRiskTier, .highRisk)
 
         let report_27_2_1 = engine.evaluate(osVersion: v27_2_1)
-        XCTAssertEqual(report_27_2_1.totalEvaluated, 8)
+        XCTAssertEqual(report_27_2_1.totalEvaluated, 13)
         XCTAssertEqual(report_27_2_1.exposedCount, 1, "iOS 27.2.1 must have exactly 1 exposed CVE (0day only)")
         XCTAssertEqual(report_27_2_1.overallRiskTier, .highRisk)
     }
@@ -123,17 +147,21 @@ final class AdversarialM3It2Challenger2Tests: XCTestCase {
         XCTAssertFalse(engine.isVulnerable(.worseQuery0day, in: v25), "worse_query 0day only applies to iOS 26+")
         XCTAssertTrue(engine.isVulnerable(.brotliOOB, in: v25), "Brotli OOB affects iOS < 26.7.3 / 27.2.1")
         XCTAssertTrue(engine.isVulnerable(.coreGraphics2D, in: v25), "CoreGraphics 2D affects iOS < 27.0")
+        XCTAssertTrue(engine.isVulnerable(.audioMxdBypass, in: v25))
+        XCTAssertTrue(engine.isVulnerable(.dyldZeroDay, in: v25))
+        XCTAssertTrue(engine.isVulnerable(.webkitSandboxEscape, in: v25))
+        XCTAssertTrue(engine.isVulnerable(.accessorySetupBluetooth, in: v25))
+        XCTAssertTrue(engine.isVulnerable(.bookRestoreEscape, in: v25))
 
-        // iOS 28.0 (future iOS where all current CVEs are patched except possible future 0days)
-        let v28 = SystemOSVersion(major: 28, minor: 0, patch: 0)
-        XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v28), "Unpatched 0day affects all versions >= 26")
-        XCTAssertFalse(engine.isVulnerable(.photosBypass, in: v28))
-        XCTAssertFalse(engine.isVulnerable(.brotliOOB, in: v28))
-        XCTAssertFalse(engine.isVulnerable(.coreGraphicsPDF, in: v28))
-        XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v28))
-        XCTAssertFalse(engine.isVulnerable(.appIntentsBypass, in: v28))
-        XCTAssertFalse(engine.isVulnerable(.imessageGroup, in: v28))
-        XCTAssertFalse(engine.isVulnerable(.bluetoothAirPlay, in: v28))
+        // iOS 27.3 and iOS 28.0 (worse_query 0day patched in iOS 27.3+)
+        for safeVer in [SystemOSVersion(major: 27, minor: 3, patch: 0), SystemOSVersion(major: 28, minor: 0, patch: 0)] {
+            for cve in FirmwareCVEID.allCases {
+                XCTAssertFalse(engine.isVulnerable(cve, in: safeVer), "\(cve.rawValue) must be patched in \(safeVer.displayString)")
+            }
+            let report = engine.evaluate(osVersion: safeVer)
+            XCTAssertEqual(report.exposedCount, 0)
+            XCTAssertEqual(report.overallRiskTier, .safe)
+        }
     }
 
     // MARK: - 2. All 16 Negative MITM Exclusions in Surge Module

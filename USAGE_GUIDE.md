@@ -1,6 +1,6 @@
 # WQGuard Technical Architecture, Exploit Deep Dive & Reference Manual
 
-> **Document Version**: 1.2.2  
+> **Document Version**: 1.3.0  
 > **Target Systems**: iOS 26.2+ / iOS 27.x, macOS Darwin 24.x+ (Host Tooling)  
 > **Security Baseline**: 100% Read-Only Inspection, Zero-Modification & Strict Zero-Trust Sideload Policy  
 > **Classification**: Technical Architecture, Vulnerability Anatomy & Threat Catalog  
@@ -15,6 +15,7 @@
    - [1.4 Stage 2: containermanagerd Symlink Traversal (worse_query)](#14-stage-2-containermanagerd-symlink-traversal-worse_query)
    - [1.5 Kernel Sandbox Extension Table Exhaustion (SEC-M5-02)](#15-kernel-sandbox-extension-table-exhaustion-sec-m5-02)
    - [1.6 Evasion Techniques & Behavioral Tuple Heuristics](#16-evasion-techniques--behavioral-tuple-heuristics)
+   - [1.7 Inline ARM64 Direct Syscall (`svc #0x80`) Scanning & FairPlay Protection](#17-inline-arm64-direct-syscall-svc-0x80-scanning--fairplay-protection)
 2. [LaunchServices CSStore2 Cache & MCM Metadata Analysis](#2-launchservices-csstore2-cache--mcm-metadata-analysis)
    - [2.1 CSStore2 Database Format ("bdsl") & Memory-Mapped Architecture](#21-csstore2-database-format-bdsl--memory-mapped-architecture)
    - [2.2 OS-Specific Unit Record Layout Specifications (iOS 26 vs iOS 27)](#22-os-specific-unit-record-layout-specifications-ios-26-vs-ios-27)
@@ -23,7 +24,7 @@
    - [2.5 Detection of Unauthorized Bundle Registrations & Container Hijacking](#25-detection-of-unauthorized-bundle-registrations--container-hijacking)
 3. [Complete Threat Indicator Reference Catalog](#3-complete-threat-indicator-reference-catalog)
    - [3.1 Core Container Manager Indicators (CM-01 through CM-07)](#31-core-container-manager-indicators-cm-01-through-cm-07)
-   - [3.2 Expanded Threat Signatures (EXP-01 through EXP-08)](#32-expanded-threat-signatures-exp-01-through-exp-08)
+   - [3.2 Expanded Threat Signatures (EXP-01 through EXP-12)](#32-expanded-threat-signatures-exp-01-through-exp-12)
    - [3.3 Comprehensive Threat Signature Matrix](#33-comprehensive-threat-signature-matrix)
 4. [Firmware CVE Exposure Radar & Non-Upgrade Posture Mitigations](#4-firmware-cve-exposure-radar--non-upgrade-posture-mitigations)
    - [4.1 2026 Firmware CVE Exposure Radar Matrix](#41-2026-firmware-cve-exposure-radar-matrix)
@@ -73,7 +74,7 @@ To prevent arbitrary apps from accessing another developer's shared container, A
 #### The Impossibility Invariant
 `containermanagerd` strictly checks whether the client's code signing credentials include the requested group identifier before performing any container operation. An application lacking `com.apple.security.application-groups` **is physically rejected by containermanagerd with error -1**.
 
-Therefore, after checking App-Group-independent APFS inode enumeration syscalls (`fsgetpath` / `CM-05`) and bundle-level threats, WQGuard's **Layer 1 Gating Engine** fast-paths any binary lacking `com.apple.security.application-groups` (and lacking standalone syscalls) as `RiskTier.safe` in constant time ($O(1)$ fast-path), eliminating false alarms for benign applications.
+Therefore, after checking App-Group-independent APFS inode enumeration syscalls (`fsgetpath` / `CM-05`), inline ARM64 `svc #0x80` direct syscalls (`INSN_ARM64_SVC_0X80`), standalone 2026 exploit primitives (`CVE-2026-65339` `audiomxd`, `BookRestore` / `bl_sbx`, `MobileGestalt` tampering), and bundle-level threats, WQGuard's **Layer 1 Gating Engine** fast-paths any binary lacking `com.apple.security.application-groups` (and lacking standalone exploit signatures) as `RiskTier.safe` in constant time ($O(1)$ fast-path), eliminating false alarms for benign applications.
 
 #### WQGuard Native App Group Declarations
 In WQGuard's own deployment architecture:
@@ -279,6 +280,18 @@ It raises **`TUPLE_OBFUSCATED_EXPLOIT` (`CM-07`, High Risk)**, neutralizing symb
 
 ---
 
+### 1.7 Inline ARM64 Direct Syscall (`svc #0x80`) Scanning & FairPlay Protection
+
+Sophisticated payloads can bypass `LC_LOAD_DYLIB` (`libsystem_kernel.dylib`) and `LC_SYMTAB` auditing completely by embedding raw ARM64 supervisor call instructions (`svc #0x80`, little-endian 32-bit opcode `0xD400_1001`) directly inside executable code or custom anti-evasion `RX` sections.
+
+WQGuard's `MachOParser.scanDirectSyscalls(maxSampleSites: 16)` enforces precision instruction-level auditing:
+1. **Architecture Scoping**: Runs exclusively on `CPU_TYPE_ARM64` (`arm64` / `arm64e`) and `CPU_TYPE_ARM64_32` slices, avoiding false hits on `x86_64`, `i386`, or `armv7` simulator/legacy slices.
+2. **Executable & Custom RX Section Inspection**: Scans 4-byte aligned words across sections carrying `S_ATTR_PURE_INSTRUCTIONS` or `S_ATTR_SOME_INSTRUCTIONS`, `__text` / `__stubs`, and custom executable (`initialProtection & 0x04 != 0`) `S_REGULAR` sections. `S_ZEROFILL` / `S_GB_ZEROFILL` and 12 read-only/metadata prefixes (`__const`, `__swift`, `__objc_`, `__cstring`, `__ustring`, `__oslogstring`, `__unwind_info`, `__eh_frame`, `__gcc_except_tab`, `__entitlements`, `__info_plist`, `__dof_`) are skipped to eliminate constant-pool false positives.
+3. **FairPlay `encryptedRange` Protection**: When `cryptid != 0` with an invalid or missing `encryptedRange`, scanning returns `(0, [])` fail-closed. When `encryptedRange` is present, any 4-byte instruction window overlapping `encryptedRange` is skipped while unencrypted custom RX sections remain inspected (defeating fake partial-encryption headers).
+4. **Pre-Gate High-Risk Escalation**: Any detected `svc #0x80` site (`INSN_ARM64_SVC_0X80` / `arm64:svc_0x80`) is evaluated prior to App Group fast-path gating, recorded up to 16 `DirectSyscallSite` descriptors (`segmentName`, `sectionName`, `fileOffset`, `virtualAddress`, `immediate`), and propagated into `WhitelistEngine` anti-spoofing checks.
+
+---
+
 ## 2. LaunchServices CSStore2 Cache & MCM Metadata Analysis
 
 > **Deployment Boundary Note (Standard iOS Seatbelt vs. Host/Unsandboxed Forensics)**: On non-jailbroken stock iOS devices, Apple's Seatbelt sandbox prevents standard user applications from reading `/var/mobile/Library/Caches/*.csstore` or enumerating `/var/mobile/Containers/Shared/AppGroup` outside their own developer group. On stock iOS, WQGuard audits installed apps without exploits via `lockdownd` / `installation_proxy` (`Engine 1A/1B`), `.ipa` / `.tipa` binary inspection (`Engine 2`), and URL-scheme presence probes (`Engine 3`). `CSStore2Parser`, `MCMReader`, and `ContainerScanner` operate in **macOS host/backup forensics (`wqguard-cli --scan-system` / `--container`) and unsandboxed (`com.apple.private.security.no-sandbox` / TrollStore / jailbroken) research environments**.
@@ -434,7 +447,7 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 
 ---
 
-### 3.2 Expanded Threat Signatures (EXP-01 through EXP-08)
+### 3.2 Expanded Threat Signatures (EXP-01 through EXP-12)
 
 #### `EXP-01`: Private Apple Photos Framework Linkage
 - **Identifier**: `EXP-01:PhotosFramework`
@@ -506,6 +519,38 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
   - (A) Revoke background permissions and uninstall snooper app.
   - (B) WQGuard flags rogue `CloudConfigurationDetails.plist` artifacts strictly read-only (never mutating or deleting system files); back up user data and perform a clean restore via Finder / Apple Configurator if unauthorized supervision was applied.
 
+#### `EXP-09`: Inline ARM64 Direct Syscall Evasion (`svc #0x80`)
+- **Identifier**: `INSN_ARM64_SVC_0X80` (`arm64:svc_0x80`)
+- **Severity**: `HIGH` (`RiskTier.highRisk`)
+- **Detection Layer**: Layer 2 Instruction-Level Scanner (`__TEXT,__text`, `__stubs`, custom executable `RX` `S_REGULAR` sections; evaluated prior to Layer 1 App Group gating)
+- **Technical Description**: Detects 4-byte aligned ARM64 / ARM64_32 `svc #0x80` (`0xD4001001`) supervisor call opcodes while skipping FairPlay `encryptedRange`, `S_ZEROFILL` segments, and 12 metadata/read-only prefixes (`__const`, `__swift`, `__objc_`, `__cstring`, etc.).
+- **Exploit Path**: Executes kernel traps (`fsgetpath`, `open`, `syscall`) without importing `libsystem_kernel.dylib` symbols, evading symbol-table scanners.
+- **Remediation**: Treat unencrypted sideloaded binaries containing inline `svc #0x80` instructions as evasive exploit payloads; do not install or run.
+
+#### `EXP-10`: `AudioMxd` Silent Microphone TCC Bypass (`CVE-2026-65339`)
+- **Identifier**: `CVE-2026-65339` (`DYLIB_AUDIOMXD_MEDIAEXPERIENCE`, `SYM_CMSESSION_SET_PROPERTY`, `SYM_AUDIOSESSION_SET_CM_PROPERTY`, `XPC_AUDIOMXD_AUDIO`, `XPC_AUDIOMXD_COREMEDIA`)
+- **Severity**: `HIGH` (`RiskTier.highRisk`)
+- **Detection Layer**: Layer 1 Entitlements & Layer 2 Static Scanner (App-Group-independent pre-gating; registry + IPA/bundle)
+- **Technical Description**: Flags unauthorized `MediaExperience.framework` linkage, `CMSessionSetProperty` / `AudioSessionSetCMProperty` symbols, `com.apple.audio.audiomxd` / `com.apple.coremedia.audiomxd` XPC strings, or restricted `com.apple.private.mediaexperience*` / `com.apple.private.cmsession*` entitlements (explicitly excluding `AudioToolbox.framework`, `AVFAudio.framework`, `AudioOutputUnitStart`, and `AURemoteIO` to avoid false positives on emulators and audio apps).
+- **Exploit Path**: Triggers `CVE-2026-65339` privilege validation bypass in `audiomxd` to capture audio without microphone TCC consent.
+- **Remediation**: Uninstall offending binaries immediately, audit `Settings -> Privacy & Security -> Microphone`, and monitor Control Center for unexpected microphone indicators.
+
+#### `EXP-11`: `BookRestore` / `bl_sbx` Escape & `MobileGestalt` System Tampering (`PoC:BookRestore`)
+- **Identifier**: `PoC:BookRestore` / `MobileGestaltTamper` (`DYLIB_BOOKRESTORE_PRIVATE`, `XPC_BOOKASSETD`, `XPC_ITUNESSTORED`, `STR_BLDATABASEMANAGER_SQLITE`, `STR_DOWNLOADS28_SQLITEDB`, `STR_MOBILEGESTALT_PLIST`, `STR_MOBILEGESTALT_CACHE`)
+- **Severity**: `HIGH` (`RiskTier.highRisk`)
+- **Detection Layer**: Layer 1 Entitlements & Layer 2 Static Scanner (App-Group-independent pre-gating; registry + IPA/bundle)
+- **Technical Description**: Detects `BookLibraryPrivate.framework`, `com.apple.bookassetd` / `com.apple.itunesstored` XPC references, `BLDatabaseManager.sqlite` / `downloads.28.sqlitedb` restore targets, `com.apple.MobileGestalt.plist` / `systemgroup.com.apple.mobilegestaltcache` references, or restricted `com.apple.private.bookassetd*` / `com.apple.itunesstored.private*` / `com.apple.private.MobileGestalt*` entitlements.
+- **Exploit Path**: Exploits `bookassetd` / `itunesstored` SQLite restoration path traversal (`BookRestore` / `bl_sbx`) to overwrite protected system files such as `MobileGestalt` caches outside the app sandbox.
+- **Remediation**: Quarantine and reject any sideloaded package targeting `bookassetd`, `BLDatabaseManager.sqlite`, or `MobileGestalt` system files.
+
+#### `EXP-12`: `AccessorySetupKit` Bluetooth Pairing & TCC Bypass (`CVE-2026-84493`)
+- **Identifier**: `CVE-2026-84493:AccessorySetupKitBypass` / `CVE-2026-84493:PrivateAccessoryEntitlement`
+- **Severity**: `HIGH` (`RiskTier.highRisk`)
+- **Detection Layer**: Layer 1 Entitlements & Layer 2 Bundle/Extension Scanner (evaluated independently on main bundle AND every `PlugIns/*.appex` / `Extensions/*.appex`, plus registry audit)
+- **Technical Description**: Flags non-App Store binaries invoking `AccessorySetupKit.framework` or `ASAccessorySession` while omitting required `Info.plist` keys (`NSBluetoothAlwaysUsageDescription` or non-empty `NSAccessorySetupKitSupports`), as well as non-Apple apps holding restricted `com.apple.private.accessorysetupkit*` entitlements.
+- **Exploit Path**: Leverages `CVE-2026-84493` to silently probe or pair with nearby Bluetooth peripherals without presenting system TCC authorization prompts.
+- **Remediation**: Review `Settings -> Privacy & Security -> Bluetooth` and reject sideloaded binaries or `.appex` extensions abusing `AccessorySetupKit` without compliant `Info.plist` declarations.
+
 ---
 
 ### 3.3 Comprehensive Threat Signature Matrix
@@ -527,6 +572,10 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 | **`EXP-06`** | `IMPERSONATION:Telegram` | `HIGH` | `highRisk` | Layer 2 | Session hijacking / eavesdropping |
 | **`EXP-07`** | `ElleKit` / Injected Tweaks | `MEDIUM` | `caution` | Layer 2 | Runtime method hooking / modded IPA |
 | **`EXP-08`** | `UIBackgroundModes` + `UIPasteboard` | `HIGH` | `highRisk` | L2 / L3 | Background clipboard credential snoop |
+| **`EXP-09`** | `INSN_ARM64_SVC_0X80` (`arm64:svc_0x80`) | `HIGH` | `highRisk` | Layer 2 | Inline ARM64 direct syscall evasion |
+| **`EXP-10`** | `CVE-2026-65339` (`audiomxd` / `MediaExperience`) | `HIGH` | `highRisk` | L1 / L2 | Silent microphone TCC bypass |
+| **`EXP-11`** | `PoC:BookRestore` / `MobileGestaltTamper` | `HIGH` | `highRisk` | L1 / L2 | `bl_sbx` arbitrary file overwrite & MobileGestalt tamper |
+| **`EXP-12`** | `CVE-2026-84493` (`AccessorySetupKitBypass`) | `HIGH` | `highRisk` | L1 / L2 | Silent Bluetooth pairing TCC bypass (incl. `.appex`) |
 
 ---
 
@@ -534,13 +583,13 @@ By correlating `CSStore2` cache entries with physical `.com.apple.mobile_contain
 
 Many iOS power users and security researchers intentionally stay on older firmware versions (e.g., iOS 26.x or iOS 27.0–27.2) for TrollStore compatibility, MobileGestalt exploration, or jailbreak research. Upgrading to the latest iOS release is not an option for these users.
 
-WQGuard's **`FirmwarePostureEngine`** evaluates the host OS version against 8 confirmed 2026 iOS vulnerabilities and delivers **actionable non-upgrade mitigations**.
+WQGuard's **`FirmwarePostureEngine`** evaluates the host OS version against 13 confirmed 2026 iOS vulnerabilities and delivers **actionable non-upgrade mitigations**.
 
 ### 4.1 2026 Firmware CVE Exposure Radar Matrix
 
 | CVE / Identifier | Vulnerability Name | Subsystem | CVSS | Affected iOS Range | Patched In |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`0day:worse_query`** | `containermanagerd` Token Escape | Containermanager | **8.8** | iOS 26.0 – 27.2.1+ | **Unpatched 0day** |
+| **`0day:worse_query`** | `containermanagerd` Token Escape | Containermanager | **8.8** | iOS 26.0 – 26.7.3 & 27.0 – 27.2.1 | **iOS 27.3 (27.3 beta 2+); iOS 26.x exposed** |
 | **`CVE-2026-112676`** | Apple Photos Privacy TCC Bypass | Photos / TCC | **7.5** | iOS < 27.2 & 26 < 26.7.2 | iOS 27.2 / 26.7.2 |
 | **`CVE-2026-111497`** | Brotli Decoder Heap OOB Write | libbrotli / WebKit | **9.2** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
 | **`CVE-2026-112611`** | CoreGraphics PDF OOB Write | CoreGraphics / PDFKit| **8.8** | iOS < 27.2 & 26 < 26.7.2 | iOS 27.2 / 26.7.2 |
@@ -548,6 +597,11 @@ WQGuard's **`FirmwarePostureEngine`** evaluates the host OS version against 8 co
 | **`CVE-2026-113963`** | App Intents Authorization Bypass | Shortcuts / Intents | **7.8** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
 | **`CVE-2026-113960/1`**| iMessage Blastdoor Group Leak | Messages / Blastdoor | **8.1** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
 | **`CVE-2026-113964–70`**| Bluetooth CoreUtils & AirPlay UAF| Bluetooth / rapportd | **8.8** | iOS < 27.2.1 & 26 < 26.7.3 | iOS 27.2.1 / 26.7.3 |
+| **`CVE-2026-65339`** | AudioMxd Mic TCC & MediaExperience Bypass | CoreMedia / audiomxd | **7.8** | iOS < 27.0, 26 < 26.6.1, 18 < 18.7.11 | iOS 27.0 / 26.6.1 / 18.7.11 |
+| **`CVE-2026-20700`** | `dyld` Dynamic Linker Arbitrary Write 0-day | dyld / Mach-O Linker | **7.8** | iOS < 27.0, 26 < 26.3, 18 < 18.7.5 | iOS 27.0 / 26.3 / 18.7.5 |
+| **`CVE-2026-113897`** | WebKit GPU & WebContent Sandbox Escape | WebKit / GPU Process | **8.8** | iOS < 27.2 & 26 < 26.7.2 | iOS 27.2 / 26.7.2 |
+| **`CVE-2026-84493`** | `AccessorySetupKit` Bluetooth Privacy Bypass | AccessorySetupKit | **6.5** | iOS 18+ (< 27.2 & 26 < 26.7.2) | iOS 27.2 / 26.7.2 |
+| **`PoC:BookRestore`** | `BookRestore` / `bl_sbx` Arbitrary Overwrite | bookassetd / MobileGestalt | **7.8** | iOS 18+ (< 27.0 & 26 < 26.2) | iOS 27.0 / 26.2 |
 
 ---
 
@@ -559,7 +613,7 @@ WQGuard provides ready-to-import shield profiles across **Surge (`.sgmodule`), S
 ```ini
 #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
 #!desc=Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write (CVE-2026-111497 / HTTP2Shell, CVSS 9.2) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 针对未修复 libbrotli 堆越界写漏洞，剥离 br 压缩声明并拦截强推响应；内置 16 项苹果与网银负向排除。
-#!version=1.2.2
+#!version=1.3.0
 #!category=Security / 安全防护
 #!arguments=EXTRA_MITM_HOSTS:*.example.invalid
 #!arguments-desc=Extra hostnames/wildcards for Brotli downgrade protection (set * to cover all Safari/WebView domains; Apple & banking domains remain excluded). | 可追加高风险自定义域名（填 * 可覆盖全站流量，内置排除列表保障苹果与网银不受影响）。
@@ -656,18 +710,18 @@ OPTIONS:
         Inspect AppGroup container directory using ContainerScanner.
 
   -r, --firmware-radar [os_version]
-        Evaluate OS version against 8 2026 CVEs (e.g., Photos bypass,
+        Evaluate OS version against 13 2026 CVEs (e.g., Photos bypass,
         Brotli OOB RCE, worse_query 0day) using FirmwarePostureEngine.
         If os_version is omitted, current device OS version is used.
-
-  --export-shield <path>
-        Export multi-client Brotli downgrade shield auto-detected by extension
-        (.sgmodule / .module / .conf / .plugin / .stoverride) with 16 negative
-        host exclusions via SurgeBrotliShieldHelper.
 
   --export-surge <path>
         Export WQGuard-Brotli-Shield.sgmodule with 16 negative exclusions
         (protecting Apple Intelligence, Siri, and banking) via SurgeBrotliShieldHelper.
+
+  --export-shield <path>
+        Export Brotli shield auto-inferring client format from extension:
+        .sgmodule (Surge), .module (Shadowrocket), .conf (Quantumult X),
+        .plugin (Loon), or .stoverride (Stash).
 
   --format <text|json|markdown>
         Report format output (default: text).

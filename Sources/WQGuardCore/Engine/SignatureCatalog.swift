@@ -8,6 +8,34 @@
 
 import Foundation
 
+/// Runtime XOR-0x5A IOC token armor preventing scanner binary self-triggering on `__TEXT,__cstring`.
+internal enum IOCTokenArmor {
+    // Dynamic Foundation call prevents LLVM -O WMO IPSCCP from constant-folding back into __cstring,
+    // while remaining 100% Sendable and deterministic (PID is always > 0).
+    private static let xorKey: UInt8 = ProcessInfo.processInfo.processIdentifier > -1 ? 0x5A : 0x00
+
+    @inline(never)
+    internal static func decode(_ encoded: [UInt8]) -> String {
+        var out = [UInt8]()
+        out.reserveCapacity(encoded.count)
+        for b in encoded {
+            out.append(b ^ xorKey)
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    // Short identifier names ensure __swift5_reflstr / symbol tables never contain IOC substrings:
+    internal static var tAudioDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x37, 0x22, 0x3E]) }
+    internal static var tCoreMediaDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x39, 0x35, 0x28, 0x3F, 0x37, 0x3F, 0x3E, 0x33, 0x3B, 0x74, 0x3B, 0x2F, 0x3E, 0x33, 0x35, 0x37, 0x22, 0x3E]) }
+    internal static var tBookDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x38, 0x35, 0x35, 0x31, 0x3B, 0x29, 0x29, 0x3F, 0x2E, 0x3E]) }
+    internal static var tStoreDaemon: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x33, 0x2E, 0x2F, 0x34, 0x3F, 0x29, 0x29, 0x2E, 0x35, 0x28, 0x3F, 0x3E]) }
+    internal static var tStorePrivPrefix: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x33, 0x2E, 0x2F, 0x34, 0x3F, 0x29, 0x29, 0x2E, 0x35, 0x28, 0x3F, 0x3E, 0x74, 0x2A, 0x28, 0x33, 0x2C, 0x3B, 0x2E, 0x3F]) }
+    internal static var tBookSQLite: String { decode([0x18, 0x16, 0x1E, 0x3B, 0x2E, 0x3B, 0x38, 0x3B, 0x29, 0x3F, 0x17, 0x3B, 0x34, 0x3B, 0x3D, 0x3F, 0x28, 0x74, 0x29, 0x2B, 0x36, 0x33, 0x2E, 0x3F]) }
+    internal static var tDownloadsSQLite: String { decode([0x3E, 0x35, 0x2D, 0x34, 0x36, 0x35, 0x3B, 0x3E, 0x29, 0x74, 0x68, 0x62, 0x74, 0x29, 0x2B, 0x36, 0x33, 0x2E, 0x3F, 0x3E, 0x38]) }
+    internal static var tGestaltPlist: String { decode([0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x17, 0x35, 0x38, 0x33, 0x36, 0x3F, 0x1D, 0x3F, 0x29, 0x2E, 0x3B, 0x36, 0x2E, 0x74, 0x2A, 0x36, 0x33, 0x29, 0x2E]) }
+    internal static var tGestaltGroup: String { decode([0x29, 0x23, 0x29, 0x2E, 0x3F, 0x37, 0x3D, 0x28, 0x35, 0x2F, 0x2A, 0x74, 0x39, 0x35, 0x37, 0x74, 0x3B, 0x2A, 0x2A, 0x36, 0x3F, 0x74, 0x37, 0x35, 0x38, 0x33, 0x36, 0x3F, 0x3D, 0x3F, 0x29, 0x2E, 0x3B, 0x36, 0x2E, 0x39, 0x3B, 0x39, 0x32, 0x3F]) }
+}
+
 /// Centralized catalog of exploit signatures, dylibs, symbols, strings, and behavioral rules.
 public enum SignatureCatalog {
     
@@ -282,4 +310,137 @@ public enum SignatureCatalog {
         severity: .caution,
         defaultLocation: "LC_SYMTAB"
     )
+
+    // MARK: - 9. Direct Syscall Evasion
+    public static let directSyscallRule = Rule(
+        id: "INSN_ARM64_SVC_0X80",
+        pattern: "arm64:svc_0x80",
+        category: "Direct Syscall Evasion",
+        description: "Inline ARM64 svc #0x80 kernel syscall instruction (0xD4001001) detected in executable code, bypassing libsystem_kernel.dylib import tables and static symbol auditing.",
+        descriptionZh: "在可执行代码段检测到内联 ARM64 svc #0x80 系统调用指令 (0xD4001001)，可绕过 libsystem_kernel.dylib 导入表与静态符号审计直接向内核发起调用。",
+        severity: .highRisk,
+        defaultLocation: "__TEXT,__text"
+    )
+
+    // MARK: - 10. App-Group-Independent 2026 Exploit Rulesets
+    // NOTE: Never add AudioToolbox.framework, AVFAudio.framework, AudioOutputUnitStart, or AURemoteIO
+    // to prevent false positives on legitimate sideloaded emulators/games (Delta, RetroArch, PPSSPP).
+    public static let standaloneExploitDylibRules: [String: Rule] = [
+        "MediaExperience.framework": Rule(
+            id: "DYLIB_AUDIOMXD_MEDIAEXPERIENCE",
+            pattern: "CVE-2026-65339:MediaExperience.framework",
+            category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
+            description: "Direct linkage to private MediaExperience.framework, used to communicate with audiomxd and bypass microphone TCC privacy controls (CVE-2026-65339).",
+            descriptionZh: "直接链接私有框架 MediaExperience.framework，可用于与 audiomxd 通信并绕过麦克风 TCC 隐私授权保护 (CVE-2026-65339)。",
+            severity: .highRisk,
+            defaultLocation: "LC_LOAD_DYLIB"
+        ),
+        "BookLibraryPrivate.framework": Rule(
+            id: "DYLIB_BOOKRESTORE_PRIVATE",
+            pattern: "BookRestore:BookLibraryPrivate.framework",
+            category: "BookRestore / bl_sbx Escape",
+            description: "Direct linkage to private BookLibraryPrivate.framework, associated with BookRestore / bl_sbx bookassetd sandbox escape chains.",
+            descriptionZh: "直接链接私有框架 BookLibraryPrivate.framework，常见于 BookRestore / bl_sbx 图书守护进程沙盒逃逸利用链。",
+            severity: .highRisk,
+            defaultLocation: "LC_LOAD_DYLIB"
+        )
+    ]
+
+    public static let standaloneExploitSymbolRules: [String: Rule] = [
+        "CMSessionSetProperty": Rule(
+            id: "SYM_CMSESSION_SET_PROPERTY",
+            pattern: "CVE-2026-65339:CMSessionSetProperty",
+            category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
+            description: "Imports private MediaExperience API CMSessionSetProperty, associated with CVE-2026-65339 audiomxd microphone TCC bypass.",
+            descriptionZh: "导入私有 MediaExperience 接口 CMSessionSetProperty，涉及 CVE-2026-65339 audiomxd 麦克风隐私绕过攻击向量。",
+            severity: .highRisk,
+            defaultLocation: "LC_SYMTAB"
+        ),
+        "AudioSessionSetCMProperty": Rule(
+            id: "SYM_AUDIOSESSION_SET_CM_PROPERTY",
+            pattern: "CVE-2026-65339:AudioSessionSetCMProperty",
+            category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
+            description: "Imports private MediaExperience API AudioSessionSetCMProperty, associated with CVE-2026-65339 audiomxd microphone TCC bypass.",
+            descriptionZh: "导入私有 MediaExperience 接口 AudioSessionSetCMProperty，涉及 CVE-2026-65339 audiomxd 麦克风隐私绕过攻击向量。",
+            severity: .highRisk,
+            defaultLocation: "LC_SYMTAB"
+        )
+    ]
+
+    public static let standaloneExploitStringRules: [String: Rule] = [
+        IOCTokenArmor.tAudioDaemon: Rule(
+            id: "XPC_AUDIOMXD_AUDIO",
+            pattern: "CVE-2026-65339:\(IOCTokenArmor.tAudioDaemon)",
+            category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
+            description: "Direct XPC service reference to \(IOCTokenArmor.tAudioDaemon), enabling CVE-2026-65339 microphone TCC privacy bypass.",
+            descriptionZh: "直接引用 XPC 服务名 \(IOCTokenArmor.tAudioDaemon)，可用于触发 CVE-2026-65339 麦克风 TCC 隐私绕过。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        ),
+        IOCTokenArmor.tCoreMediaDaemon: Rule(
+            id: "XPC_AUDIOMXD_COREMEDIA",
+            pattern: "CVE-2026-65339:\(IOCTokenArmor.tCoreMediaDaemon)",
+            category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
+            description: "Direct XPC service reference to \(IOCTokenArmor.tCoreMediaDaemon), enabling CVE-2026-65339 microphone TCC privacy bypass.",
+            descriptionZh: "直接引用 XPC 服务名 \(IOCTokenArmor.tCoreMediaDaemon)，可用于触发 CVE-2026-65339 麦克风 TCC 隐私绕过。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        ),
+        IOCTokenArmor.tBookDaemon: Rule(
+            id: "XPC_BOOKASSETD",
+            pattern: "BookRestore:\(IOCTokenArmor.tBookDaemon)",
+            category: "BookRestore / bl_sbx Escape",
+            description: "Direct XPC service reference to \(IOCTokenArmor.tBookDaemon), characteristic of BookRestore / bl_sbx arbitrary system file overwrite exploits.",
+            descriptionZh: "直接引用 XPC 服务名 \(IOCTokenArmor.tBookDaemon)，为 BookRestore / bl_sbx 任意系统文件覆盖漏洞典型特征。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        ),
+        IOCTokenArmor.tStoreDaemon: Rule(
+            id: "XPC_ITUNESSTORED",
+            pattern: "BookRestore:\(IOCTokenArmor.tStoreDaemon)",
+            category: "BookRestore / bl_sbx Escape",
+            description: "Direct XPC service reference to \(IOCTokenArmor.tStoreDaemon), associated with BookRestore / downloads.28 SQLite restore sandbox escapes.",
+            descriptionZh: "直接引用 XPC 服务名 \(IOCTokenArmor.tStoreDaemon)，与 BookRestore / downloads.28 数据库恢复沙盒逃逸链关联。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        ),
+        IOCTokenArmor.tBookSQLite: Rule(
+            id: "STR_BLDATABASEMANAGER_SQLITE",
+            pattern: "BookRestore:\(IOCTokenArmor.tBookSQLite)",
+            category: "BookRestore / bl_sbx Escape",
+            description: "References \(IOCTokenArmor.tBookSQLite) restore database target used by BookRestore / bl_sbx to hijack bookassetd file writes.",
+            descriptionZh: "引用 \(IOCTokenArmor.tBookSQLite) 数据库目标，常用于 BookRestore / bl_sbx 劫持 bookassetd 写入系统受保护路径。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        ),
+        IOCTokenArmor.tDownloadsSQLite: Rule(
+            id: "STR_DOWNLOADS28_SQLITEDB",
+            pattern: "BookRestore:\(IOCTokenArmor.tDownloadsSQLite)",
+            category: "BookRestore / bl_sbx Escape",
+            description: "References \(IOCTokenArmor.tDownloadsSQLite) download database target used by BookRestore / bl_sbx to stage arbitrary system writes.",
+            descriptionZh: "引用 \(IOCTokenArmor.tDownloadsSQLite) 下载数据库路径，常用于 BookRestore / bl_sbx 诱导系统守护进程实施越权写入。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        ),
+        IOCTokenArmor.tGestaltPlist: Rule(
+            id: "STR_MOBILEGESTALT_PLIST",
+            pattern: "MobileGestaltTamper:\(IOCTokenArmor.tGestaltPlist)",
+            category: "MobileGestalt System Tampering",
+            description: "References protected system file \(IOCTokenArmor.tGestaltPlist), indicating device capability cache spoofing or system tampering.",
+            descriptionZh: "引用系统受保护配置文件 \(IOCTokenArmor.tGestaltPlist)，疑似用于篡改设备硬件能力缓存与系统配置。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        ),
+        IOCTokenArmor.tGestaltGroup: Rule(
+            id: "STR_MOBILEGESTALT_CACHE",
+            pattern: "MobileGestaltTamper:mobilegestaltcache",
+            category: "MobileGestalt System Tampering",
+            description: "References Apple system group container \(IOCTokenArmor.tGestaltGroup), indicating MobileGestalt cache tampering attempts.",
+            descriptionZh: "引用系统共享容器标识 \(IOCTokenArmor.tGestaltGroup)，表明存在篡改 MobileGestalt 缓存风险。",
+            severity: .highRisk,
+            defaultLocation: "__TEXT,__cstring"
+        )
+    ]
+
+    public static let standaloneExploitCandidateStrings: [String] = Array(standaloneExploitStringRules.keys).sorted()
 }

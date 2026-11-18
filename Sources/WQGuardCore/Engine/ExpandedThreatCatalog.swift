@@ -222,9 +222,9 @@ public enum ExpandedThreatCatalog {
             }
         }
 
-        // Entitlement checks (ignore explicit boolean `false` placeholders)
+        // Entitlement checks (ignore explicit boolean `false` / integer `0` placeholders)
         for (key, val) in entitlements {
-            if let boolVal = val as? Bool, !boolVal {
+            if isExplicitFalseOrZeroEntitlementValue(val) {
                 continue
             }
             if key.hasPrefix(photosEntitlementPrefix) || key == photosBourgeoisieEntitlement {
@@ -545,6 +545,231 @@ public enum ExpandedThreatCatalog {
                 location: cloudConfigURL.path,
                 severity: .caution
             ))
+        }
+
+        return indicators
+    }
+
+    /// Returns `true` when an entitlement value is an explicit boolean `false` or numeric integer `0` placeholder
+    /// (e.g. `Bool(false)`, `Int(0)`, `Int64(0)`, `UInt64(0)`, or non-CFBoolean `NSNumber(value: 0)` from XML/DER blobs).
+    private static func isExplicitFalseOrZeroEntitlementValue(_ val: Any?) -> Bool {
+        guard let val else { return false }
+        if let boolVal = val as? Bool {
+            return !boolVal
+        }
+        if let intVal = val as? Int {
+            return intVal == 0
+        }
+        if let int64Val = val as? Int64 {
+            return int64Val == 0
+        }
+        if let uint64Val = val as? UInt64 {
+            return uint64Val == 0
+        }
+        if let int32Val = val as? Int32 {
+            return int32Val == 0
+        }
+        if let numVal = val as? NSNumber {
+            return numVal.int64Value == 0 && numVal.doubleValue == 0.0
+        }
+        return false
+    }
+
+    /// 7. Evaluates AudioMxd Microphone TCC Bypass (CVE-2026-65339) indicators.
+    public static func evaluateAudioMxdBypass(
+        linkedDylibs: [String],
+        symbols: [String],
+        entitlements: [String: Any],
+        cryptid: UInt32
+    ) -> [ThreatIndicator] {
+        var indicators: [ThreatIndicator] = []
+        var emittedSignatures: Set<String> = []
+
+        // Entitlement checks (ignore explicit boolean `false` / integer `0` placeholders)
+        for key in entitlements.keys.sorted() {
+            if isExplicitFalseOrZeroEntitlementValue(entitlements[key]) {
+                continue
+            }
+            if key.hasPrefix("com.apple.private.mediaexperience") || key.hasPrefix("com.apple.private.cmsession") {
+                let sig = "CVE-2026-65339:\(key)"
+                if emittedSignatures.insert(sig).inserted {
+                    indicators.append(ThreatIndicator(
+                        signature: sig,
+                        description: WQLocale.pick(
+                            en: "Declares restricted Apple private AudioMxd / MediaExperience entitlement (\(key)), enabling microphone TCC privacy bypass (CVE-2026-65339).",
+                            zh: "声明了 Apple 私有 AudioMxd / MediaExperience 权限 (\(key))，可绕过系统麦克风 TCC 隐私授权保护 (CVE-2026-65339)。"
+                        ),
+                        category: "AudioMxd Mic TCC Bypass (CVE-2026-65339)",
+                        location: "CSBlob Entitlements",
+                        severity: .highRisk
+                    ))
+                }
+            }
+        }
+
+        // Binary checks on unencrypted images (never flag AudioToolbox/AVFAudio/AURemoteIO)
+        if cryptid == 0 {
+            if let mediaRule = SignatureCatalog.standaloneExploitDylibRules["MediaExperience.framework"] {
+                for dylib in linkedDylibs where dylib.contains("MediaExperience.framework") {
+                    if emittedSignatures.insert(mediaRule.pattern).inserted {
+                        indicators.append(mediaRule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
+                    }
+                }
+            }
+
+            let targetSymbolKeys = ["CMSessionSetProperty", "AudioSessionSetCMProperty"]
+            for targetKey in targetSymbolKeys {
+                guard let rule = SignatureCatalog.standaloneExploitSymbolRules[targetKey] else { continue }
+                for sym in symbols {
+                    let cleanSym = sym.hasPrefix("_") ? String(sym.dropFirst()) : sym
+                    if cleanSym == targetKey || sym.contains(targetKey) {
+                        if emittedSignatures.insert(rule.pattern).inserted {
+                            indicators.append(rule.toIndicator(at: "LC_SYMTAB: \(sym)"))
+                        }
+                        break
+                    }
+                }
+            }
+        }
+
+        return indicators
+    }
+
+    /// 8. Evaluates BookRestore / bl_sbx escape and MobileGestalt system tampering indicators.
+    public static func evaluateBookRestoreAndGestalt(
+        linkedDylibs: [String],
+        textStrings: [String],
+        entitlements: [String: Any],
+        cryptid: UInt32
+    ) -> [ThreatIndicator] {
+        var indicators: [ThreatIndicator] = []
+        var emittedSignatures: Set<String> = []
+
+        // Entitlement checks (ignore explicit boolean `false` / integer `0` placeholders)
+        for key in entitlements.keys.sorted() {
+            if isExplicitFalseOrZeroEntitlementValue(entitlements[key]) {
+                continue
+            }
+            if key.hasPrefix("com.apple.private.bookassetd") || key.hasPrefix(IOCTokenArmor.tStorePrivPrefix) {
+                let sig = "BookRestore:\(key)"
+                if emittedSignatures.insert(sig).inserted {
+                    indicators.append(ThreatIndicator(
+                        signature: sig,
+                        description: WQLocale.pick(
+                            en: "Declares restricted Apple private bookstore/asset daemon entitlement (\(key)), associated with BookRestore / bl_sbx sandbox escape primitives.",
+                            zh: "声明了 Apple 私有图书资源守护进程权限 (\(key))，与 BookRestore / bl_sbx 沙盒逃逸利用特征关联。"
+                        ),
+                        category: "BookRestore / bl_sbx Escape",
+                        location: "CSBlob Entitlements",
+                        severity: .highRisk
+                    ))
+                }
+            } else if key.hasPrefix("com.apple.private.MobileGestalt") {
+                let sig = "MobileGestaltTamper:\(key)"
+                if emittedSignatures.insert(sig).inserted {
+                    indicators.append(ThreatIndicator(
+                        signature: sig,
+                        description: WQLocale.pick(
+                            en: "Declares restricted Apple private MobileGestalt entitlement (\(key)), enabling system device-capability plist tampering.",
+                            zh: "声明了 Apple 私有 MobileGestalt 特权 (\(key))，可用于篡改系统设备配置属性列表。"
+                        ),
+                        category: "MobileGestalt System Tampering",
+                        location: "CSBlob Entitlements",
+                        severity: .highRisk
+                    ))
+                }
+            }
+        }
+
+        // Binary dylib & string checks on unencrypted images
+        if cryptid == 0 {
+            if let bookRule = SignatureCatalog.standaloneExploitDylibRules["BookLibraryPrivate.framework"] {
+                for dylib in linkedDylibs where dylib.contains("BookLibraryPrivate.framework") {
+                    if emittedSignatures.insert(bookRule.pattern).inserted {
+                        indicators.append(bookRule.toIndicator(at: "LC_LOAD_DYLIB: \(dylib)"))
+                    }
+                }
+            }
+
+            for key in SignatureCatalog.standaloneExploitStringRules.keys.sorted() {
+                guard let rule = SignatureCatalog.standaloneExploitStringRules[key] else { continue }
+                for str in textStrings where str.contains(key) {
+                    if emittedSignatures.insert(rule.pattern).inserted {
+                        indicators.append(rule.toIndicator(at: "__TEXT: \(str)"))
+                    }
+                    break
+                }
+            }
+        }
+
+        return indicators
+    }
+
+    /// 9. Evaluates AccessorySetupKit Bluetooth TCC Bypass (CVE-2026-84493) indicators.
+    public static func evaluateAccessorySetupBypass(
+        linkedDylibs: [String],
+        symbols: [String],
+        infoPlist: [String: Any],
+        entitlements: [String: Any],
+        installChannel: InstallChannel,
+        cryptid: UInt32
+    ) -> [ThreatIndicator] {
+        guard installChannel != .appStore else {
+            return []
+        }
+
+        var indicators: [ThreatIndicator] = []
+
+        // 1. Private AccessorySetupKit entitlements on non-App Store builds
+        let matchedAccessoryEntKeys = entitlements.keys.sorted().filter { key in
+            if isExplicitFalseOrZeroEntitlementValue(entitlements[key]) {
+                return false
+            }
+            return key.hasPrefix("com.apple.private.accessorysetupkit")
+        }
+        if !matchedAccessoryEntKeys.isEmpty {
+            let joined = matchedAccessoryEntKeys.joined(separator: ", ")
+            indicators.append(ThreatIndicator(
+                signature: "CVE-2026-84493:PrivateAccessoryEntitlement",
+                description: WQLocale.pick(
+                    en: "Declares restricted Apple private AccessorySetupKit entitlement (\(joined)) on non-App Store build, enabling Bluetooth pairing TCC bypass (CVE-2026-84493).",
+                    zh: "非 App Store 应用声明了 Apple 私有 AccessorySetupKit 特权 (\(joined))，可绕过蓝牙配对 TCC 隐私授权检查 (CVE-2026-84493)。"
+                ),
+                category: "AccessorySetupKit Bluetooth TCC Bypass (CVE-2026-84493)",
+                location: "CSBlob Entitlements",
+                severity: .highRisk
+            ))
+        }
+
+        // 2. Unencrypted non-App Store binaries invoking AccessorySetupKit without required Info.plist keys
+        if cryptid == 0 {
+            let linksAccessorySetup = linkedDylibs.contains { $0.contains("AccessorySetupKit.framework") }
+            let usesAccessorySession = symbols.contains { $0.contains("ASAccessorySession") }
+
+            if linksAccessorySetup || usesAccessorySession {
+                let btUsageDesc = (infoPlist["NSBluetoothAlwaysUsageDescription"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let hasValidBluetoothDesc = !btUsageDesc.isEmpty
+
+                let supportsList = (infoPlist["NSAccessorySetupKitSupports"] as? [Any] ?? [])
+                    .compactMap { $0 as? String }
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                let hasValidSupports = !supportsList.isEmpty
+
+                if !hasValidBluetoothDesc || !hasValidSupports {
+                    indicators.append(ThreatIndicator(
+                        signature: "CVE-2026-84493:AccessorySetupKitBypass",
+                        description: WQLocale.pick(
+                            en: "Uses AccessorySetupKit / ASAccessorySession while omitting required Info.plist declarations (NSBluetoothAlwaysUsageDescription and non-empty NSAccessorySetupKitSupports), matching CVE-2026-84493 silent Bluetooth TCC bypass.",
+                            zh: "应用调用了 AccessorySetupKit / ASAccessorySession 但缺失必须的 Info.plist 声明（NSBluetoothAlwaysUsageDescription 或非空 NSAccessorySetupKitSupports），符合 CVE-2026-84493 静默蓝牙 TCC 隐私绕过特征。"
+                        ),
+                        category: "AccessorySetupKit Bluetooth TCC Bypass (CVE-2026-84493)",
+                        location: "Info.plist + Mach-O",
+                        severity: .highRisk
+                    ))
+                }
+            }
         }
 
         return indicators

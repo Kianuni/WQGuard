@@ -460,21 +460,27 @@ final class AdversarialM6Challenger2Tests: XCTestCase {
     func test_T5_firmwarePosture_boundaryEvaluations_allBranches_includingFutureAndLegacy() {
         let engine = FirmwarePostureEngine.shared
 
-        // 13a. Legacy iOS 25 (e.g. 25.9.9): worseQuery 0day is not active (<26), but all 7 other CVEs are exposed
+        // 13a. Legacy iOS 25 (e.g. 25.9.9): worseQuery 0day is not active (<26), all 12 other CVEs are exposed
         let v25 = SystemOSVersion(major: 25, minor: 9, patch: 9)
         let rep25 = engine.evaluate(osVersion: v25)
         XCTAssertFalse(engine.isVulnerable(.worseQuery0day, in: v25))
-        XCTAssertEqual(rep25.exposedCount, 7, "iOS 25 must expose exactly 7 older vulnerabilities")
+        XCTAssertEqual(rep25.totalEvaluated, 13)
+        XCTAssertEqual(rep25.exposedCount, 12, "iOS 25 must expose exactly 12 older vulnerabilities")
         XCTAssertEqual(rep25.overallRiskTier, .highRisk)
 
-        // 13b. iOS 26.7.0: All 8 vulnerabilities exposed; iOS 26.7.1: coreGraphics2D patched -> 7 exposed
+        // 13a-2. Early iOS 26 progression: 26.0.0 -> 13, 26.2.0 -> 12, 26.3.0 -> 11
+        XCTAssertEqual(engine.evaluate(osVersion: SystemOSVersion(major: 26, minor: 0, patch: 0)).exposedCount, 13)
+        XCTAssertEqual(engine.evaluate(osVersion: SystemOSVersion(major: 26, minor: 2, patch: 0)).exposedCount, 12)
+        XCTAssertEqual(engine.evaluate(osVersion: SystemOSVersion(major: 26, minor: 3, patch: 0)).exposedCount, 11)
+
+        // 13b. iOS 26.7.0: 10 exposed; iOS 26.7.1: coreGraphics2D patched -> 9 exposed
         let v26_0 = SystemOSVersion(major: 26, minor: 7, patch: 0)
-        XCTAssertEqual(engine.evaluate(osVersion: v26_0).exposedCount, 8)
+        XCTAssertEqual(engine.evaluate(osVersion: v26_0).exposedCount, 10)
         let v26_1 = SystemOSVersion(major: 26, minor: 7, patch: 1)
         XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v26_1))
-        XCTAssertEqual(engine.evaluate(osVersion: v26_1).exposedCount, 7)
+        XCTAssertEqual(engine.evaluate(osVersion: v26_1).exposedCount, 9)
 
-        // 13c. iOS 26.7.2: coreGraphics2D + photosBypass & coreGraphicsPDF patched -> 5 exposed
+        // 13c. iOS 26.7.2: coreGraphics2D + photosBypass, coreGraphicsPDF, webkitSandboxEscape, accessorySetupBluetooth patched -> 5 exposed
         let v26_2 = SystemOSVersion(major: 26, minor: 7, patch: 2)
         XCTAssertEqual(engine.evaluate(osVersion: v26_2).exposedCount, 5)
 
@@ -484,12 +490,12 @@ final class AdversarialM6Challenger2Tests: XCTestCase {
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v26_3))
         XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v26_3))
 
-        // 13e. iOS 27.0.0: coreGraphics2D patched; 7 others exposed
+        // 13e. iOS 27.0.0: coreGraphics2D, audioMxdBypass, dyldZeroDay, bookRestoreEscape patched; 9 others exposed
         let v27_0 = SystemOSVersion(major: 27, minor: 0, patch: 0)
         XCTAssertFalse(engine.isVulnerable(.coreGraphics2D, in: v27_0))
-        XCTAssertEqual(engine.evaluate(osVersion: v27_0).exposedCount, 7)
+        XCTAssertEqual(engine.evaluate(osVersion: v27_0).exposedCount, 9)
 
-        // 13f. iOS 27.2.0: photosBypass & coreGraphicsPDF patched -> 5 exposed
+        // 13f. iOS 27.2.0: photosBypass, coreGraphicsPDF, webkitSandboxEscape, accessorySetupBluetooth patched -> 5 exposed
         let v27_2_0 = SystemOSVersion(major: 27, minor: 2, patch: 0)
         XCTAssertEqual(engine.evaluate(osVersion: v27_2_0).exposedCount, 5)
 
@@ -497,11 +503,16 @@ final class AdversarialM6Challenger2Tests: XCTestCase {
         let v27_2_1 = SystemOSVersion(major: 27, minor: 2, patch: 1)
         XCTAssertEqual(engine.evaluate(osVersion: v27_2_1).exposedCount, 1)
 
-        // 13h. Future iOS 28.0.0: Unpatched worseQuery 0day remains active, all others patched
+        // 13h. iOS 27.3.0 and Future iOS 28.0.0: worseQuery 0day patched in 27.3+ -> 0 exposed (.safe)
+        let v27_3_0 = SystemOSVersion(major: 27, minor: 3, patch: 0)
+        XCTAssertFalse(engine.isVulnerable(.worseQuery0day, in: v27_3_0))
+        XCTAssertEqual(engine.evaluate(osVersion: v27_3_0).exposedCount, 0)
+        XCTAssertEqual(engine.evaluate(osVersion: v27_3_0).overallRiskTier, .safe)
+
         let v28 = SystemOSVersion(major: 28, minor: 0, patch: 0)
-        XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: v28))
-        XCTAssertEqual(engine.evaluate(osVersion: v28).exposedCount, 1)
-        XCTAssertEqual(engine.evaluate(osVersion: v28).overallRiskTier, .highRisk)
+        XCTAssertFalse(engine.isVulnerable(.worseQuery0day, in: v28))
+        XCTAssertEqual(engine.evaluate(osVersion: v28).exposedCount, 0)
+        XCTAssertEqual(engine.evaluate(osVersion: v28).overallRiskTier, .safe)
     }
 
     /// 14. Stress-tests SystemOSVersion parser against non-standard string formats and build numbers.

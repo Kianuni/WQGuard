@@ -56,12 +56,15 @@ final class FirmwarePostureTests: XCTestCase {
 
     // MARK: - 2. Vulnerability Exposure Matrix
 
-    func testWorseQuery0DayAlwaysExposedOnIOS26And27() {
+    func testWorseQuery0DayExposedUntilIOS27_3() {
         let engine = FirmwarePostureEngine.shared
+        XCTAssertFalse(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 25, minor: 9, patch: 9)))
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 26, minor: 0)))
-        XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 26, minor: 7, patch: 2)))
+        XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 26, minor: 7, patch: 3)))
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 27, minor: 0)))
         XCTAssertTrue(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 27, minor: 2, patch: 1)))
+        XCTAssertFalse(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 27, minor: 3, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.worseQuery0day, in: SystemOSVersion(major: 28, minor: 0, patch: 0)))
     }
 
     func testBrotliVulnerabilityMatrix() {
@@ -115,6 +118,47 @@ final class FirmwarePostureTests: XCTestCase {
         XCTAssertFalse(engine.isVulnerable(.bluetoothAirPlay, in: SystemOSVersion(major: 27, minor: 2, patch: 1)))
     }
 
+    func testAudioMxdAndDyld2026Matrices() {
+        let engine = FirmwarePostureEngine.shared
+        // CVE-2026-65339 (AudioMxd): patched in 27.0, 26.6.1, 18.7.11
+        XCTAssertTrue(engine.isVulnerable(.audioMxdBypass, in: SystemOSVersion(major: 18, minor: 7, patch: 10)))
+        XCTAssertFalse(engine.isVulnerable(.audioMxdBypass, in: SystemOSVersion(major: 18, minor: 7, patch: 11)))
+        XCTAssertTrue(engine.isVulnerable(.audioMxdBypass, in: SystemOSVersion(major: 26, minor: 6, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.audioMxdBypass, in: SystemOSVersion(major: 26, minor: 6, patch: 1)))
+        XCTAssertFalse(engine.isVulnerable(.audioMxdBypass, in: SystemOSVersion(major: 27, minor: 0, patch: 0)))
+
+        // CVE-2026-20700 (dyld): patched in 27.0, 26.3, 18.7.5
+        XCTAssertTrue(engine.isVulnerable(.dyldZeroDay, in: SystemOSVersion(major: 18, minor: 7, patch: 4)))
+        XCTAssertFalse(engine.isVulnerable(.dyldZeroDay, in: SystemOSVersion(major: 18, minor: 7, patch: 5)))
+        XCTAssertTrue(engine.isVulnerable(.dyldZeroDay, in: SystemOSVersion(major: 26, minor: 2, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.dyldZeroDay, in: SystemOSVersion(major: 26, minor: 3, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.dyldZeroDay, in: SystemOSVersion(major: 27, minor: 0, patch: 0)))
+    }
+
+    func testWebKitAccessorySetupAndBookRestoreMatrices() {
+        let engine = FirmwarePostureEngine.shared
+        // CVE-2026-113897 (WebKit): patched in 27.2, 26.7.2
+        XCTAssertTrue(engine.isVulnerable(.webkitSandboxEscape, in: SystemOSVersion(major: 26, minor: 7, patch: 1)))
+        XCTAssertFalse(engine.isVulnerable(.webkitSandboxEscape, in: SystemOSVersion(major: 26, minor: 7, patch: 2)))
+        XCTAssertTrue(engine.isVulnerable(.webkitSandboxEscape, in: SystemOSVersion(major: 27, minor: 1, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.webkitSandboxEscape, in: SystemOSVersion(major: 27, minor: 2, patch: 0)))
+
+        // CVE-2026-84493 (AccessorySetupKit): patched in 27.2, 26.7.2 (iOS 18+ only)
+        XCTAssertFalse(engine.isVulnerable(.accessorySetupBluetooth, in: SystemOSVersion(major: 17, minor: 6, patch: 0)))
+        XCTAssertTrue(engine.isVulnerable(.accessorySetupBluetooth, in: SystemOSVersion(major: 18, minor: 0, patch: 0)))
+        XCTAssertTrue(engine.isVulnerable(.accessorySetupBluetooth, in: SystemOSVersion(major: 26, minor: 7, patch: 1)))
+        XCTAssertFalse(engine.isVulnerable(.accessorySetupBluetooth, in: SystemOSVersion(major: 26, minor: 7, patch: 2)))
+        XCTAssertTrue(engine.isVulnerable(.accessorySetupBluetooth, in: SystemOSVersion(major: 27, minor: 1, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.accessorySetupBluetooth, in: SystemOSVersion(major: 27, minor: 2, patch: 0)))
+
+        // PoC:BookRestore: patched in 27.0, 26.2 (iOS 18+ only)
+        XCTAssertFalse(engine.isVulnerable(.bookRestoreEscape, in: SystemOSVersion(major: 17, minor: 6, patch: 0)))
+        XCTAssertTrue(engine.isVulnerable(.bookRestoreEscape, in: SystemOSVersion(major: 18, minor: 0, patch: 0)))
+        XCTAssertTrue(engine.isVulnerable(.bookRestoreEscape, in: SystemOSVersion(major: 26, minor: 1, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.bookRestoreEscape, in: SystemOSVersion(major: 26, minor: 2, patch: 0)))
+        XCTAssertFalse(engine.isVulnerable(.bookRestoreEscape, in: SystemOSVersion(major: 27, minor: 0, patch: 0)))
+    }
+
     // MARK: - 3. Actionable Mitigations & Report Posture
 
     func testActionableMitigationsPopulated() {
@@ -141,12 +185,60 @@ final class FirmwarePostureTests: XCTestCase {
 
     func testReportOverallRiskTierDerivation() {
         let engine = FirmwarePostureEngine.shared
-        // Fully evaluated count should match allVulnerabilities count (8)
+        XCTAssertEqual(FirmwareCVEID.allCases.count, 13)
+        XCTAssertEqual(FirmwarePostureEngine.allVulnerabilities.count, 13)
+
+        // Fully evaluated count should match allVulnerabilities count (13)
         let report = engine.evaluate(osVersion: SystemOSVersion(major: 27, minor: 2, patch: 1))
-        XCTAssertEqual(report.totalEvaluated, 8)
+        XCTAssertEqual(report.totalEvaluated, 13)
         // Only worse_query 0day remains exposed on 27.2.1
         XCTAssertEqual(report.exposedCount, 1)
         XCTAssertEqual(report.exposedVulnerabilities.first?.cveId, .worseQuery0day)
         XCTAssertEqual(report.overallRiskTier, .highRisk) // 0day has .highRisk severity
+
+        // On iOS 27.3.0+, all 13 cataloged CVEs are patched -> .safe
+        let report27_3 = engine.evaluate(osVersion: SystemOSVersion(major: 27, minor: 3, patch: 0))
+        XCTAssertEqual(report27_3.totalEvaluated, 13)
+        XCTAssertEqual(report27_3.exposedCount, 0)
+        XCTAssertEqual(report27_3.overallRiskTier, .safe)
+    }
+
+    func testAll13CVEsBilingualZeroHanInEnglish() {
+        let prev = WQLocale.overrideLanguageCode
+        defer { WQLocale.overrideLanguageCode = prev }
+
+        func hasHan(_ text: String) -> Bool {
+            text.unicodeScalars.contains { scalar in
+                let v = scalar.value
+                return (0x4E00...0x9FFF).contains(v)
+                    || (0x3400...0x4DBF).contains(v)
+                    || (0xF900...0xFAFF).contains(v)
+                    || (0x20000...0x2EBEF).contains(v)
+            }
+        }
+
+        WQLocale.overrideLanguageCode = "en"
+        let enCatalog = FirmwarePostureEngine.allVulnerabilities
+        XCTAssertEqual(enCatalog.count, 13)
+        for v in enCatalog {
+            XCTAssertFalse(hasHan(v.name), "English name contains Han: \(v.name)")
+            XCTAssertFalse(hasHan(v.subsystem), "English subsystem contains Han: \(v.subsystem)")
+            XCTAssertFalse(hasHan(v.affectedDescription), "English affectedDescription contains Han: \(v.affectedDescription)")
+            XCTAssertFalse(hasHan(v.patchedVersionDescription), "English patchedVersionDescription contains Han: \(v.patchedVersionDescription)")
+            XCTAssertFalse(hasHan(v.details), "English details contains Han: \(v.details)")
+            XCTAssertFalse(v.mitigations.isEmpty, "\(v.cveId.rawValue) must include actionable mitigations")
+            for m in v.mitigations {
+                XCTAssertFalse(hasHan(m.title), "English mitigation title contains Han: \(m.title)")
+                XCTAssertFalse(hasHan(m.instructions), "English mitigation instructions contains Han: \(m.instructions)")
+            }
+        }
+
+        WQLocale.overrideLanguageCode = "zh-Hans"
+        let zhCatalog = FirmwarePostureEngine.allVulnerabilities
+        XCTAssertEqual(zhCatalog.count, 13)
+        for v in zhCatalog {
+            XCTAssertTrue(hasHan(v.name), "Chinese name missing Han: \(v.name)")
+            XCTAssertTrue(hasHan(v.details), "Chinese details missing Han: \(v.details)")
+        }
     }
 }

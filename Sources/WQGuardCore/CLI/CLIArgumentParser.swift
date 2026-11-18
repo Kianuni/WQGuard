@@ -233,7 +233,7 @@ public enum CLIManual: Sendable {
                 Inspect AppGroup container directory using ContainerScanner.
 
           \(styler.cyan("-r, --firmware-radar [os_version]"))
-                Evaluate OS version against 8 2026 CVEs (e.g., Photos bypass,
+                Evaluate OS version against 13 2026 CVEs (e.g., Photos bypass,
                 Brotli OOB RCE, worse_query 0day) using FirmwarePostureEngine.
                 If os_version is omitted, current device OS version is used.
 

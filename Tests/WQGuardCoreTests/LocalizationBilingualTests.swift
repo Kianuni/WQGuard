@@ -43,7 +43,7 @@ final class LocalizationBilingualTests: XCTestCase {
         WQLocale.overrideLanguageCode = "en"
         let enReport = FirmwarePostureEngine.shared.evaluate(osVersion: SystemOSVersion(major: 26, minor: 2, patch: 0))
         let enAllVulns = enReport.exposedVulnerabilities + enReport.patchedVulnerabilities
-        XCTAssertEqual(enAllVulns.count, 8)
+        XCTAssertEqual(enAllVulns.count, 13)
         for v in enAllVulns {
             XCTAssertFalse(containsHanCharacters(v.name), "English CVE name contains Han: \(v.name)")
             XCTAssertFalse(containsHanCharacters(v.affectedDescription), "English affectedDescription contains Han: \(v.affectedDescription)")
