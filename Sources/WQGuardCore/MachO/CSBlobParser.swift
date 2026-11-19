@@ -1629,6 +1629,8 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
 
         let appleLeafCandidates = certDERBySummary.filter { item in
             item.summary == "Apple iPhone OS Application Signing"
+                || item.summary == "TestFlight Beta Distribution"
+                || item.summary == "Apple TestFlight Beta Distribution"
                 || item.summary == "Software Signing"
                 || item.summary == "macOS Software Signing"
                 || item.summary == "Apple Mac OS Application Signing"

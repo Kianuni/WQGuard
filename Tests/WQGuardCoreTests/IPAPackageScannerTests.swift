@@ -263,4 +263,52 @@ final class IPAPackageScannerTests: XCTestCase {
         let leftovers = tempContents.filter { $0.hasPrefix("wqguard_ipa_") }
         XCTAssertTrue(leftovers.isEmpty, "Found leftover temporary folders: \(leftovers)")
     }
+
+    func test_IPA_privateVarTemporaryPath_doesNotFalsePositiveZipSlip_whileRealTraversalCaught() throws {
+        // 1. Pure lexical normalization must align `/private/var/...` and `/var/...` while preserving real `..` traversal containment checks
+        let bundleStd = IPAPackageScanner.lexicalStandardizedPath("/var/mobile/Containers/Data/Application/APP-1/tmp/wqg/Lokey.app")
+        let entryStd = IPAPackageScanner.lexicalStandardizedPath("/private/var/mobile/Containers/Data/Application/APP-1/tmp/wqg/Lokey.app/_CodeSignature")
+        XCTAssertEqual(bundleStd, "/var/mobile/Containers/Data/Application/APP-1/tmp/wqg/Lokey.app")
+        XCTAssertEqual(entryStd, "/var/mobile/Containers/Data/Application/APP-1/tmp/wqg/Lokey.app/_CodeSignature")
+        XCTAssertTrue(entryStd.hasPrefix(bundleStd + "/"))
+
+        let traversalStd = IPAPackageScanner.lexicalStandardizedPath("/private/var/mobile/Containers/Data/Application/APP-1/tmp/wqg/Lokey.app/../../etc/passwd")
+        XCTAssertFalse(traversalStd.hasPrefix(bundleStd + "/"))
+
+        // 2. Real directory under `/private/var/tmp` reproducing iOS's `URL.standardizedFileURL` `/private` strip discrepancy
+        let rootURL = URL(fileURLWithPath: "/private/var/tmp/wqg_private_var_test_\(UUID().uuidString)")
+        let bundleURL = rootURL.appendingPathComponent("Lokey.app")
+        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let execURL = bundleURL.appendingPathComponent("Lokey")
+        let mockExecData = SyntheticMachOGenerator.shared.generateThin(config: .init(arch: .arm64))
+        try mockExecData.write(to: execURL)
+
+        let uncreatedChildURL = bundleURL.appendingPathComponent("_CodeSignature/CodeResources")
+        XCTAssertEqual(
+            IPAPackageScanner.bundleRelativePath(of: uncreatedChildURL, in: bundleURL),
+            "_CodeSignature/CodeResources"
+        )
+        let (resolvedName, resolvedExecURL) = try IPAPackageScanner.resolveSafeBundleExecutableURL(
+            infoDict: ["CFBundleExecutable": "Lokey"],
+            bundleURL: bundleURL,
+            fallbackName: "Lokey"
+        )
+        XCTAssertEqual(resolvedName, "Lokey")
+        XCTAssertEqual(resolvedExecURL.lastPathComponent, "Lokey")
+
+        // 3. Empirical scan of sibling Lokey-unsigned.ipa if present
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let lokeyIPA = repoRoot.deletingLastPathComponent().appendingPathComponent("Lokey/dist/Lokey-unsigned.ipa")
+        if FileManager.default.fileExists(atPath: lokeyIPA.path) {
+            let finding = try IPAPackageScanner.shared.scan(ipaURL: lokeyIPA)
+            XCTAssertEqual(finding.bundleId, "com.local.lokey.app")
+            XCTAssertFalse(finding.indicators.contains { $0.signature.contains("MalformedPackage:ZipSlipOrSymlink") })
+            XCTAssertNotEqual(finding.riskTier, .highRisk)
+        }
+    }
 }

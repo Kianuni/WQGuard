@@ -434,16 +434,15 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
     }
 
     func testTestFlightAppsSurgeAndAPTVNotMisclassifiedAsEnterprise() throws {
-        // Real-world TestFlight apps carry `ProfileValidated == true` (90-day TestFlight provisioning profile),
-        // `SignerIdentity` containing "Apple Distribution: ..." or "Apple TestFlight Beta Distribution",
-        // AND `Entitlements["beta-reports-active"] == true`.
+        // Real-world Apple TestFlight cloud-re-signed apps on iOS carry `SignerIdentity == "TestFlight Beta Distribution"`
+        // (without an "Apple " prefix!) + `ProfileValidated == true`, as well as pre-upload `Apple Distribution:` builds with `beta-reports-active`.
         let rawApps: [String: Any] = [
             "com.nssurge.inc.surge-ios": [
                 "CFBundleIdentifier": "com.nssurge.inc.surge-ios",
                 "CFBundleDisplayName": "Surge",
                 "CFBundleShortVersionString": "5.14.0",
                 "ApplicationType": "User",
-                "SignerIdentity": "Apple Distribution: Surge Networks Inc. (TEAM123456)",
+                "SignerIdentity": "TestFlight Beta Distribution",
                 "ProfileValidated": true,
                 "ApplicationDSID": 987654321,
                 "UIBackgroundModes": ["network-authentication", "fetch"],
@@ -460,30 +459,45 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
                 "CFBundleDisplayName": "APTV",
                 "CFBundleShortVersionString": "2.4.1",
                 "ApplicationType": "User",
-                "SignerIdentity": "Apple Distribution: Kimen Studio (APTV888888)",
+                "SignerIdentity": "TestFlight Beta Distribution",
                 "ProfileValidated": true,
                 "UIBackgroundModes": ["audio"],
                 "Entitlements": [
                     "application-identifier": "APTV888888.com.kimen.aptvpro",
                     "com.apple.developer.team-identifier": "APTV888888",
-                    "beta-reports-active": 1,
                     "com.apple.security.application-groups": ["group.com.kimen.aptvpro"]
                 ],
                 "Path": "/private/var/containers/Bundle/Application/UUID-APTV/APTV.app"
+            ],
+            "com.example.distbeta": [
+                "CFBundleIdentifier": "com.example.distbeta",
+                "CFBundleDisplayName": "DistBeta",
+                "CFBundleShortVersionString": "1.0.0",
+                "ApplicationType": "User",
+                "SignerIdentity": "Apple Distribution: Example Studio (BETA999999)",
+                "ProfileValidated": true,
+                "UIBackgroundModes": ["audio"],
+                "Entitlements": [
+                    "application-identifier": "BETA999999.com.example.distbeta",
+                    "com.apple.developer.team-identifier": "BETA999999",
+                    "beta-reports-active": 1,
+                    "com.apple.security.application-groups": ["group.com.example.distbeta"]
+                ],
+                "Path": "/private/var/containers/Bundle/Application/UUID-BETA/DistBeta.app"
             ]
         ]
 
         let jsonData = try JSONSerialization.data(withJSONObject: rawApps, options: [])
         let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(jsonData)
-        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.count, 3)
 
         // 1. When `includeAppStoreApps: false`, TestFlight apps are trusted official builds and excluded
         let sideloadOnly = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: false)
         XCTAssertTrue(sideloadOnly.isEmpty, "TestFlight apps Surge and APTV must not be treated as Enterprise/Sideloaded")
 
-        // 2. When `includeAppStoreApps: true`, both are classified as `.testFlight` + `.safe` with FairPlay DRM
+        // 2. When `includeAppStoreApps: true`, all are classified as `.testFlight` + `.safe` with FairPlay DRM
         let allFindings = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: true)
-        XCTAssertEqual(allFindings.count, 2)
+        XCTAssertEqual(allFindings.count, 3)
         for finding in allFindings {
             XCTAssertEqual(finding.installChannel, .testFlight, "\(finding.displayName) must be .testFlight, not .enterpriseInHouse")
             XCTAssertEqual(finding.riskTier, .safe, "\(finding.displayName) must be .safe, not .caution")
@@ -711,5 +725,649 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
         if let pc = parsedCryptex {
             XCTAssertTrue(InstalledAppRegistryScanner.shared.isAppleSystemOrFirstPartyApp(pc))
         }
+    }
+
+    func testRealIOS26SystemAppsAndTeamScopedKeychainWildcards_NoFalsePositives_WhileAttacksStillCaught() throws {
+        let scanner = InstalledAppRegistryScanner.shared
+
+        // 1. Preinstalled removable Apple stock apps staged in `/private/var/containers/Bundle/Application/<UUID>/`
+        //    (including exact `com.apple.mobiletimer` screenshot profile with `platform-application`, TCC, `BookRestore`, `group.com.apple.tipsnext`)
+        let removableStockJSON: [String: Any] = [
+            "com.apple.mobiletimer": [
+                "CFBundleIdentifier": "com.apple.mobiletimer",
+                "CFBundleDisplayName": "时钟",
+                "CFBundleShortVersionString": "1.1",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/11111111-1111-1111-1111-111111111111/MobileTimer.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceMediaLibrary", "kTCCServiceMotion"],
+                    "com.apple.itunesstored.private": true,
+                    "com.apple.security.application-groups": ["group.com.apple.tipsnext"]
+                ]
+            ],
+            "com.apple.shortcuts": [
+                "CFBundleIdentifier": "com.apple.shortcuts",
+                "CFBundleDisplayName": "快捷指令",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/22222222-2222-2222-2222-222222222222/Shortcuts.app",
+                "Entitlements": [
+                    "com.apple.developer.team-identifier": "59GAB85EFG",
+                    "platform-application": true,
+                    "com.apple.private.tcc.allow": ["kTCCServicePhotos", "kTCCServiceContacts"],
+                    "com.apple.security.application-groups": ["group.is.workflow.my.app", "group.com.apple.siri.shortcuts"]
+                ]
+            ],
+            "com.apple.DocumentsApp": [
+                "CFBundleIdentifier": "com.apple.DocumentsApp",
+                "CFBundleDisplayName": "文件",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/33333333-3333-3333-3333-333333333333/Files.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.security.application-groups": ["com.apple.DocumentsApp", "group.com.apple.FileProvider.LocalStorage"]
+                ]
+            ],
+            "com.apple.Translate": [
+                "CFBundleIdentifier": "com.apple.Translate",
+                "CFBundleDisplayName": "翻译",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/44444444-4444-4444-4444-444444444444/Translate.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceMicrophone"]
+                ]
+            ],
+            "com.apple.mobilecal": [
+                "CFBundleIdentifier": "com.apple.mobilecal",
+                "CFBundleDisplayName": "日历",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/55555555-5555-5555-5555-555555555555/MobileCal.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceCalendar"]
+                ]
+            ],
+            "com.apple.mobilenotes": [
+                "CFBundleIdentifier": "com.apple.mobilenotes",
+                "CFBundleDisplayName": "备忘录",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/66666666-6666-6666-6666-666666666666/MobileNotes.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceAddressBook"],
+                    "com.apple.security.application-groups": ["group.com.apple.notes"]
+                ]
+            ],
+            "com.apple.FutureStock2026": [
+                "CFBundleIdentifier": "com.apple.FutureStock2026",
+                "CFBundleDisplayName": "FutureStock",
+                "ApplicationType": "System",
+                "IsAppStoreVendable": true,
+                "Path": "/private/var/containers/Bundle/Application/77777777-7777-7777-7777-777777777777/FutureStock.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.tcc.allow": ["kTCCServicePhotos"]
+                ]
+            ]
+        ]
+        let removableData = try JSONSerialization.data(withJSONObject: removableStockJSON, options: [])
+        let removableRecords = try scanner.parseSnapshotData(removableData)
+        XCTAssertEqual(removableRecords.count, 7)
+        for rec in removableRecords {
+            XCTAssertTrue(
+                scanner.isAppleSystemOrFirstPartyApp(rec),
+                "Removable stock app \(rec.bundleId) must be recognized as Apple first-party system app"
+            )
+        }
+        XCTAssertTrue(scanner.evaluateRecords(removableRecords, includeAppStoreApps: true).isEmpty)
+
+        // 2. Core SSV Apple system apps carrying internal Apple Team IDs & non-`group.com.apple.*` Apple App Groups
+        let ssvExtendedJSON: [String: Any] = [
+            "com.apple.Preferences": [
+                "CFBundleIdentifier": "com.apple.Preferences",
+                "CFBundleDisplayName": "设置",
+                "ApplicationType": "System",
+                "Path": "/Applications/Preferences.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.developer.team-identifier": "AB12CD34EF",
+                    "com.apple.security.application-groups": [
+                        "243LU875E5.groups.com.apple.podcasts",
+                        "group.is.workflow.my.app",
+                        "com.apple.Preferences"
+                    ],
+                    "com.apple.private.security.no-container": true
+                ]
+            ],
+            "com.apple.MobileSMS": [
+                "CFBundleIdentifier": "com.apple.MobileSMS",
+                "CFBundleDisplayName": "信息",
+                "ApplicationType": "System",
+                "Path": "/Applications/MobileSMS.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.security.no-container": true,
+                    "com.apple.security.application-groups": ["com.apple.MobileSMS", "group.com.apple.messages"]
+                ]
+            ],
+            "com.apple.siri": [
+                "CFBundleIdentifier": "com.apple.siri",
+                "CFBundleDisplayName": "Siri",
+                "ApplicationType": "Hidden",
+                "Path": "/Applications/Siri.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.security.no-container": true,
+                    "com.apple.security.application-groups": ["group.com.apple.siri"]
+                ]
+            ],
+            "com.apple.ContinuitySingShieldUI": [
+                "CFBundleIdentifier": "com.apple.ContinuitySingShieldUI",
+                "CFBundleDisplayName": "唱歌",
+                "ApplicationType": "System",
+                "Path": "/private/var/staged_system_apps/ContinuitySingShieldUI.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.developer.team-identifier": "243LU875E5",
+                    "com.apple.security.application-groups": ["243LU875E5.groups.com.apple.music"],
+                    "com.apple.private.tcc.allow": ["kTCCServiceMicrophone"]
+                ]
+            ]
+        ]
+        let ssvExtData = try JSONSerialization.data(withJSONObject: ssvExtendedJSON, options: [])
+        let ssvExtRecords = try scanner.parseSnapshotData(ssvExtData)
+        XCTAssertEqual(ssvExtRecords.count, 4)
+        for rec in ssvExtRecords {
+            XCTAssertTrue(
+                scanner.isAppleSystemOrFirstPartyApp(rec),
+                "SSV system app \(rec.bundleId) with Apple internal Team ID / App Groups must not false-positive"
+            )
+        }
+        XCTAssertTrue(scanner.evaluateRecords(ssvExtRecords, includeAppStoreApps: true).isEmpty)
+
+        // 3. Own-Team / Legacy App ID prefix wildcards (`<OwnTeamID>.*`) in `keychain-access-groups`
+        let erosionDict: [String: Any] = [
+            "CFBundleIdentifier": "com.jbdotparty.Erosion",
+            "CFBundleDisplayName": "Erosion",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Example Corp",
+            "ProfileValidated": true,
+            "Entitlements": [
+                "com.apple.developer.team-identifier": "9NZA6279KY",
+                "application-identifier": "9NZA6279KY.*",
+                "keychain-access-groups": ["9NZA6279KY.*", "com.apple.token"],
+                "com.apple.security.application-groups": ["group.ca628877a97ac6a2.1"]
+            ]
+        ]
+        let lokeyDict: [String: Any] = [
+            "CFBundleIdentifier": "com.local.lokey.app",
+            "CFBundleDisplayName": "Lokey",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Example Corp",
+            "ProfileValidated": true,
+            "Entitlements": [
+                "com.apple.developer.team-identifier": "9NZA6279KY",
+                "application-identifier": "9NZA6279KY.*",
+                "keychain-access-groups": ["9NZA6279KY.*", "com.apple.token"],
+                "com.apple.security.application-groups": ["group.ca628877a97ac6a2.2"]
+            ]
+        ]
+        for entAppDict in [erosionDict, lokeyDict] {
+            let rec = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary(entAppDict))
+            let finding = scanner.evaluateRecord(rec)
+            XCTAssertEqual(finding.riskTier, .caution, "\(rec.bundleId) should drop from highRisk to caution when holding only own-team keychain wildcard + enterprise App Groups")
+            XCTAssertFalse(finding.indicators.contains { $0.signature == "keychain-access-groups(*)" })
+        }
+
+        let weiboDict: [String: Any] = [
+            "CFBundleIdentifier": "com.sina.weibo",
+            "CFBundleDisplayName": "微博",
+            "ApplicationType": "User",
+            "SignerIdentity": "Apple iPhone OS Application Signing",
+            "ProfileValidated": false,
+            "ApplicationDSID": 350962683,
+            "Entitlements": [
+                "com.apple.developer.team-identifier": "NEWTEAM567",
+                "application-identifier": "LEGACY1234.com.sina.weibo",
+                "keychain-access-groups": ["LEGACY1234.*"]
+            ]
+        ]
+        let weiboRec = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary(weiboDict))
+        XCTAssertFalse(scanner.isSideloadedOrAnomalous(weiboRec))
+        let weiboFinding = scanner.evaluateRecord(weiboRec)
+        XCTAssertEqual(weiboFinding.riskTier, .safe)
+        XCTAssertTrue(weiboFinding.indicators.isEmpty)
+
+        // ExpandedThreatCatalog direct check: own-team safe, cross-team / global / apple / ad-hoc still caught
+        let ownKCInds = ExpandedThreatCatalog.evaluateDangerousEntitlements(
+            bundleId: "com.jbdotparty.Erosion",
+            installChannel: .enterpriseInHouse,
+            entitlements: [
+                "com.apple.developer.team-identifier": "9NZA6279KY",
+                "application-identifier": "9NZA6279KY.*",
+                "keychain-access-groups": ["9NZA6279KY.*", "com.apple.token"]
+            ]
+        )
+        XCTAssertFalse(ownKCInds.contains { $0.signature == "keychain-access-groups(*)" })
+
+        for badKC in [["OTHERTEAM1.*"], ["*"], ["com.apple.*"]] {
+            let badInds = ExpandedThreatCatalog.evaluateDangerousEntitlements(
+                bundleId: "com.example.test",
+                installChannel: .enterpriseInHouse,
+                entitlements: [
+                    "com.apple.developer.team-identifier": "9NZA6279KY",
+                    "keychain-access-groups": badKC
+                ]
+            )
+            XCTAssertTrue(badInds.contains { $0.signature == "keychain-access-groups(*)" }, "Expected dangerous wildcard detection for \(badKC)")
+        }
+
+        let forgedAdHocKC = ExpandedThreatCatalog.evaluateDangerousEntitlements(
+            bundleId: "com.evil.adhoc",
+            installChannel: .developerSideloaded,
+            entitlements: [
+                "com.apple.developer.team-identifier": "9NZA6279KY",
+                "keychain-access-groups": ["9NZA6279KY.*"]
+            ],
+            allowedOwnTeamPrefixes: []
+        )
+        XCTAssertTrue(forgedAdHocKC.contains { $0.signature == "keychain-access-groups(*)" })
+
+        // 4. Negative controls on registry scanner MUST stay .highRisk
+        let crossTeamKC = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.evil.crossteam",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Evil Corp",
+            "ProfileValidated": true,
+            "Entitlements": [
+                "com.apple.developer.team-identifier": "9NZA6279KY",
+                "keychain-access-groups": ["OTHERTEAM1.*"]
+            ]
+        ]))
+        XCTAssertEqual(scanner.evaluateRecord(crossTeamKC).riskTier, .highRisk)
+        XCTAssertTrue(scanner.evaluateRecord(crossTeamKC).indicators.contains { $0.signature == "keychain-access-groups(*)" })
+
+        let adHocForgedKC = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.evil.forgedkc",
+            "ApplicationType": "User",
+            "ProfileValidated": false,
+            "Entitlements": [
+                "com.apple.developer.team-identifier": "EVILTEAM00",
+                "keychain-access-groups": ["EVILTEAM00.*"]
+            ]
+        ]))
+        XCTAssertEqual(scanner.evaluateRecord(adHocForgedKC).riskTier, .highRisk)
+        XCTAssertTrue(scanner.evaluateRecord(adHocForgedKC).indicators.contains { $0.signature == "keychain-access-groups(*)" })
+
+        let appleWildcardKC = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.evil.applekc",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Evil Corp",
+            "ProfileValidated": true,
+            "Entitlements": [
+                "com.apple.developer.team-identifier": "9NZA6279KY",
+                "keychain-access-groups": ["com.apple.*"]
+            ]
+        ]))
+        XCTAssertEqual(scanner.evaluateRecord(appleWildcardKC).riskTier, .highRisk)
+        XCTAssertTrue(scanner.evaluateRecord(appleWildcardKC).indicators.contains { $0.signature == "keychain-access-groups(*)" })
+
+        let trollTipsNoSandbox = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.apple.tips",
+            "CFBundleDisplayName": "Tips",
+            "ApplicationType": "System",
+            "IsAppStoreVendable": true,
+            "Path": "/private/var/containers/Bundle/Application/UUID-TIPS/Tips.app",
+            "Entitlements": [
+                "com.apple.private.security.no-sandbox": true,
+                "platform-application": true
+            ]
+        ]))
+        XCTAssertFalse(scanner.isAppleSystemOrFirstPartyApp(trollTipsNoSandbox))
+        XCTAssertEqual(scanner.evaluateRecord(trollTipsNoSandbox).riskTier, .highRisk)
+
+        let trollTipsStarKC = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.apple.tips",
+            "CFBundleDisplayName": "Tips",
+            "ApplicationType": "System",
+            "IsAppStoreVendable": true,
+            "Path": "/private/var/containers/Bundle/Application/UUID-TIPS/Tips.app",
+            "Entitlements": [
+                "keychain-access-groups": ["*"]
+            ]
+        ]))
+        XCTAssertFalse(scanner.isAppleSystemOrFirstPartyApp(trollTipsStarKC))
+        XCTAssertEqual(scanner.evaluateRecord(trollTipsStarKC).riskTier, .highRisk)
+
+        // 5. Real iOS 26/27 Siri & modularized staged stock apps (`group.tvappservices.container`, Health without no-container, Campo, Spotlight, AppStore)
+        let iOS26ExtendedSystemJSON: [String: Any] = [
+            "com.apple.siri": [
+                "CFBundleIdentifier": "com.apple.siri",
+                "CFBundleDisplayName": "Siri",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/UUID-SIRI/Siri.app",
+                "UIBackgroundModes": ["audio"],
+                "Entitlements": [
+                    "com.apple.private.MobileContainerManager.allowed": true,
+                    "com.apple.private.tcc.allow": [
+                        "kTCCServiceAddressBook", "kTCCServiceCalendar", "kTCCServiceCamera",
+                        "kTCCServiceMediaLibrary", "kTCCServicePhotos", "kTCCServiceReminders"
+                    ],
+                    "com.apple.private.photos.service.internal.cloud": true,
+                    "com.apple.itunesstored.private": true,
+                    "com.apple.security.application-groups": [
+                        "group.com.apple.Maps",
+                        "group.com.apple.icloud.fm",
+                        "group.com.apple.notes",
+                        "group.com.apple.sports",
+                        "group.tvappservices.container"
+                    ]
+                ]
+            ],
+            "com.apple.Preferences": [
+                "CFBundleIdentifier": "com.apple.Preferences",
+                "CFBundleDisplayName": "设置",
+                "ApplicationType": "System",
+                "Path": "/Applications/Preferences.app",
+                "Entitlements": [
+                    "com.apple.developer.team-identifier": "UNLISTED99",
+                    "com.apple.security.application-groups": ["group.tvappservices.container", "group.com.apple.preferences"]
+                ]
+            ],
+            "com.apple.campo": [
+                "CFBundleIdentifier": "com.apple.campo",
+                "CFBundleDisplayName": "Siri",
+                "ApplicationType": "Hidden",
+                "Path": "/private/var/containers/Bundle/Application/UUID-CAMPO/Campo.app",
+                "Entitlements": [
+                    "com.apple.security.application-groups": ["group.tvappservices.container"]
+                ]
+            ],
+            "com.apple.Spotlight": [
+                "CFBundleIdentifier": "com.apple.Spotlight",
+                "CFBundleDisplayName": "聚焦",
+                "ApplicationType": "Hidden",
+                "Path": "/Applications/Spotlight.app",
+                "Entitlements": [
+                    "com.apple.security.application-groups": ["group.tvappservices.container", "group.com.apple.search"]
+                ]
+            ],
+            "com.apple.Translate": [
+                "CFBundleIdentifier": "com.apple.Translate",
+                "CFBundleDisplayName": "翻译",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/UUID-TR/Translate.app",
+                "Entitlements": [
+                    "com.apple.developer.team-identifier": "UNLISTED88",
+                    "application-identifier": "UNLISTED88.com.apple.Translate",
+                    "com.apple.private.tcc.allow": ["kTCCServiceMicrophone"]
+                ]
+            ],
+            "com.apple.AppStore": [
+                "CFBundleIdentifier": "com.apple.AppStore",
+                "CFBundleDisplayName": "App Store",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/UUID-AS/AppStore.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.itunesstored.private": true
+                ]
+            ],
+            "com.apple.Health.SSV": [
+                "CFBundleIdentifier": "com.apple.Health",
+                "CFBundleDisplayName": "健康",
+                "ApplicationType": "System",
+                "Path": "/Applications/Health.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.security.no-container": true
+                ]
+            ],
+            "com.apple.Health.StagedClean": [
+                "CFBundleIdentifier": "com.apple.Health",
+                "CFBundleDisplayName": "健康",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/UUID-H2/Health.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceMotion"],
+                    "com.apple.security.application-groups": ["group.com.apple.healthkit"]
+                ]
+            ]
+        ]
+        for (label, raw) in iOS26ExtendedSystemJSON {
+            let dict = raw as! [String: Any]
+            let rec = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary(dict))
+            XCTAssertTrue(
+                scanner.isAppleSystemOrFirstPartyApp(rec),
+                "Real iOS 26 system app case \(label) (\(rec.bundleId)) must be excluded"
+            )
+            XCTAssertTrue(scanner.evaluateRecords([rec], includeAppStoreApps: true).isEmpty)
+        }
+
+        // Negative controls for App Group classifier & staged Health no-container
+        for badGroup in ["group.io.metamask", "group.r10.backdoor", "group.com.evil.wallet", "group.ca628877a97ac6a2.1"] {
+            XCTAssertFalse(
+                InstalledAppRegistryScanner.isAppleOwnedAppGroup(badGroup),
+                "Third-party App Group '\(badGroup)' must NOT match Apple-owned App Groups"
+            )
+        }
+        let stagedHijackedHealth = InstalledAppRegistryRecord(
+            bundleId: "com.apple.Health",
+            displayName: "健康",
+            version: "1.0",
+            applicationType: "System",
+            signerIdentity: nil,
+            profileValidated: false,
+            booleanEntitlements: ["com.apple.private.security.no-container": true],
+            allEntitlementKeys: ["com.apple.private.security.no-container"],
+            bundlePath: "/private/var/containers/Bundle/Application/UUID-HIJACK-HEALTH/Health.app"
+        )
+        XCTAssertFalse(scanner.isAppleSystemOrFirstPartyApp(stagedHijackedHealth))
+        XCTAssertEqual(scanner.evaluateRecord(stagedHijackedHealth).riskTier, .highRisk)
+
+        // 6. Final 3 real-iOS 26 system apps (`Translate` with Team 96VJNMX6ZP, `TVRemoteApp`, `reminders` v7.0 with `no-sandbox`)
+        let finalThreeSystemJSON: [String: Any] = [
+            "com.apple.Translate.96VJ": [
+                "CFBundleIdentifier": "com.apple.Translate",
+                "CFBundleDisplayName": "翻译",
+                "CFBundleShortVersionString": "1.0",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/UUID-TRANS/Translate.app",
+                "UIBackgroundModes": ["audio"],
+                "Entitlements": [
+                    "com.apple.developer.team-identifier": "96VJNMX6ZP",
+                    "com.apple.private.tcc.allow": ["kTCCServiceCamera", "kTCCServiceMicrophone", "kTCCServicePhotos"],
+                    "com.apple.security.application-groups": [
+                        "group.com.apple.private.translation",
+                        "group.com.apple.tipsnext"
+                    ]
+                ]
+            ],
+            "com.apple.TVRemoteApp": [
+                "CFBundleIdentifier": "com.apple.TVRemoteApp",
+                "CFBundleDisplayName": "遥控器",
+                "CFBundleShortVersionString": "1.0",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/UUID-TVR/TVRemoteApp.app",
+                "Entitlements": [
+                    "com.apple.private.tcc.allow": ["kTCCServiceBluetoothAlways", "kTCCServiceMediaLibrary", "kTCCServiceMicrophone"],
+                    "com.apple.itunesstored.private": true,
+                    "com.apple.security.application-groups": [
+                        "group.com.apple.tipsnext",
+                        "group.com.apple.TVRemote"
+                    ]
+                ]
+            ],
+            "com.apple.reminders": [
+                "CFBundleIdentifier": "com.apple.reminders",
+                "CFBundleDisplayName": "提醒事项",
+                "CFBundleShortVersionString": "7.0",
+                "ApplicationType": "System",
+                "Path": "/private/var/containers/Bundle/Application/UUID-REM/Reminders.app",
+                "Entitlements": [
+                    "com.apple.private.security.no-sandbox": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceCamera"],
+                    "com.apple.security.application-groups": [
+                        "group.com.apple.reminders",
+                        "group.com.apple.assistant.shared"
+                    ]
+                ]
+            ]
+        ]
+        for (label, raw) in finalThreeSystemJSON {
+            let dict = raw as! [String: Any]
+            let rec = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary(dict))
+            XCTAssertTrue(
+                scanner.isAppleSystemOrFirstPartyApp(rec),
+                "Real iOS 26 system app \(label) (\(rec.bundleId)) must not false-positive"
+            )
+            XCTAssertTrue(scanner.evaluateRecords([rec], includeAppStoreApps: true).isEmpty)
+        }
+
+        // Spoofed Reminders without `group.com.apple.reminders` or with `container-required=false` MUST still be rejected
+        let spoofedRemindersNoGroup = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.apple.reminders",
+            "ApplicationType": "System",
+            "Path": "/private/var/containers/Bundle/Application/UUID-SPOOF-REM/Reminders.app",
+            "Entitlements": ["com.apple.private.security.no-sandbox": true]
+        ]))
+        let spoofedRemindersNoContainerReq = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.apple.reminders",
+            "ApplicationType": "System",
+            "Path": "/private/var/containers/Bundle/Application/UUID-SPOOF-REM2/Reminders.app",
+            "Entitlements": [
+                "com.apple.private.security.no-sandbox": true,
+                "com.apple.private.security.container-required": false,
+                "com.apple.security.application-groups": ["group.com.apple.reminders"]
+            ]
+        ]))
+        XCTAssertFalse(scanner.isAppleSystemOrFirstPartyApp(spoofedRemindersNoGroup))
+        XCTAssertFalse(scanner.isAppleSystemOrFirstPartyApp(spoofedRemindersNoContainerReq))
+
+        // 7. Enterprise-resigned WQGuard host self-whitelist verification (including explicit enterprise App ID conflict + cached snapshot UUID swap)
+        let resignedSelfWQGuard = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.wqguard.app",
+            "CFBundleDisplayName": "WQGuard",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Example Enterprise",
+            "ProfileValidated": true,
+            "Path": "/private/var/containers/Bundle/Application/OLD-SNAPSHOT-UUID/WQGuard.app",
+            "Entitlements": [
+                "com.apple.developer.team-identifier": "9NZA6279KY",
+                "application-identifier": "9NZA6279KY.signall.enterprise.cert",
+                "keychain-access-groups": ["9NZA6279KY.*", "com.apple.token"],
+                "com.apple.security.application-groups": ["group.ca628877a97ac6a2.1"]
+            ]
+        ]))
+        let preSelfEvalFinding = scanner.evaluateRecord(resignedSelfWQGuard)
+        XCTAssertFalse(preSelfEvalFinding.evidence.isWhitelistEligible, "Explicit enterprise application-identifier conflicts with com.wqguard.app")
+        XCTAssertEqual(preSelfEvalFinding.indicators.count, 1)
+        XCTAssertEqual(
+            scanner.isEligibleSelfResignedWQGuard(
+                resignedSelfWQGuard,
+                provisionalRisk: .caution,
+                matchedSignatures: [],
+                selfBundleId: "com.wqguard.app"
+            ),
+            "WQGuard"
+        )
+        let postSelfWhitelistCheck = WhitelistEngine.shared.evaluateFindingWhitelist(
+            preSelfEvalFinding,
+            runningSelfBundleId: "com.wqguard.app"
+        )
+        XCTAssertTrue(postSelfWhitelistCheck.isWhitelisted)
+        XCTAssertEqual(postSelfWhitelistCheck.toolName, "WQGuard")
+
+        let disabledEngine = WhitelistEngine()
+        disabledEngine.toggleTool(named: "WQGuard", isEnabled: false)
+        XCTAssertFalse(
+            disabledEngine.evaluateFindingWhitelist(preSelfEvalFinding, runningSelfBundleId: "com.wqguard.app").isWhitelisted
+        )
+
+        XCTAssertNil(
+            scanner.isEligibleSelfResignedWQGuard(
+                resignedSelfWQGuard,
+                provisionalRisk: .highRisk,
+                matchedSignatures: ["com.apple.private.security.no-sandbox"],
+                selfBundleId: "com.wqguard.app"
+            )
+        )
+        let squattingWQGuard = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.wqguard.app",
+            "CFBundleDisplayName": "WQGuard",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Example Enterprise",
+            "ProfileValidated": true,
+            "Path": "/private/var/containers/Bundle/Application/UUID-WQG/WQGuard.app",
+            "Entitlements": [
+                "com.apple.security.application-groups": ["group.io.metamask"]
+            ]
+        ]))
+        XCTAssertNil(
+            scanner.isEligibleSelfResignedWQGuard(
+                squattingWQGuard,
+                provisionalRisk: .caution,
+                matchedSignatures: [],
+                selfBundleId: "com.wqguard.app"
+            )
+        )
+        let unrelatedEnterpriseApp = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "cz.kolbi.wqfiles",
+            "CFBundleDisplayName": "WQ Files",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Example Enterprise",
+            "ProfileValidated": true,
+            "Path": "/private/var/containers/Bundle/Application/UUID-WQF/WQFiles.app",
+            "Entitlements": [
+                "com.apple.security.application-groups": ["group.ca628877a97ac6a2.1"]
+            ]
+        ]))
+        XCTAssertNil(
+            scanner.isEligibleSelfResignedWQGuard(
+                unrelatedEnterpriseApp,
+                provisionalRisk: .caution,
+                matchedSignatures: [],
+                selfBundleId: "com.wqguard.app"
+            )
+        )
+
+        // 8. Long-tail Apple first-party safeguards (Shazam App Store vs sideloaded spoof, GarageBand / Tamale)
+        let genuineShazam = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.shazam.ShazamApp",
+            "CFBundleDisplayName": "Shazam",
+            "ApplicationType": "User",
+            "SignerIdentity": "Apple iPhone OS Application Signing",
+            "ProfileValidated": false,
+            "Entitlements": [
+                "com.apple.private.tcc.allow": ["kTCCServiceMicrophone"],
+                "com.apple.private.mediaexperience.allow": true
+            ]
+        ]))
+        let sideloadedFakeShazam = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.shazam.ShazamApp",
+            "CFBundleDisplayName": "Shazam",
+            "ApplicationType": "User",
+            "SignerIdentity": "iPhone Distribution: Evil Corp",
+            "ProfileValidated": true,
+            "Entitlements": [
+                "com.apple.private.tcc.allow": ["kTCCServiceMicrophone"]
+            ]
+        ]))
+        let preinstalledGarageBand = try XCTUnwrap(InstalledAppRegistryRecord.fromDictionary([
+            "CFBundleIdentifier": "com.apple.mobilegarageband",
+            "CFBundleDisplayName": "库乐队",
+            "ApplicationType": "System",
+            "Path": "/private/var/containers/Bundle/Application/UUID-GB/MobileGarageBand.app",
+            "Entitlements": [
+                "com.apple.private.tcc.allow": ["kTCCServiceMicrophone", "kTCCServiceMediaLibrary"],
+                "com.apple.security.application-groups": ["group.com.apple.mobilegarageband"]
+            ]
+        ]))
+        XCTAssertTrue(scanner.isAppleSystemOrFirstPartyApp(genuineShazam))
+        XCTAssertFalse(scanner.isAppleSystemOrFirstPartyApp(sideloadedFakeShazam))
+        XCTAssertEqual(scanner.evaluateRecord(sideloadedFakeShazam).riskTier, .highRisk)
+        XCTAssertTrue(scanner.isAppleSystemOrFirstPartyApp(preinstalledGarageBand))
     }
 }

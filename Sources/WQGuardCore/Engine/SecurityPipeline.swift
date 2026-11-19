@@ -1046,9 +1046,9 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
         var correlatedCount = 0
 
         func canCorrelate(registry reg: ScanFinding, withPackage pkg: ScanFinding) -> Bool {
-            // Never merge a FairPlay-encrypted official App Store installation with an unencrypted local sideload clone
-            if reg.installChannel == .appStore && reg.evidence.isFairPlayEncrypted &&
-               (!pkg.evidence.isFairPlayEncrypted || pkg.installChannel != .appStore) {
+            // Never merge a FairPlay-encrypted official App Store / TestFlight installation with an unencrypted local sideload clone
+            if (reg.installChannel == .appStore || reg.installChannel == .testFlight) && reg.evidence.isFairPlayEncrypted &&
+               (!pkg.evidence.isFairPlayEncrypted || (pkg.installChannel != .appStore && pkg.installChannel != .testFlight)) {
                 return false
             }
             // Never correlate findings signed by different non-empty developer Team IDs
@@ -1197,6 +1197,35 @@ public final class SecurityPipeline: SecurityScannerEngineProtocol, @unchecked S
                 finalRisk = .knownTool
             }
         }
+        #if os(iOS)
+        if !isKnown
+            && package.evidence.isWhitelistEligible
+            && package.evidence.escapingSymlinks.isEmpty
+            && registry.isWhitelisted && registry.whitelistedToolName == "WQGuard",
+           let wqTool = whitelistEngine.tool(named: "WQGuard"), wqTool.isEnabled {
+            let nonGroupSymbols = mergedSymbols.filter {
+                $0 != "com.apple.security.application-groups"
+                    && $0 != SignatureCatalog.dynamicLoadingCautionRule.pattern
+            }
+            let hasAppleSysGroup = mergedAppGroups.contains { grp in
+                let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return lg.hasPrefix("group.com.apple.") || lg.hasPrefix("systemgroup.com.apple.")
+            }
+            let allExpected = !hasAppleSysGroup && nonGroupSymbols.allSatisfy { sig in
+                let cleanSig = sig.hasPrefix("_") ? String(sig.dropFirst()) : sig
+                return wqTool.expectedSignatures.contains { pattern in
+                    let cleanPat = pattern.hasPrefix("_") ? String(pattern.dropFirst()) : pattern
+                    return PatternMatcher.matches(pattern: pattern, value: sig)
+                        || PatternMatcher.matches(pattern: cleanPat, value: cleanSig)
+                }
+            }
+            if allExpected {
+                isKnown = true
+                resolvedToolName = wqTool.name
+                finalRisk = .knownTool
+            }
+        }
+        #endif
 
         let pkgFileName = (package.bundlePath as NSString).lastPathComponent
         let mergedPath = "\(registry.bundlePath) " + WQLocale.pick(

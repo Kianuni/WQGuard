@@ -982,10 +982,10 @@ public final class IPAPackageScanner: @unchecked Sendable {
             try? FileManager.default.removeItem(at: tempSandbox)
         }
         
-        let sandboxCanonicalPath = tempSandbox.standardizedFileURL.path
+        let sandboxCanonicalPath = Self.lexicalStandardizedPath(tempSandbox.path)
         let bundleURL = tempSandbox.appendingPathComponent(appBundleName)
         try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
-        let bundleCanonicalPath = bundleURL.standardizedFileURL.path
+        let bundleCanonicalPath = Self.lexicalStandardizedPath(bundleURL.path)
 
         // Pass 1: Collect archive POSIX symlink entries (S_IFLNK = 0o120000) in memory without materializing OS symlinks on disk
         var archiveSymlinks: [String: (target: String, isExec: Bool)] = [:]
@@ -1053,7 +1053,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
             }
             
             let destURL = bundleURL.appendingPathComponent(cleanRel)
-            let destCanonical = destURL.standardizedFileURL.path
+            let destCanonical = Self.lexicalStandardizedPath(destURL.path)
             guard destCanonical.hasPrefix(sandboxCanonicalPath + "/") || destCanonical == sandboxCanonicalPath,
                   destCanonical.hasPrefix(bundleCanonicalPath + "/") || destCanonical == bundleCanonicalPath else {
                 throw IPAPackageScannerError.zipSlipDetected(entry.path)
@@ -1122,8 +1122,8 @@ public final class IPAPackageScanner: @unchecked Sendable {
                 for (linkIdx, resolvedLink) in sortedBundleLinks.enumerated() where !materializedLinkIndices.contains(linkIdx) {
                     let srcURL = bundleURL.appendingPathComponent(resolvedLink.targetRel)
                     let dstURL = bundleURL.appendingPathComponent(resolvedLink.linkRel)
-                    let srcCanonical = srcURL.standardizedFileURL.path
-                    let dstCanonical = dstURL.standardizedFileURL.path
+                    let srcCanonical = Self.lexicalStandardizedPath(srcURL.path)
+                    let dstCanonical = Self.lexicalStandardizedPath(dstURL.path)
                     guard srcCanonical.hasPrefix(bundleCanonicalPath + "/"),
                           dstCanonical.hasPrefix(bundleCanonicalPath + "/"),
                           srcCanonical != dstCanonical,
@@ -1151,7 +1151,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
                         let srcPrefix = srcCanonical + "/"
                         var copiedEntries = 0
                         while let subItem = subEnum.nextObject() as? URL, copiedEntries < 2048 {
-                            let subItemStd = subItem.standardizedFileURL.path
+                            let subItemStd = Self.lexicalStandardizedPath(subItem.path)
                             guard subItemStd.hasPrefix(srcPrefix) else { continue }
                             let subRel = String(subItemStd.dropFirst(srcPrefix.count))
                             let subDst = dstURL.appendingPathComponent(subRel)
@@ -1736,13 +1736,13 @@ public final class IPAPackageScanner: @unchecked Sendable {
             throw IPAPackageScannerError.zipSlipDetected(execName)
         }
 
-        let bundleStd = bundleURL.standardizedFileURL.path
+        let bundleStd = Self.lexicalStandardizedPath(bundleURL.path)
         let bundleStdPrefix = bundleStd.hasSuffix("/") ? bundleStd : bundleStd + "/"
-        let bundleResolved = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let bundleResolved = Self.lexicalStandardizedPath(bundleURL.resolvingSymlinksInPath().path)
         let bundleResolvedPrefix = bundleResolved.hasSuffix("/") ? bundleResolved : bundleResolved + "/"
 
         let candidateURL = bundleURL.appendingPathComponent(execName)
-        guard candidateURL.standardizedFileURL.path.hasPrefix(bundleStdPrefix) else {
+        guard Self.lexicalStandardizedPath(candidateURL.path).hasPrefix(bundleStdPrefix) else {
             throw IPAPackageScannerError.zipSlipDetected(execName)
         }
 
@@ -1767,11 +1767,11 @@ public final class IPAPackageScanner: @unchecked Sendable {
             if linkTarget.hasPrefix("/") || linkTarget.contains("\\") || linkTarget.contains("\0") {
                 throw IPAPackageScannerError.zipSlipDetected(execName)
             }
-            let lexicalTarget = candidateURL.deletingLastPathComponent().appendingPathComponent(linkTarget).standardizedFileURL.path
+            let lexicalTarget = Self.lexicalStandardizedPath(candidateURL.deletingLastPathComponent().appendingPathComponent(linkTarget).path)
             guard lexicalTarget.hasPrefix(bundleStdPrefix) || lexicalTarget.hasPrefix(bundleResolvedPrefix) else {
                 throw IPAPackageScannerError.zipSlipDetected(execName)
             }
-            let resolvedExecPath = candidateURL.resolvingSymlinksInPath().standardizedFileURL.path
+            let resolvedExecPath = Self.lexicalStandardizedPath(candidateURL.resolvingSymlinksInPath().path)
             guard resolvedExecPath.hasPrefix(bundleResolvedPrefix) else {
                 throw IPAPackageScannerError.zipSlipDetected(execName)
             }
@@ -1957,6 +1957,20 @@ public final class IPAPackageScanner: @unchecked Sendable {
             s.removeLast()
         }
         return s
+    }
+
+    /// Pure lexical path normalization resolving `.`, `..`, duplicate `/`, and Darwin's `/private/{var,tmp,etc}`
+    /// alias WITHOUT consulting the filesystem. Prevents Apple Foundation's `URL.standardizedFileURL` quirk on iOS
+    /// where existing directories under `/private/var/mobile/...` drop `/private` while not-yet-created child paths
+    /// retain `/private`, which previously caused false `zipSlipDetected` failures on valid IPA entries.
+    internal static func lexicalStandardizedPath(_ rawPath: String) -> String {
+        let base = InstalledAppRegistryScanner.standardizedAbsolutePath(rawPath)
+        if base.hasPrefix("/private/var/") || base == "/private/var"
+            || base.hasPrefix("/private/tmp/") || base == "/private/tmp"
+            || base.hasPrefix("/private/etc/") || base == "/private/etc" {
+            return String(base.dropFirst("/private".count))
+        }
+        return base
     }
 
     public static func isNonSymlinkDirectory(at dirURL: URL) -> Bool {
@@ -2701,6 +2715,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
         let effectiveEntChannel: InstallChannel = (!isVerifiedAppStore && installChannel == .appStore)
             ? .developerSideloaded
             : installChannel
+        let ownKeychainPrefixes: Set<String>? = (codeSignatureTrust == .adHocOrUnsigned || hasMissingCodeSignature) ? [] : nil
         let extraInds = ExpandedThreatCatalog.evaluateImpersonation(
             bundleId: conflictingBundleId,
             displayName: displayName,
@@ -2710,7 +2725,8 @@ public final class IPAPackageScanner: @unchecked Sendable {
             bundleId: conflictingBundleId,
             installChannel: effectiveEntChannel,
             entitlements: entitlementsDict,
-            hasUnencryptedBinary: hasUnencryptedBinary || !isVerifiedAppStore
+            hasUnencryptedBinary: hasUnencryptedBinary || !isVerifiedAppStore,
+            allowedOwnTeamPrefixes: ownKeychainPrefixes
         )
         let existingKeys = Set(allIndicators.map { "\($0.signature)\u{0}\($0.location)" })
         for ind in extraInds {
@@ -3173,15 +3189,15 @@ public final class IPAPackageScanner: @unchecked Sendable {
     }
 
     internal static func bundleRelativePath(of itemURL: URL, in bundleURL: URL) -> String {
-        let itemStd = itemURL.standardizedFileURL.path
-        for root in [bundleURL.standardizedFileURL.path, bundleURL.resolvingSymlinksInPath().standardizedFileURL.path] {
+        let itemStd = lexicalStandardizedPath(itemURL.path)
+        for root in [lexicalStandardizedPath(bundleURL.path), lexicalStandardizedPath(bundleURL.resolvingSymlinksInPath().path)] {
             let prefix = root.hasSuffix("/") ? root : root + "/"
             if itemStd.hasPrefix(prefix) {
                 return String(itemStd.dropFirst(prefix.count))
             }
         }
-        let itemResolved = itemURL.resolvingSymlinksInPath().standardizedFileURL.path
-        let rootResolved = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let itemResolved = lexicalStandardizedPath(itemURL.resolvingSymlinksInPath().path)
+        let rootResolved = lexicalStandardizedPath(bundleURL.resolvingSymlinksInPath().path)
         let resolvedPrefix = rootResolved.hasSuffix("/") ? rootResolved : rootResolved + "/"
         if itemResolved.hasPrefix(resolvedPrefix) {
             return String(itemResolved.dropFirst(resolvedPrefix.count))
@@ -3257,13 +3273,15 @@ public final class IPAPackageScanner: @unchecked Sendable {
         let effectiveDangerousEntChannel: InstallChannel = (!isVerifiedAppStore && installChannel == .appStore)
             ? .developerSideloaded
             : installChannel
+        let ownKeychainPrefixes: Set<String>? = (codeSignatureTrust == .adHocOrUnsigned || hasMissingCodeSignature) ? [] : nil
 
         var expandedIndicators: [ThreatIndicator] = []
         expandedIndicators.append(contentsOf: ExpandedThreatCatalog.evaluateDangerousEntitlements(
             bundleId: bundleId,
             installChannel: effectiveDangerousEntChannel,
             entitlements: entitlementsDict,
-            hasUnencryptedBinary: hasUnencryptedBinary || !isVerifiedAppStore
+            hasUnencryptedBinary: hasUnencryptedBinary || !isVerifiedAppStore,
+            allowedOwnTeamPrefixes: ownKeychainPrefixes
         ))
         let effectiveImpersonationChannel: InstallChannel = (!isVerifiedAppStore && (installChannel == .appStore || installChannel == .testFlight))
             ? .developerSideloaded

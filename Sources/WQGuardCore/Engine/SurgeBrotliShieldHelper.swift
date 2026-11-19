@@ -186,7 +186,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
     public static let rawModuleTemplate: String = """
     #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
     #!desc=Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write (CVE-2026-111497 / HTTP2Shell, CVSS 9.2) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 针对未修复 libbrotli 堆越界写漏洞，剥离 br 压缩声明并拦截强推响应；内置 16 项苹果与网银负向排除。
-    #!version=1.3.3
+    #!version=1.3.4
     #!category=Security / 安全防护
     #!arguments=EXTRA_MITM_HOSTS:*.example.invalid
     #!arguments-desc=Extra hostnames/wildcards for Brotli downgrade protection (set * to cover all Safari/WebView domains; Apple & banking domains remain excluded). | 可追加高风险自定义域名（填 * 可覆盖全站流量，内置排除列表保障苹果与网银不受影响）。
@@ -244,7 +244,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
             return """
             #!name=WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
             #!desc=Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求头并拦截恶意强推响应，内置 16 项苹果与网银负向排除。
-            #!version=1.3.3
+            #!version=1.3.4
             #!category=Security / 安全防护
 
             [Header Rewrite]
@@ -262,7 +262,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
         case .quantumultX:
             return """
             ; WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497 / HTTP2Shell) — Quantumult X Rewrite Resource
-            ; #!version=1.3.3
+            ; #!version=1.3.4
             ; Mitigates unpatched iOS 26.x / 27.0–27.2.0 libbrotli heap OOB write by stripping br requests & blocking unsolicited br responses.
             ; Usage / 使用方式: Add under Quantumult X Rewrite -> Resources and enable Rewrite + MitM + CA certificate trust.
 
@@ -281,7 +281,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
             return """
             #!name = WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)
             #!desc = Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (CVE-2026-111497 / HTTP2Shell) by downgrading Accept-Encoding to gzip,deflate & blocking unsolicited br responses; 16 Apple/banking exclusions. | 强制降级 Accept-Encoding 并阻断强推 br 响应，内置 16 项负向排除。
-            #!version=1.3.3
+            #!version=1.3.4
             #!openUrl = https://github.com/Kianuni/WQGuard
             #!author = WQGuard Contributors
             #!tag = Security / 安全防护
@@ -304,7 +304,7 @@ public final class SurgeBrotliShieldHelper: Sendable {
             let allHosts = Self.mandatoryNegativeExclusions + Self.defaultHighRiskTLDs + cleanExtra
             let yamlMitmLines = allHosts.map { "    - \"\($0)\"" }.joined(separator: "\n")
             return """
-            #!version=1.3.3
+            #!version=1.3.4
             name: "WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)"
             desc: "Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (HTTP2Shell) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求声明并阻断强推响应，内置 16 项负向排除。"
             category: "Security / 安全防护"

@@ -325,9 +325,18 @@ public final class WhitelistEngine: @unchecked Sendable {
     /// `isWhitelistEligible`, `correlatedPackageBundleId` dual-bundle matching, `isTeamIdWhitelistVerified`,
     /// and complete threat-indicator signature coverage.
     public func evaluateFindingWhitelist(_ finding: ScanFinding) -> (isWhitelisted: Bool, toolName: String?) {
-        guard finding.evidence.isWhitelistEligible else {
-            return (false, nil)
-        }
+        #if os(iOS)
+        let runningSelfBid = Bundle.main.bundleIdentifier ?? "com.wqguard.app"
+        #else
+        let runningSelfBid = ""
+        #endif
+        return evaluateFindingWhitelist(finding, runningSelfBundleId: runningSelfBid)
+    }
+
+    internal func evaluateFindingWhitelist(
+        _ finding: ScanFinding,
+        runningSelfBundleId: String
+    ) -> (isWhitelisted: Bool, toolName: String?) {
         guard finding.evidence.escapingSymlinks.isEmpty else {
             return (false, nil)
         }
@@ -340,24 +349,73 @@ public final class WhitelistEngine: @unchecked Sendable {
             }
         }
         let allSignatures = Array(sigSet)
-        let candidateTeam = finding.evidence.isTeamIdWhitelistVerified ? finding.teamId : nil
 
-        if let secondaryBid = finding.evidence.correlatedPackageBundleId, !secondaryBid.isEmpty {
-            return isWhitelistedForBoth(
-                primaryBundleId: finding.bundleId,
-                secondaryBundleId: secondaryBid,
-                appGroups: finding.evidence.appGroups,
-                matchedSignatures: allSignatures,
-                teamId: candidateTeam
-            )
+        if finding.evidence.isWhitelistEligible {
+            let candidateTeam = finding.evidence.isTeamIdWhitelistVerified ? finding.teamId : nil
+
+            let standardResult: (isWhitelisted: Bool, toolName: String?)
+            if let secondaryBid = finding.evidence.correlatedPackageBundleId, !secondaryBid.isEmpty {
+                standardResult = isWhitelistedForBoth(
+                    primaryBundleId: finding.bundleId,
+                    secondaryBundleId: secondaryBid,
+                    appGroups: finding.evidence.appGroups,
+                    matchedSignatures: allSignatures,
+                    teamId: candidateTeam
+                )
+            } else {
+                standardResult = isWhitelisted(
+                    bundleId: finding.bundleId,
+                    appGroups: finding.evidence.appGroups,
+                    matchedSignatures: allSignatures,
+                    teamId: candidateTeam
+                )
+            }
+            if standardResult.isWhitelisted {
+                return standardResult
+            }
         }
 
-        return isWhitelisted(
-            bundleId: finding.bundleId,
-            appGroups: finding.evidence.appGroups,
-            matchedSignatures: allSignatures,
-            teamId: candidateTeam
-        )
+        // Running iOS host self-whitelist fallback for enterprise/sideload-resigned WQGuard
+        let cleanSelfBid = runningSelfBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanRecBid = finding.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanSelfBid.isEmpty,
+           (finding.evidence.auditDepth == .registryEntitlements || finding.evidence.auditDepth == .fullBinaryAndRegistry),
+           (cleanRecBid.caseInsensitiveCompare(cleanSelfBid) == .orderedSame
+               || (cleanRecBid.caseInsensitiveCompare("com.wqguard.app") == .orderedSame
+                   && finding.displayName.trimmingCharacters(in: .whitespacesAndNewlines) == "WQGuard")),
+           let wqTool = tool(named: "WQGuard"), wqTool.isEnabled {
+            if finding.evidence.auditDepth == .registryEntitlements,
+               finding.indicators.contains(where: { $0.severity == .highRisk }) {
+                return (false, nil)
+            }
+            let disallowedTokens = [
+                "metamask", "trustwallet", "phantom", "imtoken", "tokenpocket", "bitkeep",
+                "bitget", "okx", "binance", "coinbase", "bybit", "ledger", "onekey",
+                "telegram", "whatsapp", "alipay", "tencent.xin", "wechat"
+            ]
+            let hasDisallowedGroup = finding.evidence.appGroups.contains { grp in
+                let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if lg.hasPrefix("group.com.apple.") || lg.hasPrefix("systemgroup.com.apple.") {
+                    return true
+                }
+                return disallowedTokens.contains { lg.contains($0) }
+            }
+            if !hasDisallowedGroup {
+                let allExpected = allSignatures.allSatisfy { sig in
+                    let cleanSig = sig.hasPrefix("_") ? String(sig.dropFirst()) : sig
+                    return wqTool.expectedSignatures.contains { pattern in
+                        let cleanPat = pattern.hasPrefix("_") ? String(pattern.dropFirst()) : pattern
+                        return PatternMatcher.matches(pattern: pattern, value: sig)
+                            || PatternMatcher.matches(pattern: cleanPat, value: cleanSig)
+                    }
+                }
+                if allExpected {
+                    return (true, wqTool.name)
+                }
+            }
+        }
+
+        return (false, nil)
     }
 
     private func evaluateCandidateBundleIds(

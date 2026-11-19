@@ -938,6 +938,85 @@ public enum ExpandedThreatCatalog {
         return []
     }
 
+    /// Returns `true` when `raw` is a syntactically valid 10-character ASCII alphanumeric Apple Team ID
+    /// (excluding the sentinel placeholder `"0000000000"`).
+    public static func isStrictTenCharTeamId(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count == 10, trimmed != "0000000000" else {
+            return false
+        }
+        return trimmed.utf8.allSatisfy { b in
+            (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
+        }
+    }
+
+    /// Extracts lowercased valid 10-character Apple Team ID / App ID prefix strings owned by this binary/record.
+    public static func extractOwnTeamPrefixes(
+        from entitlements: [String: Any],
+        explicitTeamId: String? = nil
+    ) -> Set<String> {
+        var prefixes: Set<String> = []
+        if let explicitTeamId, isStrictTenCharTeamId(explicitTeamId) {
+            prefixes.insert(explicitTeamId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+        if let entTeam = entitlements["com.apple.developer.team-identifier"] as? String,
+           isStrictTenCharTeamId(entTeam) {
+            prefixes.insert(entTeam.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+        if let appId = entitlements["application-identifier"] as? String {
+            let trimmedAppId = appId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let dotIdx = trimmedAppId.firstIndex(of: ".") {
+                let prefix = String(trimmedAppId[..<dotIdx])
+                if isStrictTenCharTeamId(prefix) {
+                    prefixes.insert(prefix.lowercased())
+                }
+            }
+        }
+        return prefixes
+    }
+
+    /// Filters `keychain-access-groups` to only dangerous cross-team or Apple-targeted wildcards,
+    /// permitting Apple's standard team-scoped `<OwnTeamID>.*` (`$(AppIdentifierPrefix)*`) when verified.
+    public static func dangerousWildcardKeychainGroups(
+        _ keychainGroups: [String],
+        allowedOwnTeamPrefixes: Set<String>
+    ) -> [String] {
+        let normalizedAllowed = Set(
+            allowedOwnTeamPrefixes
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { isStrictTenCharTeamId($0) }
+                .map { $0.lowercased() }
+        )
+        var dangerous: [String] = []
+        for rawGroup in keychainGroups {
+            let group = rawGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !group.isEmpty else { continue }
+            if group == "*" {
+                dangerous.append(group)
+                continue
+            }
+            guard group.hasSuffix(".*") || group.contains("*") else {
+                continue
+            }
+            let lower = group.lowercased()
+            if lower.contains("apple") {
+                dangerous.append(group)
+                continue
+            }
+            if group.hasSuffix(".*") {
+                let prefixLower = String(lower.dropLast(2))
+                if normalizedAllowed.contains(prefixLower)
+                    || normalizedAllowed.contains(where: { prefixLower.hasPrefix($0 + ".") }) {
+                    continue
+                }
+                dangerous.append(group)
+            } else {
+                dangerous.append(group)
+            }
+        }
+        return dangerous
+    }
+
     /// 10. Shared evaluator for sandbox-escape, platform-privilege, TCC bypass, and wildcard keychain entitlements
     /// across `.ipa` archives (`IPAPackageScanner`) and `.app` bundles (`SecurityPipeline`).
     public static func evaluateDangerousEntitlements(
@@ -945,7 +1024,8 @@ public enum ExpandedThreatCatalog {
         installChannel: InstallChannel,
         entitlements: [String: Any],
         hasUnencryptedBinary: Bool = false,
-        location: String = "CSBlob Entitlements"
+        location: String = "CSBlob Entitlements",
+        allowedOwnTeamPrefixes: Set<String>? = nil
     ) -> [ThreatIndicator] {
         var indicators: [ThreatIndicator] = []
         let trimmedBundleId = bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1048,8 +1128,10 @@ public enum ExpandedThreatCatalog {
         }
 
         let keychainGroups = extractNonEmptyEntitlementStrings(entitlements["keychain-access-groups"])
-        if keychainGroups.contains("*") || keychainGroups.contains(where: { $0.hasSuffix(".*") }) {
-            let joined = keychainGroups.joined(separator: ", ")
+        let effectiveOwnPrefixes: Set<String> = allowedOwnTeamPrefixes ?? extractOwnTeamPrefixes(from: entitlements)
+        let dangerousKC = dangerousWildcardKeychainGroups(keychainGroups, allowedOwnTeamPrefixes: effectiveOwnPrefixes)
+        if !dangerousKC.isEmpty {
+            let joined = dangerousKC.joined(separator: ", ")
             indicators.append(ThreatIndicator(
                 signature: "keychain-access-groups(*)",
                 description: WQLocale.pick(

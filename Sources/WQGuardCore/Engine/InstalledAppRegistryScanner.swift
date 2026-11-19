@@ -193,7 +193,10 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
                 strEnts[k] = s
             }
         }
-        if (dict["BetaApp"] as? Bool == true) || (dict["IsTestFlight"] as? Bool == true) {
+        if (dict["BetaApp"] as? Bool == true)
+            || (dict["IsTestFlight"] as? Bool == true)
+            || (dict["betaExternalVersionIdentifier"] != nil)
+            || ((dict["iTunesMetadata"] as? [String: Any])?["betaExternalVersionIdentifier"] != nil) {
             boolEnts["beta-reports-active"] = true
         }
 
@@ -615,6 +618,129 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     // MARK: - Channel Classification & Security Audit
 
+    /// Apple stock applications that are preinstalled as user-removable bundles under
+    /// `/private/var/containers/Bundle/Application/<UUID>/` on iOS 15–27 and omit `SignerIdentity`
+    /// in CoreTrust static-cache exports. Deliberately excludes SSV-only core apps such as `com.apple.health`.
+    private static let removableAppleStockBundleIds: Set<String> = [
+        "com.apple.mobiletimer",
+        "com.apple.shortcuts",
+        "com.apple.shortcutsviewservice",
+        "com.apple.documentsapp",
+        "com.apple.files",
+        "com.apple.translate",
+        "com.apple.sequoiatranslator",
+        "com.apple.mobilecal",
+        "com.apple.mobilenotes",
+        "com.apple.mobilemail",
+        "com.apple.maps",
+        "com.apple.weather",
+        "com.apple.calculator",
+        "com.apple.stocks",
+        "com.apple.voicememos",
+        "com.apple.reminders",
+        "com.apple.contacts",
+        "com.apple.mobileaddressbook",
+        "com.apple.facetime",
+        "com.apple.podcasts",
+        "com.apple.ibooks",
+        "com.apple.tv",
+        "com.apple.music",
+        "com.apple.classical",
+        "com.apple.news",
+        "com.apple.home",
+        "com.apple.findmy",
+        "com.apple.mobileme.fmip1",
+        "com.apple.mobileme.fmf1",
+        "com.apple.tips",
+        "com.apple.fitness",
+        "com.apple.bridge",
+        "com.apple.measure",
+        "com.apple.magnifier",
+        "com.apple.compass",
+        "com.apple.journal",
+        "com.apple.passwords",
+        "com.apple.freeform",
+        "com.apple.games",
+        "com.apple.preview",
+        "com.apple.previewshell",
+        "com.apple.imageplayground",
+        "com.apple.generativeplaygroundapp",
+        "com.apple.continuitysingshieldui",
+        "com.apple.invites",
+        "com.apple.sports",
+        "com.apple.store.jolly",
+        "com.apple.supportapp",
+        "com.apple.testflight",
+        "com.apple.developer",
+        "com.apple.applevisionproapp",
+        "com.apple.aegirproxyapp",
+        "com.apple.helloposter",
+        "com.apple.printcenter",
+        "com.apple.feedbackassistant",
+        "com.apple.pages",
+        "com.apple.keynote",
+        "com.apple.numbers",
+        "com.apple.imovie",
+        "com.apple.garageband",
+        "com.apple.clips",
+        "com.apple.itunesu",
+        "com.apple.finalcutcamera",
+        "com.apple.appstore",
+        "com.apple.camera",
+        "com.apple.mobilesafari",
+        "com.apple.mobileslideshow",
+        "com.apple.photos",
+        "com.apple.passbook",
+        "com.apple.mobilephone",
+        "com.apple.mobilesms",
+        "com.apple.siri",
+        "com.apple.campo",
+        "com.apple.spotlight",
+        "com.apple.preferences",
+        "com.apple.datadetectors.ddactionsservice",
+        "com.apple.tvremoteapp",
+        "com.apple.tvremoteuiservice",
+        "com.apple.appletv",
+        "com.apple.books",
+        "com.apple.musicrecognition",
+        "com.apple.shazameventsapp",
+        "com.apple.family",
+        "com.apple.safetymonitorapp",
+        "com.apple.sidecar",
+        "com.apple.batteries",
+        "com.apple.barcodescanner",
+        "com.apple.hearingapp",
+        "com.apple.mobilegarageband",
+        "com.apple.playgrounds",
+        "com.apple.photo-booth",
+        "com.apple.tamale",
+        "com.apple.writingtoolsuiservice",
+        "com.apple.momentsuiservice",
+        "com.apple.magnifierangel",
+        "com.apple.continuitycaptureshieldui",
+        "com.apple.findingui",
+        "com.apple.movetoandroid",
+        "com.apple.sosbuddy",
+        "com.apple.simsetupuiservice",
+        "com.apple.hdsviewservice",
+        "com.apple.applesupport",
+        "com.apple.store.jolly",
+        "com.apple.wwdc-release",
+        "com.apple.testflight",
+        "com.apple.transporter",
+        "com.apple.realitycomposer",
+        "com.apple.musicmemos",
+        "com.apple.remote"
+    ]
+
+    /// Official Apple-owned applications whose legacy bundle identifiers do not start with `com.apple.`,
+    /// accepted ONLY when cryptographically signed by Apple App Store / Apple OS without a provisioning profile.
+    private static let appleOwnedNonComAppleBundleIds: Set<String> = [
+        "com.shazam.shazamapp",
+        "com.shazam.encore.shazam",
+        "is.workflow.my.app"
+    ]
+
     /// Canonical lowercased bundle identifiers of Apple preinstalled removable stock apps that reside under
     /// `/private/var/containers/Bundle/Application/...` and may omit `SignerIdentity` in CoreTrust static-cache exports.
     private static let canonicalRemovableAppleStockBundleIds: Set<String> = {
@@ -666,11 +792,155 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         for item in extras {
             ids.insert(item)
         }
+        ids.formUnion(removableAppleStockBundleIds)
         return ids
     }()
 
     internal static func isCanonicalRemovableAppleStockBundleId(_ lowerBid: String) -> Bool {
         canonicalRemovableAppleStockBundleIds.contains(lowerBid)
+    }
+
+    private static let knownAppleFirstPartyTeamIds: Set<String> = [
+        "0000000000",
+        "59GAB85EFG",
+        "243LU875E5",
+        "K36BKF7T3D",
+        "M8L2WTLA8W",
+        "74J34U3R6X",
+        "A85B27S937",
+        "9Z356F7V79",
+        "J5492B4V36",
+        "F3LWYJ7GM7",
+        "87G42F7594",
+        "P3L35M8B69",
+        "96VJNMX6ZP"
+    ]
+
+    /// Returns `true` when an App Group identifier belongs to Apple's first-party system/stock namespaces
+    /// (including bare `com.apple.*`, Team-ID-prefixed `*.groups.com.apple.*`, and Apple-acquired stock namespaces).
+    internal static func isAppleOwnedAppGroup(_ rawGroup: String) -> Bool {
+        let lg = rawGroup.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lg.isEmpty else { return true }
+
+        if ["group.com.apple", "systemgroup.com.apple", "apple"].contains(lg) {
+            return true
+        }
+
+        let directPrefixes = [
+            "group.com.apple.",
+            "groups.com.apple.",
+            "systemgroup.com.apple.",
+            "com.apple.",
+            "group.apple.",
+            "groups.apple.",
+            "systemgroup.apple.",
+            "apple.",
+            "group.net.apple.",
+            "group.org.apple.",
+            "group.com.icloud.",
+            "com.icloud.",
+            "group.icloud.",
+            "group.tvappservices.",
+            "tvappservices.",
+            "group.com.siri.",
+            "group.siri.",
+            "com.siri.",
+            "group.com.itunes.",
+            "group.itunes.",
+            "com.itunes.",
+            "group.com.me.",
+            "group.com.mobileme.",
+            "com.me.",
+            "com.mobileme.",
+            // Apple-acquired first-party stock app group namespaces
+            "group.is.workflow.",
+            "is.workflow.",
+            "group.com.darksky.",
+            "com.darksky.",
+            "group.com.shazam.",
+            "com.shazam.",
+            "group.com.beats.",
+            "com.beats.",
+            "group.com.primephonic.",
+            "com.primephonic.",
+            "group.com.texture.",
+            "com.texture.",
+            "group.com.beddit.",
+            "com.beddit.",
+            "group.com.nextvr.",
+            "com.nextvr.",
+            "group.com.filemaker.",
+            "com.filemaker.",
+            "group.com.claris.",
+            "com.claris.",
+            "group.maps.",
+            "group.mail.",
+            "group.home.",
+            "group.tips.",
+            "group.news.",
+            "group.tv.",
+            "group.ams.",
+            "group.sms.",
+            "group.im.",
+            "group.gm."
+        ]
+        if directPrefixes.contains(where: { lg.hasPrefix($0) }) {
+            return true
+        }
+
+        if let dotIdx = lg.firstIndex(of: ".") {
+            let prefix = String(lg[..<dotIdx])
+            let rest = String(lg[lg.index(after: dotIdx)...])
+            if knownAppleFirstPartyTeamIds.contains(prefix.uppercased()) {
+                return true
+            }
+            if ExpandedThreatCatalog.isStrictTenCharTeamId(prefix) || prefix == "0000000000" {
+                let teamApplePrefixes = [
+                    "com.apple.",
+                    "group.com.apple.",
+                    "groups.com.apple.",
+                    "systemgroup.com.apple.",
+                    "apple.",
+                    "group.apple.",
+                    "groups.apple.",
+                    "tvappservices.",
+                    "is.workflow.",
+                    "group.is.workflow."
+                ]
+                if teamApplePrefixes.contains(where: { rest.hasPrefix($0) }) {
+                    return true
+                }
+            }
+        }
+
+        // Structural Apple-internal non-TLD `group.<service>.*` / `systemgroup.<service>.*` namespaces
+        // (e.g. `group.tvappservices.container`, `group.healthkit.*`, `group.translation.*`), while rejecting
+        // reverse-DNS TLDs (`io`, `com`, `org`, `net`), hex identifiers (`ca628877a97ac6a2`), digits (`r10`), and hostile words.
+        if lg.hasPrefix("group.") || lg.hasPrefix("systemgroup.") {
+            let hostileMarkers = [
+                "metamask", "backdoor", "trollstore", "telegram", "whatsapp",
+                "binance", "tokenpocket", "imtoken", "bitkeep"
+            ]
+            if !hostileMarkers.contains(where: { lg.contains($0) }) {
+                let dropLen = lg.hasPrefix("group.") ? "group.".count : "systemgroup.".count
+                let afterPrefix = String(lg.dropFirst(dropLen))
+                let seg = String(afterPrefix.split(separator: ".", omittingEmptySubsequences: false).first ?? "")
+                let isLowerASCIIAlphaOnly = seg.count >= 5 && seg.utf8.allSatisfy { b in b >= 0x61 && b <= 0x7A }
+                let rejectedFirstSegments: Set<String> = [
+                    "local", "cloud", "store", "online", "world", "space", "email", "digital",
+                    "network", "agency", "center", "wallet", "crypto", "token", "finance",
+                    "global", "company", "solutions", "metamask", "telegram", "whatsapp",
+                    "wechat", "alipay", "binance", "trust", "phantom", "coinbase",
+                    "tokenpocket", "imtoken", "bitget", "bitkeep", "backdoor", "troll",
+                    "exploit", "hacker", "pwned", "trojan", "malware"
+                ]
+                if isLowerASCIIAlphaOnly && !rejectedFirstSegments.contains(seg) {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     /// Returns `true` when the record represents a genuine Apple OS daemon, CoreServices UI service,
@@ -682,36 +952,32 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return false
         }
 
+        let signer = record.signerIdentity?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
         let lowerBid = record.bundleId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if Self.appleOwnedNonComAppleBundleIds.contains(lowerBid) {
+            return signer == "apple iphone os application signing"
+                || signer == "software signing"
+                || signer == "apple code signing certification authority"
+        }
         guard lowerBid.hasPrefix("com.apple.") else {
             return false
         }
 
-        let signer = record.signerIdentity?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
         if let signer, !signer.isEmpty {
             // Cryptographic Apple OS platform signature or Apple App Store signature on a `com.apple.*` bundle without profileValidated
-            if signer == "software signing" || signer == "apple iphone os application signing" {
+            if signer == "software signing"
+                || signer == "apple iphone os application signing"
+                || signer == "apple code signing certification authority" {
                 return true
             }
             // Any other non-empty signer (e.g. "Ad Hoc", "ldid", "Apple Development", "iPhone Distribution") is NEVER Apple OS.
             return false
         }
 
-        // Genuine unsigned/CoreTrust-cached OS records do not carry a third-party developer Team ID.
-        if let tid = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !tid.isEmpty,
-           tid != "0000000000" {
-            return false
-        }
-
         // Reject third-party App Groups, known sideload tool names, or wallet/messenger display-name impersonation.
-        let hasThirdPartyGroup = record.appGroups.contains { grp in
-            let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return !lg.isEmpty && !lg.hasPrefix("group.com.apple.") && !lg.hasPrefix("systemgroup.com.apple.")
-        }
-        if hasThirdPartyGroup {
+        if record.appGroups.contains(where: { !Self.isAppleOwnedAppGroup($0) }) {
             return false
         }
         if Self.matchKnownSideloadInfrastructure(bundleId: record.bundleId, displayName: record.displayName) != nil {
@@ -739,6 +1005,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             || lowerPath.contains("/procursus")
         let isSSVSystemPath = !isJailbreakSubpath && (
             path.hasPrefix("/System/")
+            || path.hasPrefix("/private/System/")
             || path.hasPrefix("/Applications/")
             || path.hasPrefix("/private/Applications/")
             || path.hasPrefix("/private/preboot/")
@@ -747,15 +1014,79 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             || path.hasPrefix("/var/Cryptexes/")
             || path.hasPrefix("/private/var/staged_system_apps/")
             || path.hasPrefix("/var/staged_system_apps/")
+            || path.hasPrefix("/private/var/MobileAsset/")
+            || path.hasPrefix("/var/MobileAsset/")
             || path.hasPrefix("/Developer/Applications/")
         )
-        if isSSVSystemPath && (appType == "system" || appType == "internal" || appType == "hidden") {
+        let isSystemAppType = (appType == "system" || appType == "internal" || appType == "hidden" || appType == "coreservices")
+        let hasPlatformAppEnt = (record.booleanEntitlements["platform-application"] == true)
+        let hasFullSandboxDisable = (record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true
+            || record.booleanEntitlements["com.apple.private.security.container-required"] == false)
+        // Genuine Apple stock apps staged in `/private/var/containers/Bundle/Application/...` (such as
+        // `com.apple.reminders` v7.0+ on iOS 26) may legitimately declare `no-sandbox = true` paired with
+        // an explicit `group.com.apple.*` / `systemgroup.com.apple.*` App Group, while never disabling
+        // container enforcement (`container-required=false`) or claiming wildcard `*` keychain.
+        let isGenuineAppleNoSandboxStockApp = Self.removableAppleStockBundleIds.contains(lowerBid)
+            && isSystemAppType
+            && record.booleanEntitlements["com.apple.private.security.container-required"] != false
+            && !record.keychainAccessGroups.contains("*")
+            && record.appGroups.contains(where: { grp in
+                let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return lg.hasPrefix("group.com.apple.") || lg.hasPrefix("systemgroup.com.apple.")
+            })
+
+        // Genuine unsigned/CoreTrust-cached OS records may carry an internal Apple Team ID; reject third-party developer Team IDs.
+        if let tid = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !tid.isEmpty {
+            let upperTid = tid.uppercased()
+            let isKnownAppleTeam = Self.knownAppleFirstPartyTeamIds.contains(upperTid)
+            if !isKnownAppleTeam {
+                let appIdMatchesComApple = record.stringEntitlements["application-identifier"]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("\(tid.lowercased()).com.apple.") } ?? false
+                let isApplePlatformTeamBound = (
+                    isSSVSystemPath && isSystemAppType && (
+                        hasPlatformAppEnt
+                        || appIdMatchesComApple
+                        || Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid)
+                    )
+                ) || (
+                    isSystemAppType && (!hasFullSandboxDisable || isGenuineAppleNoSandboxStockApp)
+                        && Self.removableAppleStockBundleIds.contains(lowerBid)
+                )
+                if !isApplePlatformTeamBound {
+                    return false
+                }
+            }
+        }
+
+        if isSSVSystemPath && isSystemAppType {
+            return true
+        }
+
+        // Preinstalled removable Apple stock apps staged in `/private/var/containers/Bundle/Application/<UUID>/`:
+        // Never allow full sandbox disable (`no-sandbox` / `container-required=false`) or global keychain wildcard `*`,
+        // except genuine Apple stock apps verified by `isGenuineAppleNoSandboxStockApp` above.
+        if isSystemAppType
+            && !hasFullSandboxDisable
+            && !record.keychainAccessGroups.contains("*") {
+            if Self.removableAppleStockBundleIds.contains(lowerBid) {
+                return true
+            }
+            if lowerBid == "com.apple.health"
+                && record.booleanEntitlements["com.apple.private.security.no-container"] != true {
+                return true
+            }
+            if record.hasAppStoreMetadata
+                && record.booleanEntitlements["com.apple.private.security.no-container"] != true {
+                return true
+            }
+        }
+        if isGenuineAppleNoSandboxStockApp {
             return true
         }
 
         // User-writable bundle container paths (`/var/containers/Bundle/Application/...`, where TrollStore "Switch to System
         // Registration" flips `ApplicationType` to `"System"`) NEVER trust unverified records with escape/private entitlements.
-        if hasAnyDangerousRegistryEntitlement(record, assumingUnverifiedIdentity: true) || record.booleanEntitlements["platform-application"] == true {
+        if hasAnyDangerousRegistryEntitlement(record, assumingUnverifiedIdentity: true) || hasPlatformAppEnt {
             return false
         }
 
@@ -848,6 +1179,30 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         !restricted2026BypassEntitlements(for: record).isEmpty
     }
 
+    private func allowedOwnKeychainPrefixes(for record: InstalledAppRegistryRecord) -> Set<String> {
+        let signerLower = record.signerIdentity?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let isAdHocOrUnsigned = signerLower == "ad hoc"
+            || signerLower.contains("ad-hoc")
+            || signerLower.contains("ldid")
+            || signerLower.contains("trollstore")
+        let hasProvisionedOrStoreIdentity = !isAdHocOrUnsigned && (
+            record.profileValidated
+            || signerLower == "apple iphone os application signing"
+            || signerLower == "testflight beta distribution"
+            || signerLower == "apple testflight beta distribution"
+            || signerLower == "software signing"
+        )
+        guard hasProvisionedOrStoreIdentity else { return [] }
+        var rawEnts: [String: Any] = [:]
+        if let tid = record.stringEntitlements["com.apple.developer.team-identifier"] {
+            rawEnts["com.apple.developer.team-identifier"] = tid
+        }
+        if let appId = record.stringEntitlements["application-identifier"] {
+            rawEnts["application-identifier"] = appId
+        }
+        return ExpandedThreatCatalog.extractOwnTeamPrefixes(from: rawEnts, explicitTeamId: record.teamId)
+    }
+
     private func hasAnyDangerousRegistryEntitlement(
         _ record: InstalledAppRegistryRecord,
         assumingUnverifiedIdentity: Bool = false
@@ -863,8 +1218,8 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
            !rawRestricted2026EntitlementKeys(in: record).isEmpty {
             return true
         }
-        if record.keychainAccessGroups.contains("*") ||
-           record.keychainAccessGroups.contains(where: { $0.hasSuffix(".*") }) {
+        let allowedKC = assumingUnverifiedIdentity ? Set<String>() : allowedOwnKeychainPrefixes(for: record)
+        if !ExpandedThreatCatalog.dangerousWildcardKeychainGroups(record.keychainAccessGroups, allowedOwnTeamPrefixes: allowedKC).isEmpty {
             return true
         }
         let candidateKeys = Set(record.allEntitlementKeys)
@@ -905,15 +1260,21 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         }
 
         // 2. TestFlight Beta builds:
-        //    Require `beta-reports-active == true` paired with a validated Apple Distribution / App Store / TestFlight signature
-        //    (never trusting arbitrary `"testflight"` substrings without `beta-reports-active`, nor ad-hoc/unsigned `beta-reports-active`).
+        //    Official Apple TestFlight cloud-re-signed binaries carry `SignerIdentity == "TestFlight Beta Distribution"`
+        //    (or `"Apple TestFlight Beta Distribution"`, or `"Apple iPhone OS Application Signing"` with `ProfileValidated == true`),
+        //    or `beta-reports-active == true` paired with a validated Apple/iOS/iPhone Distribution signature
+        //    (never trusting arbitrary `"testflight"` substrings on third-party org names like `"iPhone Distribution: TestFlight Spoof"`,
+        //    nor ad-hoc/unsigned `beta-reports-active`).
         if !hasDangerousPrivateEscape {
-            let isEligibleBetaSigner = (signerLower == "apple iphone os application signing")
+            let isOfficialAppleTestFlightSigner = (signerLower == "testflight beta distribution")
                 || (signerLower == "apple testflight beta distribution")
-                || signerLower.hasPrefix("apple distribution:")
+                || (!signerLower.contains(":") && signerLower.hasPrefix("apple ") && signerLower.contains("testflight"))
+                || (record.profileValidated && signerLower == "apple iphone os application signing")
+            let isEligibleDistributionBetaSigner = signerLower.hasPrefix("apple distribution:")
                 || signerLower.hasPrefix("iphone distribution:")
-            if (record.profileValidated && signerLower == "apple iphone os application signing") ||
-               (record.booleanEntitlements["beta-reports-active"] == true && record.profileValidated && isEligibleBetaSigner) {
+                || signerLower.hasPrefix("ios distribution:")
+            if isOfficialAppleTestFlightSigner ||
+               (record.booleanEntitlements["beta-reports-active"] == true && record.profileValidated && isEligibleDistributionBetaSigner) {
                 return (.testFlight, true)
             }
         }
@@ -949,27 +1310,59 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         return false
     }
 
+    private static let protectedVictimAppGroupTokens: [String] = [
+        "metamask", "trustwallet", "phantom", "imtoken", "tokenpocket", "bitkeep",
+        "bitget", "okx", "binance", "coinbase", "bybit", "ledger", "onekey",
+        "telegram", "whatsapp", "alipay", "tencent.xin", "wechat"
+    ]
+
+    /// Checks whether `record` represents the currently executing WQGuard host app on iOS whose
+    /// `com.apple.security.application-groups` or enterprise `application-identifier` was rewritten
+    /// during sideload/enterprise signing (e.g. by 全能签 / ESign / Feather / AltStore / SideStore),
+    /// including when scanning a previously cached `installation_proxy` snapshot whose bundle UUID
+    /// path predates an in-place app update, while still rejecting any `.highRisk` indicator,
+    /// victim App Group squatting, unexpected signature, or disabled built-in `WQGuard` rule.
+    internal func isEligibleSelfResignedWQGuard(
+        _ record: InstalledAppRegistryRecord,
+        provisionalRisk: RiskTier,
+        matchedSignatures: Set<String>,
+        selfBundleId: String
+    ) -> String? {
+        let cleanSelfBid = selfBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanRecBid = record.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSelfBid.isEmpty else { return nil }
+        let isMatchingHostBundleId = cleanRecBid.caseInsensitiveCompare(cleanSelfBid) == .orderedSame
+            || (cleanRecBid.caseInsensitiveCompare("com.wqguard.app") == .orderedSame
+                && record.displayName.trimmingCharacters(in: .whitespacesAndNewlines) == "WQGuard")
+        guard isMatchingHostBundleId, provisionalRisk == .caution else { return nil }
+        let hasDisallowedGroup = record.appGroups.contains { grp in
+            let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if lg.hasPrefix("group.com.apple.") || lg.hasPrefix("systemgroup.com.apple.") {
+                return true
+            }
+            return Self.protectedVictimAppGroupTokens.contains { lg.contains($0) }
+        }
+        guard !hasDisallowedGroup else { return nil }
+        guard let wqTool = whitelistEngine.tool(named: "WQGuard"), wqTool.isEnabled else { return nil }
+        let nonGroupSigs = matchedSignatures.filter { $0 != "com.apple.security.application-groups" }
+        let allExpected = nonGroupSigs.allSatisfy { sig in
+            let cleanSig = sig.hasPrefix("_") ? String(sig.dropFirst()) : sig
+            return wqTool.expectedSignatures.contains { pattern in
+                let cleanPat = pattern.hasPrefix("_") ? String(pattern.dropFirst()) : pattern
+                return PatternMatcher.matches(pattern: pattern, value: sig)
+                    || PatternMatcher.matches(pattern: cleanPat, value: cleanSig)
+            }
+        }
+        return allExpected ? wqTool.name : nil
+    }
+
     /// Evaluates all relevant installed app records into `ScanFinding` items.
     public func evaluateRecords(
         _ records: [InstalledAppRegistryRecord],
         includeAppStoreApps: Bool = false
     ) -> [ScanFinding] {
-        #if os(iOS)
-        let selfBid = Bundle.main.bundleIdentifier ?? "com.wqguard.app"
-        #else
-        let selfBid = ""
-        #endif
-
         var findings: [ScanFinding] = []
         for rec in records {
-            if !selfBid.isEmpty && rec.bundleId == selfBid {
-                // Only skip WQGuard's own bundle ID when it matches the built-in self-whitelist (.knownTool/.safe);
-                // never skip a Trojanized sideloaded clone spoofing com.wqguard.app with high-risk entitlements.
-                let selfEval = evaluateRecord(rec)
-                if selfEval.riskTier == .knownTool || selfEval.riskTier == .safe {
-                    continue
-                }
-            }
             // Always exclude genuine Apple OS daemons, CoreServices UI services, and Apple system apps
             // so `includeAppStoreApps` strictly audits user-installed third-party App Store applications.
             if isAppleSystemOrFirstPartyApp(rec) {
@@ -1123,12 +1516,17 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         }
 
         // 4. Keychain Wildcard Access
-        if record.keychainAccessGroups.contains("*") || record.keychainAccessGroups.contains(where: { $0.hasSuffix(".*") }) {
+        let dangerousKCGroups = ExpandedThreatCatalog.dangerousWildcardKeychainGroups(
+            record.keychainAccessGroups,
+            allowedOwnTeamPrefixes: allowedOwnKeychainPrefixes(for: record)
+        )
+        if !dangerousKCGroups.isEmpty {
+            let kcDisplay = dangerousKCGroups.joined(separator: ", ")
             indicators.append(ThreatIndicator(
                 signature: "keychain-access-groups(*)",
                 description: WQLocale.pick(
-                    en: "Declares wildcard keychain access groups (\(record.keychainAccessGroups.joined(separator: ", "))), exposing cross-app credentials and private keys.",
-                    zh: "已安装应用声明了通配符钥匙串访问组 (\(record.keychainAccessGroups.joined(separator: ", ")))，可跨应用窃取 Keychain 敏感登录凭证与私钥！"
+                    en: "Declares wildcard keychain access groups (\(kcDisplay)), exposing cross-app credentials and private keys.",
+                    zh: "已安装应用声明了通配符钥匙串访问组 (\(kcDisplay))，可跨应用窃取 Keychain 敏感登录凭证与私钥！"
                 ),
                 category: "Keychain Credential Exposure",
                 location: "installation_proxy Entitlements",
@@ -1305,7 +1703,11 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if let recTeam = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !recTeam.isEmpty {
             isRegistryTeamVerified = !hasConflictingRegistryTeamId
                 && !isAdHocOrUnsignedRegistrySigner
-                && (record.profileValidated || record.hasAppStoreMetadata || signerLowerForTeam == "apple iphone os application signing")
+                && (record.profileValidated
+                    || record.hasAppStoreMetadata
+                    || signerLowerForTeam == "apple iphone os application signing"
+                    || signerLowerForTeam == "testflight beta distribution"
+                    || signerLowerForTeam == "apple testflight beta distribution")
         } else {
             isRegistryTeamVerified = true
         }
@@ -1325,6 +1727,23 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             if wlResult.isWhitelisted {
                 isWhitelisted = true
                 whitelistedToolName = wlResult.toolName
+                finalRisk = .knownTool
+            }
+        }
+        if !isWhitelisted {
+            #if os(iOS)
+            let runningSelfBid = Bundle.main.bundleIdentifier ?? "com.wqguard.app"
+            #else
+            let runningSelfBid = ""
+            #endif
+            if let selfToolName = isEligibleSelfResignedWQGuard(
+                record,
+                provisionalRisk: provisionalRisk,
+                matchedSignatures: matchedSignatures,
+                selfBundleId: runningSelfBid
+            ) {
+                isWhitelisted = true
+                whitelistedToolName = selfToolName
                 finalRisk = .knownTool
             }
         }
