@@ -225,7 +225,9 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         }
 
         let bgModes = extractTrimmedStrings(dict["UIBackgroundModes"])
-        let bundlePath = (dict["Path"] as? String) ?? "/var/containers/Bundle/Application/\(bundleId)"
+        let bundlePath = (dict["Path"] as? String)
+            ?? (dict["BundlePath"] as? String)
+            ?? "/var/containers/Bundle/Application/\(bundleId)"
         let containerPath = dict["Container"] as? String
 
         return InstalledAppRegistryRecord(
@@ -284,8 +286,14 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         }()
 
         let lowerBundlePath = resolvedBundlePath.lowercased()
+        let isPrebootJailbreak = lowerBundlePath.contains("/preboot/")
+            && !lowerBundlePath.contains("/preboot/cryptexes/")
+            && (lowerBundlePath.contains("/jb-")
+                || lowerBundlePath.contains("/jb/")
+                || lowerBundlePath.contains("/dopamine")
+                || lowerBundlePath.contains("/procursus"))
         let isTrollStoreOrJailbreakPath = lowerBundlePath.contains("/var/jb/")
-            || lowerBundlePath.contains("/preboot/")
+            || isPrebootJailbreak
             || (!isDefaultApp && !isInternalApp && lowerBundlePath.hasPrefix("/applications/"))
 
         let isEnterpriseFlag = (dict["enterpriseApp"] as? Bool == true) || (dict["isEnterpriseApp"] as? Bool == true)
@@ -674,11 +682,6 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return false
         }
 
-        // Genuine Apple OS / first-party records do not carry a third-party developer Team ID.
-        if let tid = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !tid.isEmpty {
-            return false
-        }
-
         let lowerBid = record.bundleId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard lowerBid.hasPrefix("com.apple.") else {
             return false
@@ -696,14 +699,14 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return false
         }
 
-        // Unsigned / nil-SignerIdentity path (CoreTrust static cache vs TrollStore "Switch to System Registration"):
-        // 1. NEVER trust an unverified (`signer == nil`) record holding ANY sandbox-escape, platform-application, TCC,
-        //    wildcard keychain, private Photos, or 2026 restricted bypass entitlement.
-        if hasAnyDangerousRegistryEntitlement(record, assumingUnverifiedIdentity: true) || record.booleanEntitlements["platform-application"] == true {
+        // Genuine unsigned/CoreTrust-cached OS records do not carry a third-party developer Team ID.
+        if let tid = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !tid.isEmpty,
+           tid != "0000000000" {
             return false
         }
 
-        // 2. Reject third-party App Groups, known sideload tool names, or wallet/messenger display-name impersonation.
+        // Reject third-party App Groups, known sideload tool names, or wallet/messenger display-name impersonation.
         let hasThirdPartyGroup = record.appGroups.contains { grp in
             let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return !lg.isEmpty && !lg.hasPrefix("group.com.apple.") && !lg.hasPrefix("systemgroup.com.apple.")
@@ -723,18 +726,39 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return false
         }
 
-        // 3. Path-anchored system verification:
-        //    - SSV-sealed OS paths (`/System/`, `/Applications/`, `/private/preboot/`) are trusted for clean `com.apple.*` bundles.
-        //    - User-writable bundle container paths (`/var/containers/Bundle/Application/...`, where TrollStore "Switch to System
-        //      Registration" flips `ApplicationType` to `"System"`) ONLY trust canonical preinstalled Apple stock bundle IDs.
+        // Real iOS SSV-sealed OS paths (`/System/`, `/Applications/`, `/private/preboot/Cryptexes/...`, etc.):
+        // `installation_proxy` omits `SignerIdentity` on stock OS daemons/apps while they legitimately hold
+        // `platform-application`, `no-container`, `no-sandbox`, `tcc.allow`, etc.
         let path = Self.standardizedAbsolutePath(record.bundlePath)
-        if path.hasPrefix("/System/") ||
-           path.hasPrefix("/Applications/") ||
-           path.hasPrefix("/private/preboot/") {
+        let appType = record.applicationType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let lowerPath = path.lowercased()
+        let isJailbreakSubpath = lowerPath.contains("/var/jb/")
+            || lowerPath.contains("/jb-")
+            || lowerPath.contains("/jb/")
+            || lowerPath.contains("/dopamine")
+            || lowerPath.contains("/procursus")
+        let isSSVSystemPath = !isJailbreakSubpath && (
+            path.hasPrefix("/System/")
+            || path.hasPrefix("/Applications/")
+            || path.hasPrefix("/private/Applications/")
+            || path.hasPrefix("/private/preboot/")
+            || path.hasPrefix("/preboot/")
+            || path.hasPrefix("/private/var/Cryptexes/")
+            || path.hasPrefix("/var/Cryptexes/")
+            || path.hasPrefix("/private/var/staged_system_apps/")
+            || path.hasPrefix("/var/staged_system_apps/")
+            || path.hasPrefix("/Developer/Applications/")
+        )
+        if isSSVSystemPath && (appType == "system" || appType == "internal" || appType == "hidden") {
             return true
         }
 
-        let appType = record.applicationType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // User-writable bundle container paths (`/var/containers/Bundle/Application/...`, where TrollStore "Switch to System
+        // Registration" flips `ApplicationType` to `"System"`) NEVER trust unverified records with escape/private entitlements.
+        if hasAnyDangerousRegistryEntitlement(record, assumingUnverifiedIdentity: true) || record.booleanEntitlements["platform-application"] == true {
+            return false
+        }
+
         if appType == "system" && Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid) {
             return true
         }

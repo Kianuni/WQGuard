@@ -492,4 +492,224 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
             XCTAssertTrue(finding.indicators.isEmpty)
         }
     }
+
+    func testSSVSystemAppsWithPrivateEntitlementsAndNilSignerExcluded_WhileTrollStoreAndJailbreakSpoofsCaught() throws {
+        // 1. Real iOS `installation_proxy` SSV Apple System App records (SignerIdentity == nil,
+        //    legitimate platform-application / no-container / no-sandbox / tcc.allow / private 2026 entitlements)
+        let ssvSystemAppsJSON: [String: Any] = [
+            "com.apple.chrono.WidgetRenderer-Snapshots": [
+                "CFBundleIdentifier": "com.apple.chrono.WidgetRenderer-Snapshots",
+                "CFBundleDisplayName": "WidgetRenderer_Default",
+                "ApplicationType": "System",
+                "Path": "/System/Library/CoreServices/WidgetRenderer.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.security.no-container": true,
+                    "com.apple.private.MobileContainerManager.allowed": true,
+                    "com.apple.private.MobileGestalt.AllowedProtectedKeys": true
+                ]
+            ],
+            "com.apple.AdaptiveMusicApp": [
+                "CFBundleIdentifier": "com.apple.AdaptiveMusicApp",
+                "CFBundleDisplayName": "环境音乐",
+                "ApplicationType": "Internal",
+                "Path": "/System/Applications/AdaptiveMusicApp.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.mediaexperience.allow": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceMicrophone"]
+                ]
+            ],
+            "com.apple.mobiletimer": [
+                "CFBundleIdentifier": "com.apple.mobiletimer",
+                "CFBundleDisplayName": "时钟",
+                "ApplicationType": "System",
+                "BundlePath": "/Applications/MobileTimer.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.security.no-sandbox": true,
+                    "com.apple.private.tcc.allow": ["kTCCServicePhotos"],
+                    "com.apple.private.mediaexperience.allow": true
+                ]
+            ],
+            "com.apple.StoreDemoViewService": [
+                "CFBundleIdentifier": "com.apple.StoreDemoViewService",
+                "CFBundleDisplayName": "StoreDemoViewService",
+                "ApplicationType": "Hidden",
+                "Path": "/private/preboot/Cryptexes/OS/System/Applications/StoreDemoViewService.app",
+                "Entitlements": [
+                    "platform-application": true
+                ]
+            ],
+            "com.apple.ContinuitySingShieldUI": [
+                "CFBundleIdentifier": "com.apple.ContinuitySingShieldUI",
+                "CFBundleDisplayName": "唱歌",
+                "ApplicationType": "System",
+                "Path": "/private/var/staged_system_apps/ContinuitySingShieldUI.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.security.no-container": true,
+                    "com.apple.private.mediaexperience.allow": true,
+                    "com.apple.private.tcc.allow": ["kTCCServiceMicrophone"]
+                ]
+            ],
+            "com.apple.TVAccessViewService": [
+                "CFBundleIdentifier": "com.apple.TVAccessViewService",
+                "CFBundleDisplayName": "TVAccessViewService",
+                "ApplicationType": "System",
+                "Path": "/Applications/TVAccessViewService.app",
+                "Entitlements": [
+                    "platform-application": true
+                ]
+            ],
+            "com.apple.SharingUIService": [
+                "CFBundleIdentifier": "com.apple.SharingUIService",
+                "CFBundleDisplayName": "SharingUIService",
+                "ApplicationType": "System",
+                "Path": "/System/Library/PrivateFrameworks/Sharing.framework/PlugIns/SharingUIService.app",
+                "Entitlements": [
+                    "platform-application": true,
+                    "com.apple.private.security.no-container": true
+                ]
+            ]
+        ]
+
+        let ssvData = try JSONSerialization.data(withJSONObject: ssvSystemAppsJSON, options: [])
+        let ssvRecords = try InstalledAppRegistryScanner.shared.parseSnapshotData(ssvData)
+        XCTAssertEqual(ssvRecords.count, 7)
+
+        for rec in ssvRecords {
+            XCTAssertTrue(
+                InstalledAppRegistryScanner.shared.isAppleSystemOrFirstPartyApp(rec),
+                "SSV system app \(rec.bundleId) at \(rec.bundlePath) must be recognized as Apple system/first-party"
+            )
+        }
+        XCTAssertTrue(
+            InstalledAppRegistryScanner.shared.evaluateRecords(ssvRecords, includeAppStoreApps: false).isEmpty,
+            "SSV system apps must produce 0 findings when includeAppStoreApps is false"
+        )
+        XCTAssertTrue(
+            InstalledAppRegistryScanner.shared.evaluateRecords(ssvRecords, includeAppStoreApps: true).isEmpty,
+            "SSV system apps must produce 0 findings when includeAppStoreApps is true"
+        )
+
+        // 2. Genuine Apple first-party App Store app signed by Apple iPhone OS Application Signing with Apple's Team ID
+        let shortcutsFirstParty = InstalledAppRegistryRecord(
+            bundleId: "com.apple.shortcuts",
+            displayName: "快捷指令",
+            version: "7.0",
+            applicationType: "User",
+            signerIdentity: "Apple iPhone OS Application Signing",
+            profileValidated: false,
+            hasAppStoreMetadata: true,
+            teamId: "59GAB85EFG",
+            tccAllowedServices: ["kTCCServicePhotos"],
+            booleanEntitlements: ["com.apple.private.security.no-container": true],
+            bundlePath: "/private/var/containers/Bundle/Application/UUID-SHORTCUTS/Shortcuts.app"
+        )
+        XCTAssertTrue(InstalledAppRegistryScanner.shared.isAppleSystemOrFirstPartyApp(shortcutsFirstParty))
+
+        // 3. Negative controls MUST still be caught as .highRisk (isAppleSystemOrFirstPartyApp == false)
+        let trollPersistence = InstalledAppRegistryRecord(
+            bundleId: "com.apple.troll.persistence",
+            displayName: "TrollHelper",
+            version: "2.0",
+            applicationType: "System",
+            signerIdentity: nil,
+            profileValidated: false,
+            booleanEntitlements: ["com.apple.private.security.no-sandbox": true, "platform-application": true],
+            allEntitlementKeys: ["com.apple.private.security.no-sandbox", "platform-application"],
+            bundlePath: "/private/var/containers/Bundle/Application/UUID-TROLL/PersistenceHelper.app"
+        )
+        let trollTimerHijack = InstalledAppRegistryRecord(
+            bundleId: "com.apple.mobiletimer",
+            displayName: "时钟",
+            version: "1.0",
+            applicationType: "System",
+            signerIdentity: nil,
+            profileValidated: false,
+            booleanEntitlements: ["com.apple.private.security.no-sandbox": true],
+            allEntitlementKeys: ["com.apple.private.security.no-sandbox"],
+            bundlePath: "/private/var/containers/Bundle/Application/UUID-HIJACK/MobileTimer.app"
+        )
+        let rootlessJBFake = InstalledAppRegistryRecord(
+            bundleId: "com.apple.fake",
+            displayName: "RootlessFake",
+            version: "1.0",
+            applicationType: "System",
+            signerIdentity: nil,
+            profileValidated: false,
+            booleanEntitlements: ["com.apple.private.security.no-sandbox": true],
+            allEntitlementKeys: ["com.apple.private.security.no-sandbox"],
+            bundlePath: "/private/preboot/ABCD1234/jb-1234/Applications/Fake.app"
+        )
+        let adHocInApps = InstalledAppRegistryRecord(
+            bundleId: "com.apple.fake",
+            displayName: "AdHocFake",
+            version: "1.0",
+            applicationType: "System",
+            signerIdentity: "Ad Hoc",
+            profileValidated: false,
+            booleanEntitlements: ["com.apple.private.security.no-sandbox": true],
+            allEntitlementKeys: ["com.apple.private.security.no-sandbox"],
+            bundlePath: "/Applications/Fake.app"
+        )
+        let thirdPartyTeamInApps = InstalledAppRegistryRecord(
+            bundleId: "com.apple.fake",
+            displayName: "TeamFake",
+            version: "1.0",
+            applicationType: "System",
+            signerIdentity: nil,
+            profileValidated: false,
+            teamId: "EVILTEAM99",
+            booleanEntitlements: ["com.apple.private.security.no-sandbox": true],
+            allEntitlementKeys: ["com.apple.private.security.no-sandbox"],
+            bundlePath: "/Applications/Fake.app"
+        )
+        let thirdPartyGroupInApps = InstalledAppRegistryRecord(
+            bundleId: "com.apple.fake",
+            displayName: "GroupFake",
+            version: "1.0",
+            applicationType: "System",
+            signerIdentity: nil,
+            profileValidated: false,
+            appGroups: ["group.io.metamask"],
+            booleanEntitlements: ["com.apple.private.security.no-sandbox": true],
+            allEntitlementKeys: ["com.apple.private.security.no-sandbox"],
+            bundlePath: "/Applications/Fake.app"
+        )
+
+        let negativeControls = [
+            trollPersistence,
+            trollTimerHijack,
+            rootlessJBFake,
+            adHocInApps,
+            thirdPartyTeamInApps,
+            thirdPartyGroupInApps
+        ]
+        for neg in negativeControls {
+            XCTAssertFalse(
+                InstalledAppRegistryScanner.shared.isAppleSystemOrFirstPartyApp(neg),
+                "Negative control \(neg.bundleId) (\(neg.bundlePath)) MUST NOT be treated as Apple system app"
+            )
+        }
+        let negFindings = InstalledAppRegistryScanner.shared.evaluateRecords(negativeControls, includeAppStoreApps: false)
+        XCTAssertEqual(negFindings.count, negativeControls.count)
+        XCTAssertTrue(negFindings.allSatisfy { $0.riskTier == .highRisk })
+
+        // 4. DeviceCtl cryptex system path should NOT be marked as jailbreak / explicitNotAppStore
+        let cryptexCtl: [String: Any] = [
+            "bundleIdentifier": "com.apple.Safari",
+            "name": "Safari",
+            "defaultApp": true,
+            "internalApp": false,
+            "builtByDeveloper": false,
+            "url": "file:///private/preboot/Cryptexes/OS/System/Applications/Safari.app/"
+        ]
+        let parsedCryptex = InstalledAppRegistryRecord.fromDeviceCtlDictionary(cryptexCtl)
+        XCTAssertNotNil(parsedCryptex)
+        if let pc = parsedCryptex {
+            XCTAssertTrue(InstalledAppRegistryScanner.shared.isAppleSystemOrFirstPartyApp(pc))
+        }
+    }
 }
