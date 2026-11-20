@@ -8,7 +8,7 @@
 //  - Quantumult X oneTapInstallURL encoding and multi-header Accept-Encoding regex rewrite
 //  - JavaScriptCore resilience for brotli-guard.js and Stash inline JS (undeclared $response,
 //    Object.create(null), throwing toString(), prototype pollution)
-//  - v1.3.5 / Build 26 version sync & preserved "1.0.0" domain constants
+//  - v1.3.6 / Build 27 version sync & preserved "1.0.0" domain constants
 //  - WhitelistEngine, LockdownPairingFile, and IPAPackageScanner UTF-8 filename boundary checks
 //
 
@@ -87,7 +87,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
         let fakeSurge = """
         #!name=WQGuard Fake
         #!desc=Includes \(exclusions) in desc only
-        #!version=1.3.5
+        #!version=1.3.6
         #!category=Security
         [Header Rewrite]
         ^https?:// header-replace Accept-Encoding "gzip, deflate"
@@ -143,7 +143,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
         XCTAssertEqual(loonRes.missingExclusions.count, 16)
 
         let fakeStash = """
-        #!version=1.3.5
+        #!version=1.3.6
         name: "Fake Stash"
         desc: "\(exclusions)"
         http:
@@ -400,7 +400,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
         }
     }
 
-    // MARK: - 6. Version 1.3.5 / Build 26 Sync, Byte-Equality & Preserved Constants
+    // MARK: - 6. Version 1.3.6 / Build 27 Sync, Byte-Equality & Preserved Constants
 
     func testVersionSyncAcrossAllShieldsAndPreservedDomainConstants() throws {
         let physicalMap: [(ProxyShieldPlatform, String)] = [
@@ -414,7 +414,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
         for (platform, relPath) in physicalMap {
             let generated = SurgeBrotliShieldHelper.shared.generateShieldContent(for: platform)
             let physical = try String(contentsOf: repoRoot.appendingPathComponent(relPath), encoding: .utf8)
-            XCTAssertTrue(generated.contains("#!version=1.3.5"), "\(platform.shortTitleEn) generated must contain #!version=1.3.5")
+            XCTAssertTrue(generated.contains("#!version=1.3.6"), "\(platform.shortTitleEn) generated must contain #!version=1.3.6")
             XCTAssertEqual(
                 physical.trimmingCharacters(in: .whitespacesAndNewlines),
                 generated.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -427,11 +427,11 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
         let shieldsSurge = try Data(contentsOf: repoRoot.appendingPathComponent("Shields/Surge/WQGuard-Brotli-Shield.sgmodule"))
         XCTAssertEqual(legacySurge, shieldsSurge, "Surge/ and Shields/Surge/ must be byte-identical")
 
-        // Verify Info.plist carries 1.3.5 / Build 26
+        // Verify Info.plist carries 1.3.6 / Build 27
         let plistData = try Data(contentsOf: repoRoot.appendingPathComponent("WQGuard/Resources/Info.plist"))
         let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any])
-        XCTAssertEqual(plist["CFBundleShortVersionString"] as? String, "1.3.5")
-        XCTAssertEqual(plist["CFBundleVersion"] as? String, "26")
+        XCTAssertEqual(plist["CFBundleShortVersionString"] as? String, "1.3.6")
+        XCTAssertEqual(plist["CFBundleVersion"] as? String, "27")
 
         // Preserved domain constants
         XCTAssertEqual(WQGuardCLIMetadata.version, "1.0.0")
@@ -444,7 +444,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
         let highRiskHostFinding = ScanFinding(
             bundleId: "com.wqguard.app",
             displayName: "WQGuard",
-            version: "1.3.5",
+            version: "1.3.6",
             teamId: "TEAM123456",
             executablePath: "/var/containers/Bundle/Application/1234/WQGuard.app/WQGuard",
             bundlePath: "/var/containers/Bundle/Application/1234/WQGuard.app",
@@ -471,7 +471,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
         let escapingFinding = ScanFinding(
             bundleId: "com.wqguard.app",
             displayName: "WQGuard",
-            version: "1.3.5",
+            version: "1.3.6",
             teamId: "TEAM123456",
             executablePath: "/tmp/WQGuard",
             bundlePath: "/tmp/WQGuard.app",
@@ -604,7 +604,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
             .map { "        - \"\($0)\"" }
             .joined(separator: "\n")
         let fourSpaceTampered = """
-        #!version=1.3.5
+        #!version=1.3.6
         name: "Stash 4-Space Sibling Probe"
         desc: "Test"
         http:
@@ -1142,7 +1142,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
             .map { "      - \"\($0)\"" }
             .joined(separator: "\n")
         let nestedMITMStash = """
-        #!version=1.3.5
+        #!version=1.3.6
         name: "Nested MITM Probe"
         desc: "Test"
         http:
@@ -1368,7 +1368,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
             .map { "      - \"\($0)\"" }
             .joined(separator: "\n")
         let decoySeqHttpYAML = """
-        #!version=1.3.5
+        #!version=1.3.6
         name: "Decoy HTTP Sequence"
         desc: "Test"
         http:
@@ -1634,7 +1634,7 @@ final class AuditV135ShieldsAndClientTests: XCTestCase {
 
         // 3. http.mitm nested mapping (bogus:\n      - ...) must be rejected
         let nestedMapMITM = """
-        #!version=1.3.5
+        #!version=1.3.6
         name: "Nested MITM Map"
         desc: "Test"
         http:

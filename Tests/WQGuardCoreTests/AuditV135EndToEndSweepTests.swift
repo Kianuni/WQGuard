@@ -1052,7 +1052,7 @@ final class AuditV135EndToEndSweepTests: XCTestCase {
         ]
         for (platform, relPath) in physicalMap {
             let content = try String(contentsOf: repoRoot.appendingPathComponent(relPath), encoding: .utf8)
-            XCTAssertTrue(content.contains("#!version=1.3.5"), "\(relPath) missing #!version=1.3.5")
+            XCTAssertTrue(content.contains("#!version=1.3.6"), "\(relPath) missing #!version=1.3.6")
             let res = SurgeBrotliShieldHelper.shared.validateShield(content: content, for: platform)
             XCTAssertTrue(res.isCompliant, "\(relPath) failed validation: \(res.errors)")
             XCTAssertTrue(res.missingExclusions.isEmpty)
@@ -1085,12 +1085,12 @@ final class AuditV135EndToEndSweepTests: XCTestCase {
         XCTAssertNil(try runJS(setup: "")["status"])
     }
 
-    // MARK: - E2E 08: Built build/WQGuard_v1.3.5.ipa Package & Manifest Audit (No XCTSkip)
+    // MARK: - E2E 08: Built build/WQGuard_v1.3.6.ipa Package & Manifest Audit
 
     func test_e2e_08_builtV135IPAPackageAndManifestAudit() throws {
-        let ipaURL = repoRoot.appendingPathComponent("build/WQGuard_v1.3.5.ipa")
+        let ipaURL = repoRoot.appendingPathComponent("build/WQGuard_v1.3.6.ipa")
         guard FileManager.default.fileExists(atPath: ipaURL.path) else {
-            throw XCTSkip("build/WQGuard_v1.3.5.ipa not present at \(ipaURL.path)")
+            throw XCTSkip("build/WQGuard_v1.3.6.ipa not present at \(ipaURL.path)")
         }
 
         let beforeSnap = try ReadOnlyAssertions.captureSnapshot(of: [ipaURL])
@@ -1104,8 +1104,8 @@ final class AuditV135EndToEndSweepTests: XCTestCase {
         let plistEntry = try XCTUnwrap(entries.first { $0.path == "Payload/WQGuard.app/Info.plist" })
         let plistData = try reader.extract(entry: plistEntry)
         let plist = try XCTUnwrap(try PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any])
-        XCTAssertEqual(plist["CFBundleShortVersionString"] as? String, "1.3.5")
-        XCTAssertEqual(plist["CFBundleVersion"] as? String, "26")
+        XCTAssertEqual(plist["CFBundleShortVersionString"] as? String, "1.3.6")
+        XCTAssertEqual(plist["CFBundleVersion"] as? String, "27")
         XCTAssertEqual(plist["CFBundleIdentifier"] as? String, "com.wqguard.app")
 
         let execEntry = try XCTUnwrap(entries.first { $0.path == "Payload/WQGuard.app/WQGuard" })
@@ -1118,7 +1118,7 @@ final class AuditV135EndToEndSweepTests: XCTestCase {
 
         let finding = try SecurityPipeline.shared.scanIPA(at: ipaURL)
         XCTAssertEqual(finding.bundleId, "com.wqguard.app")
-        XCTAssertEqual(finding.version, "1.3.5")
+        XCTAssertEqual(finding.version, "1.3.6")
         XCTAssertEqual(finding.riskTier, .knownTool)
         XCTAssertTrue(finding.isWhitelisted)
         XCTAssertEqual(finding.whitelistedToolName, "WQGuard")
@@ -1136,7 +1136,7 @@ final class AuditV135EndToEndSweepTests: XCTestCase {
             finding.indicators.contains { ind in
                 forbiddenPrefixes.contains { ind.signature.hasPrefix($0) }
             },
-            "Built WQGuard_v1.3.5.ipa unexpectedly triggered forbidden indicator: \(finding.indicators.map(\.signature))"
+            "Built WQGuard_v1.3.6.ipa unexpectedly triggered forbidden indicator: \(finding.indicators.map(\.signature))"
         )
 
         let afterSnap = try ReadOnlyAssertions.captureSnapshot(of: [ipaURL])
@@ -1174,17 +1174,17 @@ final class AuditV135EndToEndSweepTests: XCTestCase {
     func test_e2e_10_r3RepositoryHygiene_versionSync_and_preservedConstants() throws {
         let infoData = try Data(contentsOf: repoRoot.appendingPathComponent("WQGuard/Resources/Info.plist"))
         let info = try XCTUnwrap(try PropertyListSerialization.propertyList(from: infoData, options: [], format: nil) as? [String: Any])
-        XCTAssertEqual(info["CFBundleShortVersionString"] as? String, "1.3.5")
-        XCTAssertEqual(info["CFBundleVersion"] as? String, "26")
+        XCTAssertEqual(info["CFBundleShortVersionString"] as? String, "1.3.6")
+        XCTAssertEqual(info["CFBundleVersion"] as? String, "27")
 
         let pbx = try String(contentsOf: repoRoot.appendingPathComponent("WQGuard.xcodeproj/project.pbxproj"), encoding: .utf8)
-        XCTAssertTrue(pbx.contains("MARKETING_VERSION = 1.3.5;"))
-        XCTAssertTrue(pbx.contains("CURRENT_PROJECT_VERSION = 26;"))
-        XCTAssertFalse(pbx.contains("MARKETING_VERSION = 1.3.4;"))
+        XCTAssertTrue(pbx.contains("MARKETING_VERSION = 1.3.6;"))
+        XCTAssertTrue(pbx.contains("CURRENT_PROJECT_VERSION = 27;"))
+        XCTAssertFalse(pbx.contains("MARKETING_VERSION = 1.3.5;"))
 
         let settings = try String(contentsOf: repoRoot.appendingPathComponent("WQGuard/App/Views/Settings/SettingsView.swift"), encoding: .utf8)
-        XCTAssertTrue(settings.contains("1.3.5"))
-        XCTAssertTrue(settings.contains("\"26\""))
+        XCTAssertTrue(settings.contains("1.3.6"))
+        XCTAssertTrue(settings.contains("\"27\""))
 
         XCTAssertEqual(WQGuardCLIMetadata.version, "1.0.0")
         XCTAssertEqual(ScanSession(findings: []).engineVersion, "1.0.0")

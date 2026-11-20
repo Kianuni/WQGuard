@@ -71,6 +71,7 @@ public struct ZIPArchiveEntry: Sendable, Equatable {
     public let localHeaderOffset: Int
     public let isDirectory: Bool
     public let externalFileAttributes: UInt32
+    public let isOrphanLocalEntry: Bool
 
     public init(
         path: String,
@@ -80,7 +81,8 @@ public struct ZIPArchiveEntry: Sendable, Equatable {
         crc32: UInt32,
         localHeaderOffset: Int,
         isDirectory: Bool,
-        externalFileAttributes: UInt32
+        externalFileAttributes: UInt32,
+        isOrphanLocalEntry: Bool = false
     ) {
         self.path = path
         self.compressionMethod = compressionMethod
@@ -90,6 +92,7 @@ public struct ZIPArchiveEntry: Sendable, Equatable {
         self.localHeaderOffset = localHeaderOffset
         self.isDirectory = isDirectory
         self.externalFileAttributes = externalFileAttributes
+        self.isOrphanLocalEntry = isOrphanLocalEntry
     }
 }
 
@@ -399,23 +402,7 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
                 }
             }
             
-            // Zip Slip validation: block absolute paths, Windows backslashes, NUL bytes, and ".." path segments
-            // without false-positively rejecting valid filenames containing consecutive dots (e.g. "icon..png").
-            // Also reject non-normalized empty ("//") or "." path segments (stripping a single trailing "/" for directory entries).
-            if path.hasPrefix("/") || path.contains("\\") || path.contains("\0") {
-                throw IPAPackageScannerError.zipSlipDetected(path)
-            }
-            let trimmedForSegments = path.hasSuffix("/") ? String(path.dropLast()) : path
-            let rawSegments = trimmedForSegments.split(separator: "/", omittingEmptySubsequences: false)
-            if rawSegments.contains("..") {
-                throw IPAPackageScannerError.zipSlipDetected(path)
-            }
-            if trimmedForSegments.isEmpty || rawSegments.contains("") || rawSegments.contains(".") {
-                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                    en: "Non-normalized ZIP entry path contains empty or '.' segments: \(path)",
-                    zh: "非规范化 ZIP 条目路径包含空段或 '.' 路径段: \(path)"
-                ))
-            }
+            try validateArchiveEntryPath(path)
             if uncompSize64 > UInt64(maxTotalUncompressedBytes) {
                 throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
                     en: "ZIP entry declared size (\(uncompSize64)) exceeds limit (\(maxTotalUncompressedBytes) bytes)",
@@ -467,13 +454,14 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
             cumulativeUncompressedBytes = nextCumulative
             
             let unixFileType = (extAttrs >> 16) & 0o170000
-            if unixFileType == 0o040000 && (compSize != 0 || uncompSize != 0) {
+            let isDeflatedEmptyDirPayload = (method == 8 && uncompSize == 0 && compSize > 0 && compSize <= 16)
+            if (unixFileType == 0o040000 || path.hasSuffix("/")) && (uncompSize != 0 || (compSize != 0 && !isDeflatedEmptyDirPayload)) {
                 throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
                     en: "Directory entry '\(path)' declares non-zero payload size",
                     zh: "目录条目 '\(path)' 声明了非零数据长度"
                 ))
             }
-            let isDir = path.hasSuffix("/") || (unixFileType == 0o040000 && compSize == 0 && uncompSize == 0)
+            let isDir = path.hasSuffix("/") || (unixFileType == 0o040000 && uncompSize == 0)
             entries.append(ZIPArchiveEntry(
                 path: path,
                 compressionMethod: method,
@@ -496,91 +484,418 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
             ))
         }
 
-        // Verify every local file header matches its Central Directory record and zero orphan local headers exist in [0..<cdOffset]
+        // Verify every local file header matches its Central Directory record and recover any orphan local headers in gaps
+        var orphanEntries: [ZIPArchiveEntry] = []
         if entries.isEmpty {
-            guard cdOffset == 0 else {
-                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                    en: "Empty Central Directory with non-zero archive prefix (\(cdOffset) bytes)",
-                    zh: "核心目录为空但文件头部存在未引用数据 (\(cdOffset) 字节)"
+            if cdOffset > 0 {
+                orphanEntries.append(contentsOf: try parseUnreferencedGap(
+                    from: 0,
+                    to: cdOffset,
+                    existingEntryCount: entries.count,
+                    cumulativeUncompressedBytes: &cumulativeUncompressedBytes
                 ))
             }
         } else {
             let ordered = isMonotonicOffsets ? entries : entries.sorted { $0.localHeaderOffset < $1.localHeaderOffset }
-            guard ordered[0].localHeaderOffset == 0 else {
-                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                    en: "Unreferenced leading data or orphan local header before offset \(ordered[0].localHeaderOffset)",
-                    zh: "偏移 \(ordered[0].localHeaderOffset) 之前存在未引用数据或孤立本地文件头"
+            if ordered[0].localHeaderOffset > 0 {
+                orphanEntries.append(contentsOf: try parseUnreferencedGap(
+                    from: 0,
+                    to: ordered[0].localHeaderOffset,
+                    existingEntryCount: entries.count + orphanEntries.count,
+                    cumulativeUncompressedBytes: &cumulativeUncompressedBytes
                 ))
             }
             for idx in 0..<ordered.count {
                 let validated = try validateLocalHeader(for: ordered[idx], upperBound: cdOffset)
                 let nextStart = (idx + 1 < ordered.count) ? ordered[idx + 1].localHeaderOffset : cdOffset
-                if (validated.flags & 0x0008) == 0 {
-                    guard validated.dataEnd == nextStart else {
-                        throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                            en: "Orphan local file header or unreferenced bytes detected after '\(ordered[idx].path)'",
-                            zh: "条目 '\(ordered[idx].path)' 之后检测到孤立本地文件头或未引用数据"
-                        ))
-                    }
-                } else {
-                    let descLen = nextStart - validated.dataEnd
-                    guard descLen == 12 || descLen == 16 || descLen == 20 || descLen == 24 else {
-                        throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                            en: "Malformed data descriptor or orphan local header after '\(ordered[idx].path)'",
-                            zh: "条目 '\(ordered[idx].path)' 的数据描述符异常或存在孤立本地文件头"
-                        ))
-                    }
-                    let ddStart = validated.dataEnd
-                    let ddCRC: UInt32
-                    let ddComp: UInt64
-                    let ddUncomp: UInt64
-                    if descLen == 16 || descLen == 24 {
-                        guard loadU32LE(ddStart) == 0x08074b50 else {
-                            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                                en: "Invalid data descriptor signature after '\(ordered[idx].path)'",
-                                zh: "条目 '\(ordered[idx].path)' 的数据描述符签名无效"
-                            ))
-                        }
-                        ddCRC = loadU32LE(ddStart + 4)
-                        if descLen == 16 {
-                            ddComp = UInt64(loadU32LE(ddStart + 8))
-                            ddUncomp = UInt64(loadU32LE(ddStart + 12))
-                        } else {
-                            ddComp = loadU64LE(ddStart + 8)
-                            ddUncomp = loadU64LE(ddStart + 16)
-                        }
-                    } else {
-                        let firstWord = loadU32LE(ddStart)
-                        guard firstWord != 0x04034b50 else {
-                            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                                en: "Orphan local header disguised as signatureless data descriptor after '\(ordered[idx].path)'",
-                                zh: "条目 '\(ordered[idx].path)' 之后检测到伪装成无签名数据描述符的孤立本地文件头"
-                            ))
-                        }
-                        ddCRC = firstWord
-                        if descLen == 12 {
-                            ddComp = UInt64(loadU32LE(ddStart + 4))
-                            ddUncomp = UInt64(loadU32LE(ddStart + 8))
-                        } else {
-                            ddComp = loadU64LE(ddStart + 4)
-                            ddUncomp = loadU64LE(ddStart + 12)
-                        }
-                    }
-                    let entry = ordered[idx]
-                    let crcMatches = (entry.crc32 == 0) || (ddCRC == entry.crc32)
-                    guard crcMatches,
-                          ddComp == UInt64(entry.compressedSize),
-                          ddUncomp == UInt64(entry.uncompressedSize) else {
-                        throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
-                            en: "Data descriptor CRC32 or sizes disagree with Central Directory for '\(entry.path)'",
-                            zh: "条目 '\(entry.path)' 数据描述符 CRC32 或长度与核心目录不一致"
-                        ))
-                    }
+                guard validated.dataEnd <= nextStart else {
+                    throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                        en: "Entry '\(ordered[idx].path)' payload overlaps subsequent record",
+                        zh: "条目 '\(ordered[idx].path)' 数据段与后续记录重叠"
+                    ))
+                }
+                let afterEntry = ((validated.flags & 0x0008) != 0)
+                    ? try consumeOptionalDataDescriptor(for: ordered[idx], at: validated.dataEnd, limit: nextStart)
+                    : validated.dataEnd
+                if afterEntry < nextStart {
+                    orphanEntries.append(contentsOf: try parseUnreferencedGap(
+                        from: afterEntry,
+                        to: nextStart,
+                        existingEntryCount: entries.count + orphanEntries.count,
+                        cumulativeUncompressedBytes: &cumulativeUncompressedBytes
+                    ))
                 }
             }
         }
-        
+
+        if !orphanEntries.isEmpty {
+            entries.append(contentsOf: orphanEntries)
+        }
         return entries
+    }
+
+    private func validateArchiveEntryPath(_ path: String) throws {
+        // Block absolute paths, Windows backslashes, NUL bytes, and ".." path segments
+        // without false-positively rejecting valid filenames containing consecutive dots (e.g. "icon..png").
+        // Also reject non-normalized empty ("//") or "." path segments (stripping a single trailing "/" for directory entries).
+        if path.hasPrefix("/") || path.contains("\\") || path.contains("\0") {
+            throw IPAPackageScannerError.zipSlipDetected(path)
+        }
+        let trimmedForSegments = path.hasSuffix("/") ? String(path.dropLast()) : path
+        let rawSegments = trimmedForSegments.split(separator: "/", omittingEmptySubsequences: false)
+        if rawSegments.contains("..") {
+            throw IPAPackageScannerError.zipSlipDetected(path)
+        }
+        if trimmedForSegments.isEmpty || rawSegments.contains("") || rawSegments.contains(".") {
+            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                en: "Non-normalized ZIP entry path contains empty or '.' segments: \(path)",
+                zh: "非规范化 ZIP 条目路径包含空段或 '.' 路径段: \(path)"
+            ))
+        }
+    }
+
+    private func resolveLocalHeaderZip64Sizes(
+        compRaw: UInt32,
+        uncompRaw: UInt32,
+        extraStart: Int,
+        extraEnd: Int
+    ) -> (comp64: UInt64, uncomp64: UInt64, resolvedComp: Bool, resolvedUncomp: Bool) {
+        var comp64 = UInt64(compRaw)
+        var uncomp64 = UInt64(uncompRaw)
+        var resolvedUncomp = (uncompRaw != 0xFFFF_FFFF)
+        var resolvedComp = (compRaw != 0xFFFF_FFFF)
+        if !resolvedUncomp || !resolvedComp {
+            var eCur = extraStart
+            while eCur + 4 <= extraEnd {
+                let hId = loadU16LE(eCur)
+                let dSz = Int(loadU16LE(eCur + 2))
+                eCur += 4
+                guard eCur + dSz <= extraEnd else { break }
+                if hId == 0x0001 {
+                    var zCur = eCur
+                    let zEnd = eCur + dSz
+                    if uncompRaw == 0xFFFF_FFFF, zCur + 8 <= zEnd {
+                        uncomp64 = loadU64LE(zCur)
+                        resolvedUncomp = true
+                        zCur += 8
+                    }
+                    if compRaw == 0xFFFF_FFFF, zCur + 8 <= zEnd {
+                        comp64 = loadU64LE(zCur)
+                        resolvedComp = true
+                        zCur += 8
+                    }
+                    break
+                }
+                eCur += dSz
+            }
+        }
+        return (comp64, uncomp64, resolvedComp, resolvedUncomp)
+    }
+
+    private func consumeOptionalDataDescriptor(
+        for entry: ZIPArchiveEntry,
+        at ddStart: Int,
+        limit nextStart: Int
+    ) throws -> Int {
+        let rem = nextStart - ddStart
+        guard rem >= 0 else {
+            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                en: "Malformed data descriptor or orphan local header after '\(entry.path)'",
+                zh: "条目 '\(entry.path)' 的数据描述符异常或存在孤立本地文件头"
+            ))
+        }
+        if rem == 0 {
+            return ddStart
+        }
+
+        func matchesDD(crc: UInt32, comp: UInt64, uncomp: UInt64) -> Bool {
+            let crcMatches = (entry.crc32 == 0) || (crc == entry.crc32)
+            return crcMatches
+                && comp == UInt64(entry.compressedSize)
+                && uncomp == UInt64(entry.uncompressedSize)
+        }
+
+        if rem >= 16 && loadU32LE(ddStart) == 0x0807_4b50 {
+            let ddCRC = loadU32LE(ddStart + 4)
+            let comp32 = UInt64(loadU32LE(ddStart + 8))
+            let uncomp32 = UInt64(loadU32LE(ddStart + 12))
+            if rem >= 24 {
+                let comp64 = loadU64LE(ddStart + 8)
+                let uncomp64 = loadU64LE(ddStart + 16)
+                if rem == 24 && matchesDD(crc: ddCRC, comp: comp64, uncomp: uncomp64) {
+                    return ddStart + 24
+                }
+                if matchesDD(crc: ddCRC, comp: comp32, uncomp: uncomp32)
+                    && (data[ddStart + 16] == 0x00
+                        || (rem >= 20 && loadU32LE(ddStart + 16) == 0x0403_4b50)
+                        || !matchesDD(crc: ddCRC, comp: comp64, uncomp: uncomp64)) {
+                    return ddStart + 16
+                }
+                if matchesDD(crc: ddCRC, comp: comp64, uncomp: uncomp64) {
+                    return ddStart + 24
+                }
+            } else if matchesDD(crc: ddCRC, comp: comp32, uncomp: uncomp32) {
+                return ddStart + 16
+            }
+            throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                en: "Data descriptor CRC32 or sizes disagree with Central Directory for '\(entry.path)'",
+                zh: "条目 '\(entry.path)' 数据描述符 CRC32 或长度与核心目录不一致"
+            ))
+        }
+
+        if rem >= 4 && loadU32LE(ddStart) == 0x0403_4b50 {
+            guard rem >= 30 else {
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "Orphan local header disguised as signatureless data descriptor after '\(entry.path)'",
+                    zh: "条目 '\(entry.path)' 之后检测到伪装成无签名数据描述符的孤立本地文件头"
+                ))
+            }
+            return ddStart
+        }
+
+        if rem == 20 {
+            let ddCRC = loadU32LE(ddStart)
+            let comp64 = loadU64LE(ddStart + 4)
+            let uncomp64 = loadU64LE(ddStart + 12)
+            if matchesDD(crc: ddCRC, comp: comp64, uncomp: uncomp64) {
+                return ddStart + 20
+            }
+        }
+        if rem >= 12 {
+            let ddCRC = loadU32LE(ddStart)
+            let comp32 = UInt64(loadU32LE(ddStart + 4))
+            let uncomp32 = UInt64(loadU32LE(ddStart + 8))
+            if matchesDD(crc: ddCRC, comp: comp32, uncomp: uncomp32)
+                && (rem == 12
+                    || data[ddStart + 12] == 0x00
+                    || (rem >= 16 && loadU32LE(ddStart + 12) == 0x0403_4b50)) {
+                return ddStart + 12
+            }
+        }
+        if rem >= 20 {
+            let ddCRC = loadU32LE(ddStart)
+            let comp64 = loadU64LE(ddStart + 4)
+            let uncomp64 = loadU64LE(ddStart + 12)
+            if matchesDD(crc: ddCRC, comp: comp64, uncomp: uncomp64) {
+                return ddStart + 20
+            }
+        }
+
+        if data[ddStart] == 0x00 {
+            var z = ddStart
+            while z < nextStart && data[z] == 0x00 && (z - ddStart) <= 65_536 {
+                z += 1
+            }
+            if (z - ddStart) <= 65_536 && (z == nextStart || (nextStart - z >= 30 && loadU32LE(z) == 0x0403_4b50)) {
+                return z
+            }
+        }
+
+        throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+            en: "Malformed data descriptor or orphan local header after '\(entry.path)'",
+            zh: "条目 '\(entry.path)' 的数据描述符异常或存在孤立本地文件头"
+        ))
+    }
+
+    private func parseUnreferencedGap(
+        from gapStart: Int,
+        to gapEnd: Int,
+        existingEntryCount: Int,
+        cumulativeUncompressedBytes: inout Int
+    ) throws -> [ZIPArchiveEntry] {
+        var orphans: [ZIPArchiveEntry] = []
+        var cur = gapStart
+
+        @discardableResult
+        func appendOrphan(
+            path: String,
+            method: UInt16,
+            comp: Int,
+            uncomp: Int,
+            crc: UInt32,
+            localOffset: Int
+        ) throws -> ZIPArchiveEntry {
+            let isDir = path.hasSuffix("/")
+            let isDeflatedEmptyDirPayload = (method == 8 && uncomp == 0 && comp > 0 && comp <= 16)
+            if isDir && (uncomp != 0 || (comp != 0 && !isDeflatedEmptyDirPayload)) {
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "Directory entry '\(path)' declares non-zero payload size",
+                    zh: "目录条目 '\(path)' 声明了非零数据长度"
+                ))
+            }
+            guard existingEntryCount + orphans.count < maxEntries else {
+                throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                    en: "Total ZIP entries exceed limit (\(maxEntries))",
+                    zh: "ZIP 条目总数超过上限 (\(maxEntries))"
+                ))
+            }
+            let (nextCumulative, overflow) = cumulativeUncompressedBytes.addingReportingOverflow(uncomp)
+            if overflow || nextCumulative > maxTotalUncompressedBytes {
+                throw IPAPackageScannerError.quotaExceeded(WQLocale.pick(
+                    en: "Total declared uncompressed size exceeds limit (\(maxTotalUncompressedBytes) bytes)",
+                    zh: "解压总数据量超过上限 (\(maxTotalUncompressedBytes) 字节)"
+                ))
+            }
+            cumulativeUncompressedBytes = nextCumulative
+            let entry = ZIPArchiveEntry(
+                path: path,
+                compressionMethod: method,
+                compressedSize: comp,
+                uncompressedSize: uncomp,
+                crc32: crc,
+                localHeaderOffset: localOffset,
+                isDirectory: isDir,
+                externalFileAttributes: 0,
+                isOrphanLocalEntry: true
+            )
+            orphans.append(entry)
+            return entry
+        }
+
+        while cur < gapEnd {
+            var padCount = 0
+            while cur < gapEnd && data[cur] == 0x00 {
+                cur += 1
+                padCount += 1
+                if padCount > 65_536 {
+                    throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                        en: "Excessive unreferenced NUL padding bytes at offset \(cur)",
+                        zh: "偏移 \(cur) 处存在过量未引用空填充字节"
+                    ))
+                }
+            }
+            if cur == gapEnd {
+                break
+            }
+            guard gapEnd - cur >= 30, loadU32LE(cur) == 0x0403_4b50 else {
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "Orphan local file header or unreferenced bytes detected at offset \(cur)",
+                    zh: "偏移 \(cur) 处检测到孤立本地文件头或未引用数据"
+                ))
+            }
+
+            let oFlags = loadU16LE(cur + 6)
+            if (oFlags & 0x0041) != 0 {
+                throw IPAPackageScannerError.encryptedArchiveNotSupported
+            }
+            let oMethod = loadU16LE(cur + 8)
+            guard oMethod == 0 || oMethod == 8 else {
+                throw IPAPackageScannerError.unsupportedCompressionMethod(oMethod)
+            }
+            let oCRC = loadU32LE(cur + 14)
+            let oCompRaw = loadU32LE(cur + 18)
+            let oUncompRaw = loadU32LE(cur + 22)
+            let oNameLen = Int(loadU16LE(cur + 26))
+            let oExtraLen = Int(loadU16LE(cur + 28))
+            let headerLen = 30 + oNameLen + oExtraLen
+            guard headerLen <= gapEnd - cur else {
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "Truncated orphan local file header at offset \(cur)",
+                    zh: "偏移 \(cur) 处孤立本地文件头被截断"
+                ))
+            }
+
+            let oPath = String(decoding: data.subdata(in: (cur + 30)..<(cur + 30 + oNameLen)), as: UTF8.self)
+            try validateArchiveEntryPath(oPath)
+
+            let extraStart = cur + 30 + oNameLen
+            let dataStart = cur + headerLen
+            let (oComp64, oUncomp64, resolvedComp, resolvedUncomp) = resolveLocalHeaderZip64Sizes(
+                compRaw: oCompRaw,
+                uncompRaw: oUncompRaw,
+                extraStart: extraStart,
+                extraEnd: dataStart
+            )
+
+            if (oFlags & 0x0008) == 0 || oComp64 > 0 || (oMethod == 0 && oUncomp64 == 0 && oPath.hasSuffix("/")) {
+                guard resolvedComp,
+                      resolvedUncomp,
+                      oUncomp64 <= UInt64(maxTotalUncompressedBytes),
+                      oComp64 <= UInt64(gapEnd - dataStart) else {
+                    throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                        en: "Orphan local file header size exceeds gap bounds for '\(oPath)'",
+                        zh: "孤立本地文件头 '\(oPath)' 长度超出间隔边界"
+                    ))
+                }
+                let oComp = Int(oComp64)
+                let oUncomp = Int(oUncomp64)
+                let dataEnd = dataStart + oComp
+                let oEntry = try appendOrphan(
+                    path: oPath,
+                    method: oMethod,
+                    comp: oComp,
+                    uncomp: oUncomp,
+                    crc: oCRC,
+                    localOffset: cur
+                )
+                cur = ((oFlags & 0x0008) != 0)
+                    ? try consumeOptionalDataDescriptor(for: oEntry, at: dataEnd, limit: gapEnd)
+                    : dataEnd
+            } else if dataStart == gapEnd {
+                try appendOrphan(path: oPath, method: oMethod, comp: 0, uncomp: 0, crc: oCRC, localOffset: cur)
+                cur = gapEnd
+            } else {
+                var matchedEnd: Int? = nil
+                var matchedCRC: UInt32 = oCRC
+                var matchedComp = 0
+                var matchedUncomp = 0
+                if gapEnd - dataStart >= 16 {
+                    let scanLimit = gapEnd - 16
+                    var pos = dataStart
+                    while pos <= scanLimit {
+                        if loadU32LE(pos) == 0x0807_4b50 {
+                            let candComp = UInt64(pos - dataStart)
+                            let candCRC = loadU32LE(pos + 4)
+                            let comp32 = UInt64(loadU32LE(pos + 8))
+                            let uncomp32 = UInt64(loadU32LE(pos + 12))
+                            if pos + 24 <= gapEnd {
+                                let comp64 = loadU64LE(pos + 8)
+                                let uncomp64 = loadU64LE(pos + 16)
+                                if comp64 == candComp, uncomp64 <= UInt64(maxTotalUncompressedBytes),
+                                   (pos + 24 == gapEnd
+                                    || data[pos + 24] == 0x00
+                                    || (pos + 28 <= gapEnd && loadU32LE(pos + 24) == 0x0403_4b50))
+                                    && !(comp32 == candComp && uncomp32 > 0) {
+                                    matchedCRC = candCRC
+                                    matchedComp = Int(candComp)
+                                    matchedUncomp = Int(uncomp64)
+                                    matchedEnd = pos + 24
+                                    break
+                                }
+                            }
+                            if comp32 == candComp, uncomp32 <= UInt64(maxTotalUncompressedBytes) {
+                                matchedCRC = candCRC
+                                matchedComp = Int(candComp)
+                                matchedUncomp = Int(uncomp32)
+                                matchedEnd = pos + 16
+                                break
+                            }
+                        }
+                        pos += 1
+                    }
+                }
+                if let endCursor = matchedEnd {
+                    try appendOrphan(
+                        path: oPath,
+                        method: oMethod,
+                        comp: matchedComp,
+                        uncomp: matchedUncomp,
+                        crc: matchedCRC,
+                        localOffset: cur
+                    )
+                    cur = endCursor
+                } else if gapEnd - dataStart >= 30 && loadU32LE(dataStart) == 0x0403_4b50 && oMethod == 0 {
+                    try appendOrphan(path: oPath, method: oMethod, comp: 0, uncomp: 0, crc: oCRC, localOffset: cur)
+                    cur = dataStart
+                } else {
+                    throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                        en: "Malformed data descriptor or orphan local header after '\(oPath)'",
+                        zh: "条目 '\(oPath)' 的数据描述符异常或存在孤立本地文件头"
+                    ))
+                }
+            }
+        }
+        return orphans
     }
 
     /// Validates that a local file header agrees with its Central Directory entry on magic, encryption flag,
@@ -653,41 +968,26 @@ public final class NativeZIPArchiveReader: @unchecked Sendable {
         let dataEnd = dataStart + entry.compressedSize
 
         if (localFlags & 0x0008) == 0 {
-            var localComp64 = UInt64(localCompRaw)
-            var localUncomp64 = UInt64(localUncompRaw)
-            var resolvedLocalUncomp = (localUncompRaw != 0xFFFF_FFFF)
-            var resolvedLocalComp = (localCompRaw != 0xFFFF_FFFF)
-            if !resolvedLocalUncomp || !resolvedLocalComp {
-                let extraStart = localOffset + 30 + nameLen
-                var eCur = extraStart
-                while eCur + 4 <= dataStart {
-                    let hId = loadU16LE(eCur)
-                    let dSz = Int(loadU16LE(eCur + 2))
-                    eCur += 4
-                    guard eCur + dSz <= dataStart else { break }
-                    if hId == 0x0001 {
-                        var zCur = eCur
-                        let zEnd = eCur + dSz
-                        if localUncompRaw == 0xFFFF_FFFF, zCur + 8 <= zEnd {
-                            localUncomp64 = loadU64LE(zCur)
-                            resolvedLocalUncomp = true
-                            zCur += 8
-                        }
-                        if localCompRaw == 0xFFFF_FFFF, zCur + 8 <= zEnd {
-                            localComp64 = loadU64LE(zCur)
-                            resolvedLocalComp = true
-                            zCur += 8
-                        }
-                        break
-                    }
-                    eCur += dSz
-                }
-            }
+            let (localComp64, localUncomp64, resolvedLocalComp, resolvedLocalUncomp) = resolveLocalHeaderZip64Sizes(
+                compRaw: localCompRaw,
+                uncompRaw: localUncompRaw,
+                extraStart: localOffset + 30 + nameLen,
+                extraEnd: dataStart
+            )
             guard resolvedLocalUncomp,
                   resolvedLocalComp,
                   localCRC == entry.crc32,
                   localComp64 == UInt64(entry.compressedSize),
                   localUncomp64 == UInt64(entry.uncompressedSize) else {
+                throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
+                    en: "Local file header CRC32 or sizes disagree with Central Directory for '\(entry.path)'",
+                    zh: "本地文件头 CRC32 或长度与核心目录不一致: \(entry.path)"
+                ))
+            }
+        } else if !entry.isOrphanLocalEntry {
+            if (localCRC != 0 && entry.crc32 != 0 && localCRC != entry.crc32)
+                || (localCompRaw != 0 && localCompRaw != 0xFFFF_FFFF && UInt64(localCompRaw) != UInt64(entry.compressedSize))
+                || (localUncompRaw != 0 && localUncompRaw != 0xFFFF_FFFF && UInt64(localUncompRaw) != UInt64(entry.uncompressedSize)) {
                 throw IPAPackageScannerError.corruptHeader(WQLocale.pick(
                     en: "Local file header CRC32 or sizes disagree with Central Directory for '\(entry.path)'",
                     zh: "本地文件头 CRC32 或长度与核心目录不一致: \(entry.path)"
@@ -1106,12 +1406,14 @@ public final class IPAPackageScanner: @unchecked Sendable {
         let ipaData = try Self.readBoundedRegularFileDirectNoFollow(at: ipaURL, maxBytes: 1024 * 1024 * 1024)
         let reader = NativeZIPArchiveReader(data: ipaData)
         let entries = try reader.readCentralDirectory()
+        let cdEntries = entries.filter { !$0.isOrphanLocalEntry }
+        let rootDiscoveryEntries = cdEntries.isEmpty ? entries : cdEntries
         
         // Discover all top-level Payload/*.app (or payload/*.app) bundles and reject archives smuggling multiple .app roots
         var distinctLowerAppRoots: Set<String> = []
         var distinctExactAppRoots: Set<String> = []
         var primaryAppBundle: (bundleName: String, bundlePrefix: String)? = nil
-        for e in entries {
+        for e in rootDiscoveryEntries {
             let p = e.path
             guard p.hasPrefix("Payload/") || p.hasPrefix("payload/") else { continue }
             let comps = p.split(separator: "/")
@@ -1157,7 +1459,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
         // Pass 1: Collect archive POSIX symlink entries (S_IFLNK = 0o120000) in memory without materializing OS symlinks on disk
         var archiveSymlinks: [String: (target: String, isExec: Bool)] = [:]
         var seenSymlinkLowerKeys: Set<String> = []
-        for entry in entries where entry.path.hasPrefix(appBundlePrefix) {
+        for entry in cdEntries where entry.path.hasPrefix(appBundlePrefix) {
             let rawRelative = String(entry.path.dropFirst(appBundlePrefix.count))
             let cleanComps = rawRelative.split(separator: "/").filter { !$0.isEmpty && $0 != "." }
             guard !cleanComps.isEmpty else { continue }
@@ -1210,7 +1512,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
         var duplicateCounter = 0
         var extractedRelPaths: Set<String> = []
         var archiveRegularAncestorPrefixes: Set<String> = []
-        for entry in entries where entry.path.hasPrefix(appBundlePrefix) {
+        for entry in cdEntries where entry.path.hasPrefix(appBundlePrefix) {
             let rawRelative = String(entry.path.dropFirst(appBundlePrefix.count))
             let cleanComps = rawRelative.split(separator: "/").filter { !$0.isEmpty && $0 != "." }
             guard !cleanComps.isEmpty else { continue }
@@ -1280,6 +1582,38 @@ public final class IPAPackageScanner: @unchecked Sendable {
                         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: writeURL.path)
                     }
                 }
+            }
+        }
+
+        // Pass 2b: Inspect any orphan/unreferenced local header entries containing Mach-O binaries or dylibs
+        // under isolated filenames so hidden executables in uncompacted archives are always audited without touching active bundle files.
+        for entry in entries where entry.isOrphanLocalEntry && entry.path.hasPrefix(appBundlePrefix) {
+            let rawRelative = String(entry.path.dropFirst(appBundlePrefix.count))
+            let cleanComps = rawRelative.split(separator: "/").filter { !$0.isEmpty && $0 != "." }
+            guard !cleanComps.isEmpty else { continue }
+            let cleanRel = cleanComps.joined(separator: "/")
+
+            let destURL = bundleURL.appendingPathComponent(cleanRel)
+            let destCanonical = Self.lexicalStandardizedPath(destURL.path)
+            guard destCanonical.hasPrefix(sandboxCanonicalPath + "/") || destCanonical == sandboxCanonicalPath,
+                  destCanonical.hasPrefix(bundleCanonicalPath + "/") || destCanonical == bundleCanonicalPath else {
+                throw IPAPackageScannerError.zipSlipDetected(entry.path)
+            }
+            guard !entry.isDirectory else { continue }
+
+            let ext = destURL.pathExtension.lowercased()
+            let prefix = try reader.peekMachOHeaderPrefix(entry: entry)
+            if Self.isMachOOrFatMagic(prefix, fileSize: entry.uncompressedSize) || ext == "dylib" {
+                let parentDir = destURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                let fileData = try reader.extract(entry: entry)
+                duplicateCounter += 1
+                let orphanName = ext.isEmpty
+                    ? ".__wqg_orphan_\(duplicateCounter)__"
+                    : ".__wqg_orphan_\(duplicateCounter)__.\(ext)"
+                let writeURL = parentDir.appendingPathComponent(orphanName)
+                try fileData.write(to: writeURL, options: .atomic)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: writeURL.path)
             }
         }
 
@@ -1710,7 +2044,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
         let capturedExtracted = extractedRelPaths
         let makeArchiveLookup: (_ subBundleRelPath: String?) -> CSBlobParser.ArchiveBundleResourceLookup = { subBundleRelPath in
             Self.makeArchiveBundleResourceLookup(
-                entries: entries,
+                entries: cdEntries,
                 reader: reader,
                 appBundlePrefix: appBundlePrefix,
                 subBundleRelPath: subBundleRelPath,
@@ -1940,6 +2274,15 @@ public final class IPAPackageScanner: @unchecked Sendable {
                 hasExplicitSlotSealTampering = true
                 sealTamperingLocations.append("_CodeSignature/CodeResources (Special Slot -3)")
             }
+            if archiveEntries.contains(where: { $0.isOrphanLocalEntry && $0.path.hasPrefix(appBundlePrefix) }) {
+                if codeSigTrust == .appleAppStoreVerified || verifiedSignerKind != .none {
+                    codeSigTrust = .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    verifiedSignerKind = .none
+                    hasBundleSealTampering = true
+                    hasExplicitSlotSealTampering = true
+                    sealTamperingLocations.append("Unreferenced ZIP Local Header")
+                }
+            }
             let mainHasMissingCS = CSBlobParser.hasMissingCodeSignature(inSlices: mainSlices)
             var bundleSigTrust = codeSigTrust
             var bundleHasMissingCS = mainHasMissingCS
@@ -1947,7 +2290,7 @@ public final class IPAPackageScanner: @unchecked Sendable {
             var appHasMissingCS = mainHasMissingCS
             let expectedPrimaryProvKey = NativeZIPArchiveReader.canonicalArchivePathKey(appBundlePrefix + "embedded.mobileprovision")
             let hasArchiveMobileProvision = archiveEntries.contains { e in
-                !e.isDirectory && NativeZIPArchiveReader.canonicalArchivePathKey(e.path) == expectedPrimaryProvKey
+                !e.isDirectory && !e.isOrphanLocalEntry && NativeZIPArchiveReader.canonicalArchivePathKey(e.path) == expectedPrimaryProvKey
             }
             var channelResult = ChannelClassifier.classifyBundle(
                 at: bundleURL,

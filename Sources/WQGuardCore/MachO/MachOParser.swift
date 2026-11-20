@@ -2101,19 +2101,24 @@ public struct MachOFile: Sendable {
                                     lo = hi
                                 }
                             }
-                            let chunkCount = chunks.count
+                            let immutableChunks = chunks
+                            let chunkCount = immutableChunks.count
+                            final class ChunkResultsBox: @unchecked Sendable {
+                                var items: [[(str: String, isExact: Bool)]]
+                                init(count: Int) { self.items = Array(repeating: [], count: count) }
+                            }
                             let resultsLock = NSLock()
-                            var perChunkResults = [[(str: String, isExact: Bool)]](repeating: [], count: chunkCount)
+                            let resultsBox = ChunkResultsBox(count: chunkCount)
                             DispatchQueue.concurrentPerform(iterations: chunkCount) { idx in
                                 var localMatches: [(str: String, isExact: Bool)] = []
-                                scanSensitiveChunk(chunks[idx].range, minBack: chunks[idx].minBack, outMatches: &localMatches)
+                                scanSensitiveChunk(immutableChunks[idx].range, minBack: immutableChunks[idx].minBack, outMatches: &localMatches)
                                 if !localMatches.isEmpty {
                                     resultsLock.lock()
-                                    perChunkResults[idx] = localMatches
+                                    resultsBox.items[idx] = localMatches
                                     resultsLock.unlock()
                                 }
                             }
-                            for localList in perChunkResults {
+                            for localList in resultsBox.items {
                                 for item in localList {
                                     if item.isExact {
                                         if selectors.count < maxTotalSelectors + 1_024 && seen.insert(item.str).inserted {

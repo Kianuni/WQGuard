@@ -5180,4 +5180,197 @@ final class AuditV135Vector4AndParsersTests: XCTestCase {
         let parsedBomBin = try MachOParser.parse(data: bomBin)
         XCTAssertEqual(parsedBomBin.embeddedInfoPlist?["CFBundleIdentifier"] as? String, "com.r9.wsbom")
     }
+
+    // MARK: - Issue #2 Real-World IPA ZIP Edge Cases (GPFlag 0x0008 Without DD, Deflated Dirs, Zero Padding, Uncompacted Orphans)
+
+    func test_issue2_realWorldIPA_gpFlagBit3WithoutDD_deflatedDir_zeroPad_andUncompactedAppex_scansCleanlyWhileCatchingOrphanMachO() throws {
+        let dir = try makeTempDir(prefix: "issue2_zip")
+        let cleanMain = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            symbols: ["_main"],
+            textInstructions: [0xD65F_03C0]
+        ))
+        let cleanExtExec = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            symbols: ["_NSExtensionMain"],
+            textInstructions: [0xD65F_03C0]
+        ))
+        let evilExtExec = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
+            symbols: ["_main"],
+            textInstructions: [0xD400_1001, 0xD65F_03C0]
+        ))
+
+        let mainPlist = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "com.picsart.studio",
+            "CFBundleExecutable": "Picsart",
+            "CFBundleShortVersionString": "1.0"
+        ], format: .xml, options: 0)
+        let extPlist = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "com.picsart.studio.CommentPushExtension",
+            "CFBundleExecutable": "CommentPushExtension",
+            "CFBundleShortVersionString": "1.0"
+        ], format: .xml, options: 0)
+
+        struct Issue2ZipItem {
+            var path: String
+            var payload: Data
+            var method: UInt16 = 0
+            var gpFlags: UInt16 = 0
+            var unixMode: UInt32 = 0o100644
+            var localZeroFields: Bool = false
+            var localCompOverride: UInt32? = nil
+            var trailingGap: Data = Data()
+            var omitFromCD: Bool = false
+        }
+
+        func crc32(_ data: Data) -> UInt32 {
+            data.withUnsafeBytes { raw in
+                guard let base = raw.bindMemory(to: Bytef.self).baseAddress else { return 0 }
+                return UInt32(truncatingIfNeeded: zlib.crc32(0, base, uInt(data.count)))
+            }
+        }
+
+        func appendLe16(_ d: inout Data, _ v: UInt16) {
+            var le = v.littleEndian
+            d.append(Data(bytes: &le, count: 2))
+        }
+        func appendLe32(_ d: inout Data, _ v: UInt32) {
+            var le = v.littleEndian
+            d.append(Data(bytes: &le, count: 4))
+        }
+
+        func assembleZip(_ items: [Issue2ZipItem]) -> Data {
+            var archive = Data()
+            var cd = Data()
+            var cdCount: UInt16 = 0
+            for item in items {
+                let off = UInt32(archive.count)
+                let nameData = Data(item.path.utf8)
+                let itemCRC = crc32(item.payload)
+                let lComp = item.localCompOverride ?? (item.localZeroFields ? 0 : UInt32(item.payload.count))
+                let lUncomp = item.localZeroFields ? 0 : UInt32(item.method == 8 && item.path.hasSuffix("/") ? 0 : item.payload.count)
+                let lCRC = item.localZeroFields ? 0 : itemCRC
+
+                var lh = Data()
+                appendLe32(&lh, 0x0403_4b50)
+                appendLe16(&lh, 20)
+                appendLe16(&lh, item.gpFlags)
+                appendLe16(&lh, item.method)
+                appendLe16(&lh, 0); appendLe16(&lh, 0)
+                appendLe32(&lh, lCRC)
+                appendLe32(&lh, lComp)
+                appendLe32(&lh, lUncomp)
+                appendLe16(&lh, UInt16(nameData.count))
+                appendLe16(&lh, 0)
+                archive.append(lh)
+                archive.append(nameData)
+                archive.append(item.payload)
+                archive.append(item.trailingGap)
+
+                guard !item.omitFromCD else { continue }
+                cdCount &+= 1
+                var cdr = Data()
+                appendLe32(&cdr, 0x0201_4b50)
+                appendLe16(&cdr, 0x0314); appendLe16(&cdr, 20)
+                appendLe16(&cdr, item.gpFlags)
+                appendLe16(&cdr, item.method)
+                appendLe16(&cdr, 0); appendLe16(&cdr, 0)
+                appendLe32(&cdr, itemCRC)
+                appendLe32(&cdr, UInt32(item.payload.count))
+                appendLe32(&cdr, UInt32(item.method == 8 && item.path.hasSuffix("/") ? 0 : item.payload.count))
+                appendLe16(&cdr, UInt16(nameData.count))
+                appendLe16(&cdr, 0); appendLe16(&cdr, 0); appendLe16(&cdr, 0); appendLe16(&cdr, 0)
+                appendLe32(&cdr, item.unixMode << 16)
+                appendLe32(&cdr, off)
+                cd.append(cdr)
+                cd.append(nameData)
+            }
+            let cdOff = UInt32(archive.count)
+            archive.append(cd)
+            appendLe32(&archive, 0x0605_4b50)
+            appendLe16(&archive, 0); appendLe16(&archive, 0)
+            appendLe16(&archive, cdCount); appendLe16(&archive, cdCount)
+            appendLe32(&archive, UInt32(cd.count))
+            appendLe32(&archive, cdOff)
+            appendLe16(&archive, 0)
+            return archive
+        }
+
+        // 1. Real-world `.appex` entries with GPFlag 0x0808 (bit 3 set, descLen == 0), deflated empty directory (`0x03 0x00`),
+        //    16-byte Data Descriptor + NUL alignment padding, and an uncompacted superseded Info.plist orphan header.
+        let extPlistCRC = crc32(extPlist)
+        var ddAndZeroPad = Data()
+        appendLe32(&ddAndZeroPad, 0x0807_4b50)
+        appendLe32(&ddAndZeroPad, extPlistCRC)
+        appendLe32(&ddAndZeroPad, UInt32(extPlist.count))
+        appendLe32(&ddAndZeroPad, UInt32(extPlist.count))
+        ddAndZeroPad.append(Data(repeating: 0x00, count: 8))
+
+        let compatZip = assembleZip([
+            Issue2ZipItem(path: "Payload/Picsart.app/PlugIns/CommentPushExtension.appex/Info.plist", payload: extPlist, omitFromCD: true),
+            Issue2ZipItem(path: "Payload/", payload: Data(), unixMode: 0o040755),
+            Issue2ZipItem(path: "Payload/Picsart.app/", payload: Data(), unixMode: 0o040755),
+            Issue2ZipItem(path: "Payload/Picsart.app/PlugIns/", payload: Data(), unixMode: 0o040755),
+            Issue2ZipItem(
+                path: "Payload/Picsart.app/PlugIns/CommentPushExtension.appex/",
+                payload: Data([0x03, 0x00]),
+                method: 8,
+                gpFlags: 0x0808,
+                unixMode: 0o040755
+            ),
+            Issue2ZipItem(
+                path: "Payload/Picsart.app/PlugIns/CommentPushExtension.appex/Info.plist",
+                payload: extPlist,
+                gpFlags: 0x0808,
+                localZeroFields: true,
+                trailingGap: ddAndZeroPad
+            ),
+            Issue2ZipItem(
+                path: "Payload/Picsart.app/PlugIns/CommentPushExtension.appex/CommentPushExtension",
+                payload: cleanExtExec,
+                gpFlags: 0x0808,
+                unixMode: 0o100755,
+                trailingGap: Data(repeating: 0x00, count: 4)
+            ),
+            Issue2ZipItem(path: "Payload/Picsart.app/Info.plist", payload: mainPlist, gpFlags: 0x0008),
+            Issue2ZipItem(path: "Payload/Picsart.app/Picsart", payload: cleanMain, unixMode: 0o100755)
+        ])
+        let compatURL = dir.appendingPathComponent("compat_picsart.ipa")
+        try compatZip.write(to: compatURL)
+        let compatFinding = try IPAPackageScanner.shared.scan(ipaURL: compatURL)
+        XCTAssertEqual(compatFinding.bundleId, "com.picsart.studio")
+        XCTAssertEqual(compatFinding.riskTier, .safe)
+
+        // 2. Uncompacted archive smuggling an unreferenced orphan Mach-O carrying `svc #0x80` MUST still be caught `.highRisk`
+        let orphanMachOZip = assembleZip([
+            Issue2ZipItem(path: "Payload/Picsart.app/Info.plist", payload: mainPlist),
+            Issue2ZipItem(path: "Payload/Picsart.app/Picsart", payload: cleanMain, unixMode: 0o100755),
+            Issue2ZipItem(
+                path: "Payload/Picsart.app/PlugIns/CommentPushExtension.appex/HiddenEvil",
+                payload: evilExtExec,
+                unixMode: 0o100755,
+                omitFromCD: true
+            )
+        ])
+        let orphanMachOURL = dir.appendingPathComponent("orphan_evil_macho.ipa")
+        try orphanMachOZip.write(to: orphanMachOURL)
+        let orphanFinding = try IPAPackageScanner.shared.scan(ipaURL: orphanMachOURL)
+        XCTAssertEqual(orphanFinding.riskTier, .highRisk)
+        XCTAssertTrue(orphanFinding.indicators.contains { $0.signature == "arm64:svc_0x80" })
+
+        // 3. Conflicting non-zero Local Header compressedSize when GPFlag 0x0008 is set and DD omitted -> still rejected as corruptHeader
+        let conflictBit3Zip = assembleZip([
+            Issue2ZipItem(path: "Payload/Picsart.app/Info.plist", payload: mainPlist, gpFlags: 0x0008, localCompOverride: 1),
+            Issue2ZipItem(path: "Payload/Picsart.app/Picsart", payload: cleanMain, unixMode: 0o100755)
+        ])
+        let conflictBit3URL = dir.appendingPathComponent("conflict_bit3.ipa")
+        try conflictBit3Zip.write(to: conflictBit3URL)
+        XCTAssertThrowsError(try IPAPackageScanner.shared.scan(ipaURL: conflictBit3URL)) { err in
+            guard case IPAPackageScannerError.corruptHeader = err else {
+                XCTFail("Expected corruptHeader on conflicting bit-3 local size, got \(err)")
+                return
+            }
+        }
+    }
 }
