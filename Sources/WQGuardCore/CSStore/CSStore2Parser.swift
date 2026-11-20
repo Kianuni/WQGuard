@@ -135,6 +135,13 @@ public final class CSStore2Parser: Sendable {
         CSLayoutSpec(label: "27.2d", bundleSize: 0x25c, bundleIDOffset: 0x10, containerOffset: 0x6c, nameOffset: 0x70, displayNameOffset: 0x78, bundlePathOffset: 0x00, pluginSize: 0x120, pluginBundleIDOffset: 0x00, pluginContainerOffset: 0x58),
     ]
 
+    private static let pluginIndices0x104: [Int] = supportedLayouts.enumerated().compactMap { $0.element.pluginSize == 0x104 ? $0.offset : nil }
+    private static let pluginIndices0x118: [Int] = supportedLayouts.enumerated().compactMap { $0.element.pluginSize == 0x118 ? $0.offset : nil }
+    private static let pluginIndices0x120: [Int] = supportedLayouts.enumerated().compactMap { $0.element.pluginSize == 0x120 ? $0.offset : nil }
+    private static let bundleIndices0x23c: [Int] = supportedLayouts.enumerated().compactMap { $0.element.bundleSize == 0x23c ? $0.offset : nil }
+    private static let bundleIndices0x250: [Int] = supportedLayouts.enumerated().compactMap { $0.element.bundleSize == 0x250 ? $0.offset : nil }
+    private static let bundleIndices0x25c: [Int] = supportedLayouts.enumerated().compactMap { $0.element.bundleSize == 0x25c ? $0.offset : nil }
+
     /// Built-in localized Chinese display names for system and popular third-party applications.
     public static let builtInChineseNames: [String: String] = [
         "com.apple.AppStore": "App Store",
@@ -303,66 +310,96 @@ public final class CSStore2Parser: Sendable {
         let minRecordSize = layouts.reduce(Int.max) { acc, l in
             min(acc, min(Int(l.pluginSize), Int(l.bundleSize)))
         }
+        let maxBundleRecEntries = Self.maxBundleRecords * 5
+        let maxPluginEntries = Self.maxBundleRecords * 2
+        let p0x104 = Self.pluginIndices0x104
+        let p0x118 = Self.pluginIndices0x118
+        let p0x120 = Self.pluginIndices0x120
+        let b0x23c = Self.bundleIndices0x23c
+        let b0x250 = Self.bundleIndices0x250
+        let b0x25c = Self.bundleIndices0x25c
+
         data.withUnsafeBytes { rawBuffer in
             let bytes = rawBuffer.bindMemory(to: UInt8.self).baseAddress!
-
             var o = 0
             while o + 8 + minRecordSize <= totalCount {
                 let size = readUInt32(from: bytes + o + 4)
-                let u = bytes + o + 8
-                let remainingPayload = totalCount - (o + 8)
-
-                for (lIdx, layout) in layouts.enumerated() {
-                    // Check plugin record
-                    let plugSz = Int(layout.pluginSize)
-                    if size == layout.pluginSize,
-                       plugSz <= remainingPayload,
-                       Int(layout.pluginBundleIDOffset) + 4 <= plugSz,
-                       Int(layout.pluginContainerOffset) + 4 <= plugSz {
-                        let p0 = readUInt32(from: u + Int(layout.pluginBundleIDOffset))
-                        let p1 = readUInt32(from: u + Int(layout.pluginContainerOffset))
-                        if p0 != 0 && (p0 & 3) == 0 && (p0 >> 2) < Self.maxStringID &&
-                           p1 != 0 && (p1 & 3) == 0 && (p1 >> 2) < Self.maxStringID &&
-                           layoutPlugins[lIdx].count / 2 < Self.maxBundleRecords {
-                            layoutPlugins[lIdx].append(p0)
-                            layoutPlugins[lIdx].append(p1)
-                            let sid0 = Int(p0 >> 2)
-                            let sid1 = Int(p1 >> 2)
-                            need[sid0 / 8] |= UInt8(1 << (sid0 % 8))
-                            need[sid1 / 8] |= UInt8(1 << (sid1 % 8))
+                switch size {
+                case 0x104, 0x118, 0x120:
+                    let indices = size == 0x104 ? p0x104 : (size == 0x118 ? p0x118 : p0x120)
+                    let u = bytes + o + 8
+                    let remainingPayload = totalCount - (o + 8)
+                    for lIdx in indices {
+                        let layout = layouts[lIdx]
+                        let plugSz = Int(layout.pluginSize)
+                        if plugSz <= remainingPayload,
+                           layoutPlugins[lIdx].count < maxPluginEntries,
+                           Int(layout.pluginBundleIDOffset) + 4 <= plugSz,
+                           Int(layout.pluginContainerOffset) + 4 <= plugSz {
+                            let p0 = readUInt32(from: u + Int(layout.pluginBundleIDOffset))
+                            let p1 = readUInt32(from: u + Int(layout.pluginContainerOffset))
+                            if p0 != 0 && (p0 & 3) == 0 && (p0 >> 2) < Self.maxStringID &&
+                               p1 != 0 && (p1 & 3) == 0 && (p1 >> 2) < Self.maxStringID {
+                                layoutPlugins[lIdx].append(p0)
+                                layoutPlugins[lIdx].append(p1)
+                                let sid0 = Int(p0 >> 2)
+                                let sid1 = Int(p1 >> 2)
+                                need[sid0 >> 3] |= UInt8(1 << (sid0 & 7))
+                                need[sid1 >> 3] |= UInt8(1 << (sid1 & 7))
+                            }
                         }
                     }
-
-                    // Check bundle record
-                    let bndSz = Int(layout.bundleSize)
-                    if size == layout.bundleSize,
-                       bndSz <= remainingPayload,
-                       Int(layout.bundleIDOffset) + 4 <= bndSz,
-                       Int(layout.nameOffset) + 4 <= bndSz,
-                       Int(layout.displayNameOffset) + 4 <= bndSz,
-                       Int(layout.containerOffset) + 4 <= bndSz,
-                       Int(layout.bundlePathOffset) + 4 <= bndSz {
-                        if layoutRecs[lIdx].count / 5 < Self.maxBundleRecords {
+                case 0x23c, 0x250, 0x25c:
+                    let indices = size == 0x23c ? b0x23c : (size == 0x250 ? b0x250 : b0x25c)
+                    let u = bytes + o + 8
+                    let remainingPayload = totalCount - (o + 8)
+                    for lIdx in indices {
+                        let layout = layouts[lIdx]
+                        let bndSz = Int(layout.bundleSize)
+                        if bndSz <= remainingPayload,
+                           layoutRecs[lIdx].count < maxBundleRecEntries,
+                           Int(layout.bundleIDOffset) + 4 <= bndSz,
+                           Int(layout.nameOffset) + 4 <= bndSz,
+                           Int(layout.displayNameOffset) + 4 <= bndSz,
+                           Int(layout.containerOffset) + 4 <= bndSz,
+                           Int(layout.bundlePathOffset) + 4 <= bndSz {
                             let bid = readUInt32(from: u + Int(layout.bundleIDOffset))
-                            let name = readUInt32(from: u + Int(layout.nameOffset))
-                            let disp = readUInt32(from: u + Int(layout.displayNameOffset))
-                            let cont = readUInt32(from: u + Int(layout.containerOffset))
-                            let bpath = readUInt32(from: u + Int(layout.bundlePathOffset))
-
                             if bid != 0 && (bid & 3) == 0 && (bid >> 2) < Self.maxStringID {
-                                layoutRecs[lIdx].append(contentsOf: [bid, name, disp, cont, bpath])
-                                for r in [bid, name, disp, cont, bpath] {
-                                    if r != 0 && (r & 3) == 0 && (r >> 2) < Self.maxStringID {
-                                        let sid = Int(r >> 2)
-                                        need[sid / 8] |= UInt8(1 << (sid % 8))
-                                    }
+                                let name = readUInt32(from: u + Int(layout.nameOffset))
+                                let disp = readUInt32(from: u + Int(layout.displayNameOffset))
+                                let cont = readUInt32(from: u + Int(layout.containerOffset))
+                                let bpath = readUInt32(from: u + Int(layout.bundlePathOffset))
+                                layoutRecs[lIdx].append(bid)
+                                layoutRecs[lIdx].append(name)
+                                layoutRecs[lIdx].append(disp)
+                                layoutRecs[lIdx].append(cont)
+                                layoutRecs[lIdx].append(bpath)
+                                let bidSid = Int(bid >> 2)
+                                need[bidSid >> 3] |= UInt8(1 << (bidSid & 7))
+                                if name != 0 && (name & 3) == 0 && (name >> 2) < Self.maxStringID {
+                                    let sid = Int(name >> 2); need[sid >> 3] |= UInt8(1 << (sid & 7))
+                                }
+                                if disp != 0 && (disp & 3) == 0 && (disp >> 2) < Self.maxStringID {
+                                    let sid = Int(disp >> 2); need[sid >> 3] |= UInt8(1 << (sid & 7))
+                                }
+                                if cont != 0 && (cont & 3) == 0 && (cont >> 2) < Self.maxStringID {
+                                    let sid = Int(cont >> 2); need[sid >> 3] |= UInt8(1 << (sid & 7))
+                                }
+                                if bpath != 0 && (bpath & 3) == 0 && (bpath >> 2) < Self.maxStringID {
+                                    let sid = Int(bpath >> 2); need[sid >> 3] |= UInt8(1 << (sid & 7))
                                 }
                             }
                         }
                     }
+                default:
+                    break
                 }
                 o += 4
             }
+        }
+
+        if layoutRecs.allSatisfy({ $0.isEmpty }) && layoutPlugins.allSatisfy({ $0.isEmpty }) {
+            throw CSStore2ParserError.noValidLayoutMatched
         }
 
         // Decode string table
@@ -390,18 +427,20 @@ public final class CSStore2Parser: Sendable {
                             if let s = readString(bytes: bytes, totalLength: totalCount, offset: o) {
                                 if maybePath {
                                     if s.contains("/mobile/Containers/Data/") {
-                                        let prev = pathStrings[sid]
-                                        if prev == nil {
+                                        if case .some(let existingOpt) = pathStrings[sid] {
+                                            if existingOpt != s {
+                                                pathStrings[sid] = Optional<String>.none // Ambiguous path collision
+                                            }
+                                        } else {
                                             pathStrings[sid] = s
-                                        } else if prev! != s {
-                                            pathStrings[sid] = Optional<String>.none // Ambiguous path collision
                                         }
                                     } else if s.hasSuffix(".app") || s.hasSuffix(".app/") {
-                                        let prev = appPathStrings[sid]
-                                        if prev == nil {
+                                        if case .some(let existingOpt) = appPathStrings[sid] {
+                                            if existingOpt != s {
+                                                appPathStrings[sid] = Optional<String>.none
+                                            }
+                                        } else {
                                             appPathStrings[sid] = s
-                                        } else if prev! != s {
-                                            appPathStrings[sid] = Optional<String>.none
                                         }
                                     }
                                 }
@@ -502,8 +541,9 @@ public final class CSStore2Parser: Sendable {
                 if bpathRef != 0 && (bpathRef & 3) == 0 {
                     if let rawBundlePath = bundlePathFor(ref: bpathRef),
                        !rawBundlePath.contains(".."),
+                       !hasUnsafePathScalar(rawBundlePath),
                        let normBundlePath = normalizeVarPath(rawBundlePath),
-                       (normBundlePath.hasPrefix("/var/containers/Bundle/Application/") || normBundlePath.hasPrefix("/Applications/")),
+                       isValidDiscoveredBundlePath(normBundlePath),
                        bpMap[bid] == nil {
                         bpMap[bid] = normBundlePath
                     }
@@ -530,7 +570,8 @@ public final class CSStore2Parser: Sendable {
         var appGroupSet: Set<String> = []
         let groupNeedle = Data("/mobile/Containers/Shared/AppGroup/".utf8)
         var searchRange = 0..<data.count
-        while let match = data.range(of: groupNeedle, options: [], in: searchRange) {
+        while appGroupSet.count < Self.maxBundleRecords,
+              let match = data.range(of: groupNeedle, options: [], in: searchRange) {
             let uuidStart = match.upperBound
             let uuidEnd = uuidStart + 36
             if uuidEnd <= data.count {
@@ -546,7 +587,8 @@ public final class CSStore2Parser: Sendable {
         var discoveredBundleSet: Set<String> = Set((bestBundlePaths ?? [:]).values)
         let bundleNeedle = Data("/containers/Bundle/Application/".utf8)
         var bundleSearchRange = 0..<data.count
-        while let match = data.range(of: bundleNeedle, options: [], in: bundleSearchRange) {
+        while discoveredBundleSet.count < Self.maxBundleRecords,
+              let match = data.range(of: bundleNeedle, options: [], in: bundleSearchRange) {
             let uuidStart = match.upperBound
             let uuidEnd = uuidStart + 36
             if uuidEnd <= data.count {
@@ -560,13 +602,15 @@ public final class CSStore2Parser: Sendable {
                         var nameEnd = nameStart
                         while nameEnd < maxNameEnd {
                             let b = data[nameEnd]
-                            if b == 0 || b == 0x2f || b < 0x20 { break }
+                            if b == 0 || b == 0x2f || b < 0x20 || b == 0x7f { break }
                             nameEnd += 1
                         }
                         if nameEnd > nameStart,
                            let comp = String(data: data.subdata(in: nameStart..<nameEnd), encoding: .utf8),
+                           comp.count > 4,
                            comp.lowercased().hasSuffix(".app"),
-                           !comp.contains("..") {
+                           !comp.contains(".."),
+                           !hasUnsafePathScalar(comp) {
                             extractedFullAppPath = containerRoot + "/" + comp
                         }
                     }
@@ -679,6 +723,40 @@ public final class CSStore2Parser: Sendable {
             return nil
         }
         return normalized
+    }
+
+    private func hasUnsafePathScalar(_ s: String) -> Bool {
+        for scalar in s.unicodeScalars {
+            let val = scalar.value
+            if val <= 0x1F || (val >= 0x7F && val <= 0x9F) || isFormatScalar(val)
+                || scalar.properties.generalCategory == .format
+                || scalar.properties.generalCategory == .control
+                || val == 0x2028 || val == 0x2029 {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func isValidDiscoveredBundlePath(_ normPath: String) -> Bool {
+        guard normPath.utf8.count <= 1024, !hasUnsafePathScalar(normPath) else { return false }
+        let appContainerPrefix = "/var/containers/Bundle/Application/"
+        if normPath.hasPrefix(appContainerPrefix) {
+            let rest = normPath.dropFirst(appContainerPrefix.count)
+            let parts = rest.split(separator: "/", omittingEmptySubsequences: false)
+            guard let uuidPart = parts.first, uuidPart.count == 36, UUID(uuidString: String(uuidPart)) != nil else {
+                return false
+            }
+            if let last = parts.last, parts.count > 1 {
+                guard !last.isEmpty, last != ".app", !last.contains("..") else { return false }
+            }
+            return true
+        }
+        if normPath.hasPrefix("/Applications/") {
+            let last = (normPath as NSString).lastPathComponent
+            return !last.isEmpty && last != ".app" && !last.contains("..")
+        }
+        return false
     }
 
     /// Identifies format, BiDi override, Variation Selector, Tag, and Interlinear Annotation scalars that could disguise malicious binaries.

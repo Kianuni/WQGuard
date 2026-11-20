@@ -314,11 +314,11 @@ final class V130FeatureUnitTests: XCTestCase {
     }
 
     func test_machoScanner_fairPlayAppStoreMediaExperienceExempt_whileNonAppStoreFlagged() throws {
-        let bin = SyntheticMachOGenerator.shared.generateThin(config: .init(
-            arch: .arm64,
+        let (bin, _) = try M1TestCMSFixtures.buildSignedMachO(
+            identifier: "com.store.media",
             cryptid: 1,
             linkedDylibs: ["/System/Library/PrivateFrameworks/MediaExperience.framework/MediaExperience"]
-        ))
+        )
         let details = try MachOScanner.shared.parseMachO(data: bin)
 
         let appStoreFinding = MachOScanner.shared.scan(
@@ -663,7 +663,7 @@ final class V130FeatureUnitTests: XCTestCase {
         let ipaURL = try zipAppBundle(appDir, ipaName: "FairPlayPrivileged.ipa")
 
         for finding in [try SecurityPipeline.shared.scanBundle(at: appDir), try IPAPackageScanner.shared.scan(ipaURL: ipaURL)] {
-            XCTAssertEqual(finding.installChannel, .testFlight)
+            XCTAssertEqual(finding.installChannel, .developerSideloaded)
             XCTAssertEqual(finding.riskTier, .highRisk)
             XCTAssertTrue(finding.evidence.isFairPlayEncrypted)
             let sigs = Set(finding.indicators.map(\.signature))
@@ -672,6 +672,27 @@ final class V130FeatureUnitTests: XCTestCase {
             XCTAssertTrue(sigs.contains("MobileGestaltTamper:com.apple.private.MobileGestalt.allow"))
             XCTAssertTrue(sigs.contains("CVE-2026-84493:PrivateAccessoryEntitlement"))
         }
+
+        // Authentic CMS-signed TestFlight IPA with private entitlements -> .testFlight AND still .highRisk
+        let state = try M1TestCMSFixtures.sharedState()
+        let (_, signedTFIPA, root) = try M1TestCMSFixtures.buildSignedAppBundleAndIPA(
+            in: dir,
+            appName: "SignedFairPlayPrivileged",
+            bundleId: "com.testflight.privileged.signed",
+            cryptid: 1,
+            xmlEntitlements: entXML,
+            signerLeaf: state.testFlightLeaf,
+            sandboxReceiptEnvironment: "ProductionSandbox"
+        )
+        let signedTFFinding = try IPAPackageScanner.shared.scan(ipaURL: signedTFIPA, customAnchorCertificates: [root])
+        XCTAssertEqual(signedTFFinding.installChannel, .testFlight)
+        XCTAssertEqual(signedTFFinding.riskTier, .highRisk)
+        XCTAssertTrue(signedTFFinding.evidence.isFairPlayEncrypted)
+        let tfSigs = Set(signedTFFinding.indicators.map(\.signature))
+        XCTAssertTrue(tfSigs.contains("CVE-2026-65339:com.apple.private.mediaexperience.allow"))
+        XCTAssertTrue(tfSigs.contains("BookRestore:com.apple.private.bookassetd.allow"))
+        XCTAssertTrue(tfSigs.contains("MobileGestaltTamper:com.apple.private.MobileGestalt.allow"))
+        XCTAssertTrue(tfSigs.contains("CVE-2026-84493:PrivateAccessoryEntitlement"))
     }
 
     // MARK: - 5. Bilingual EN/ZH Verification (Zero Han in English)

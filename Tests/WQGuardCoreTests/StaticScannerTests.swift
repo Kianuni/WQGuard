@@ -55,21 +55,40 @@ final class StaticScannerTests: XCTestCase {
         XCTAssertEqual(result.teamIdentifier, "ENTTEAM999")
     }
     
-    func testChannelClassification_TestFlight_SandboxReceipt() {
-        let result = ChannelClassifier.classify(cryptid: 1, hasSandboxReceipt: true)
+    func testChannelClassification_TestFlight_SandboxReceipt() throws {
+        let (signedReceipt, root) = try M1TestCMSFixtures.buildCMSSandboxReceipt(environment: "ProductionSandbox")
+        let result = ChannelClassifier.classify(
+            cryptid: 1,
+            receiptData: signedReceipt,
+            codeSignatureTrust: .appleAppStoreVerified,
+            sandboxReceiptData: signedReceipt,
+            customAnchorCertificates: [root]
+        )
         XCTAssertEqual(result.channel, .testFlight)
         XCTAssertTrue(result.isFairPlayEncrypted)
         XCTAssertTrue(result.hasReceipt)
     }
     
-    func testChannelClassification_TestFlight_ReceiptMarker() {
-        let mockReceiptData = "SANDBOX_TESTFLIGHT_RECEIPT_BLOB".data(using: .utf8)!
-        let result = ChannelClassifier.classify(cryptid: 1, receiptData: mockReceiptData)
+    func testChannelClassification_TestFlight_ReceiptMarker() throws {
+        let (signedReceipt, root) = try M1TestCMSFixtures.buildCMSSandboxReceipt(environment: "ProductionSandbox")
+        let result = ChannelClassifier.classify(
+            cryptid: 1,
+            receiptData: signedReceipt,
+            codeSignatureTrust: .appleAppStoreVerified,
+            customAnchorCertificates: [root]
+        )
         XCTAssertEqual(result.channel, .testFlight)
+        // Unsigned raw string marker must never pass CMS provenance under Option A
+        let mockReceiptData = "SANDBOX_TESTFLIGHT_RECEIPT_BLOB".data(using: .utf8)!
+        XCTAssertEqual(ChannelClassifier.classify(cryptid: 1, receiptData: mockReceiptData).channel, .developerSideloaded)
     }
     
     func testChannelClassification_AppStore_FairPlayEncrypted() {
-        let result = ChannelClassifier.classify(cryptid: 1, hasSandboxReceipt: false)
+        let result = ChannelClassifier.classify(
+            cryptid: 1,
+            hasSandboxReceipt: false,
+            codeSignatureTrust: .appleAppStoreVerified
+        )
         XCTAssertEqual(result.channel, .appStore)
         XCTAssertTrue(result.isFairPlayEncrypted)
     }

@@ -695,7 +695,10 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
     }
 
     func test_vector3_fatShadowing_encryptedCleanArm64_unencryptedMaliciousArm64e_stillDetected() throws {
-        let encryptedCleanArm64 = buildThin64(
+        // Embed an encrypted svc #0x80 word inside 4096 bytes of high-entropy CSPRNG FairPlay ciphertext
+        var csprngText = M1TestCMSFixtures.csprngBytes(count: 4096)
+        csprngText.replaceSubrange(0..<4, with: Self.svc0x80Bytes)
+        var encryptedCleanArm64 = buildThin64(
             cpuType: CPU_TYPE_ARM64,
             cpuSubtype: CPU_SUBTYPE_ARM64_ALL,
             segments: [
@@ -708,13 +711,25 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
                             segName: "__TEXT",
                             sectName: "__text",
                             flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
-                            payload: wordsToLittleEndianData([Self.svc0x80]) // inside encrypted ciphertext
+                            payload: csprngText // inside encrypted ciphertext
                         )
                     ]
                 )
             ],
-            encryption: (cryptid: 1, cryptoff: 0, cryptsize: 0x4000)
+            encryption: (cryptid: 1, cryptoff: 0, cryptsize: 0)
         )
+        let encParsedPre = try MachOParser.shared.parse(data: encryptedCleanArm64)
+        let encTextOff = try XCTUnwrap(encParsedPre.textSegment?.sections.first?.offset)
+        var patchedCleanEnc = encryption_info_command_64(
+            cmd: UInt32(LC_ENCRYPTION_INFO_64),
+            cmdsize: UInt32(MemoryLayout<encryption_info_command_64>.size),
+            cryptoff: encTextOff,
+            cryptsize: UInt32(csprngText.count),
+            cryptid: 1,
+            pad: 0
+        )
+        patchStruct(&patchedCleanEnc, into: &encryptedCleanArm64, at: 32 + 72 + 80)
+
         let evilArm64e = buildThin64(
             cpuType: CPU_TYPE_ARM64,
             cpuSubtype: CPU_SUBTYPE_ARM64E,
@@ -1094,7 +1109,7 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
         let ipaFinding = try IPAPackageScanner.shared.scan(ipaURL: ipaURL)
 
         for finding in [bundleFinding, ipaFinding] {
-            XCTAssertEqual(finding.installChannel, .appStore)
+            XCTAssertEqual(finding.installChannel, .developerSideloaded)
             XCTAssertEqual(finding.riskTier, .highRisk)
             XCTAssertTrue(finding.indicators.contains { $0.signature == "arm64:svc_0x80" })
             XCTAssertTrue(finding.evidence.matchedSymbols.contains("arm64:svc_0x80"))
@@ -1102,16 +1117,18 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
     }
 
     func test_vector5_genuineFairPlayHeaderCoveringTextCiphertext_noFalsePositive_andExactBoundaryChecks() throws {
-        // 1. Full coverage over __TEXT,__text containing random ciphertext `0xD4001001`
-        let fullEncryptedBin = SyntheticMachOGenerator.shared.generateThin(config: .init(
-            arch: .arm64,
+        // 1. Full coverage over __TEXT,__text containing 4096-byte CSPRNG ciphertext (including encrypted `0xD4001001` words)
+        //    plus CMS-signed Option A App Store leaf control.
+        var fullCiphertext = M1TestCMSFixtures.csprngBytes(count: 4096)
+        fullCiphertext.replaceSubrange(0..<12, with: wordsToLittleEndianData([Self.svc0x80, Self.svc0x80, Self.svc0x80]))
+        let (fullEncryptedBin, rootCert) = try M1TestCMSFixtures.buildSignedMachO(
+            identifier: "com.apple.appstore.drm",
             cryptid: 1,
-            cryptoff: 0,
-            cryptsize: 0x4000,
-            textInstructions: [Self.svc0x80, Self.svc0x80, Self.svc0x80]
-        ))
+            extraSegmentPayload: fullCiphertext
+        )
 
         let parsedFull = try MachOParser.shared.parse(data: fullEncryptedBin)
+        XCTAssertFalse(parsedFull.hasForgedPlaintextFairPlayRange)
         XCTAssertEqual(parsedFull.directSyscallCount, 0, "Genuine FairPlay ciphertext inside cryptoff..+cryptsize must not false-positive")
         let machoFull = try MachOScanner.shared.scan(
             binaryData: fullEncryptedBin,
@@ -1123,8 +1140,24 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
         XCTAssertEqual(try SecurityPipeline.shared.scanBundle(at: bundleURL).riskTier, .safe)
         XCTAssertEqual(try IPAPackageScanner.shared.scan(ipaURL: ipaURL).riskTier, .safe)
 
-        // 2. Boundary precision: 4 words in __TEXT,__text (16 bytes); encrypt first 12 bytes + 1 byte of 4th word?
-        // Word 0,1,2 are inside cryptoff..<cryptoff+9 (9 bytes -> overlaps word 0,1,2, leaves word 3 unencrypted!)
+        let state = try M1TestCMSFixtures.sharedState()
+        let signedDir = trackTemp(FileManager.default.temporaryDirectory.appendingPathComponent("wq_v5_signed_\(UUID().uuidString)"))
+        try FileManager.default.createDirectory(at: signedDir, withIntermediateDirectories: true)
+        let (_, signedIPA, _) = try M1TestCMSFixtures.buildSignedAppBundleAndIPA(
+            in: signedDir,
+            appName: "GenuineSignedDRM",
+            bundleId: "com.apple.appstore.drm",
+            cryptid: 1,
+            signerLeaf: state.appStoreLeaf
+        )
+        let signedIPAFinding = try IPAPackageScanner.shared.scan(ipaURL: signedIPA, customAnchorCertificates: [rootCert])
+        XCTAssertEqual(signedIPAFinding.installChannel, .appStore)
+        XCTAssertEqual(signedIPAFinding.riskTier, .safe)
+
+        // 2. Boundary precision: 4096-byte CSPRNG ciphertext core + 1 trailing unencrypted svc word (bytes 4096..<4100)
+        var partialPayload = M1TestCMSFixtures.csprngBytes(count: 4096)
+        partialPayload.replaceSubrange(0..<12, with: wordsToLittleEndianData([Self.svc0x80, Self.svc0x80, Self.svc0x80]))
+        partialPayload.append(Self.svc0x80Bytes)
         let baseBin = buildThin64(
             segments: [
                 RawSegmentSpec(
@@ -1136,7 +1169,7 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
                             segName: "__TEXT",
                             sectName: "__text",
                             flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
-                            payload: wordsToLittleEndianData([Self.svc0x80, Self.svc0x80, Self.svc0x80, Self.svc0x80])
+                            payload: partialPayload
                         )
                     ]
                 )
@@ -1153,31 +1186,55 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
             cmd: UInt32(LC_ENCRYPTION_INFO_64),
             cmdsize: UInt32(MemoryLayout<encryption_info_command_64>.size),
             cryptoff: textOff,
-            cryptsize: 12, // covers words 0, 1, 2 (bytes 0..<12), leaves word 3 (bytes 12..<16) unencrypted!
+            cryptsize: 4096, // covers bytes 0..<4096, leaves trailing word (bytes 4096..<4100) unencrypted!
             cryptid: 1,
             pad: 0
         )
         patchStruct(&patchedEnc, into: &partialBin, at: encCmdOffset)
 
         let partialParsed = try MachOParser.shared.parse(data: partialBin)
+        XCTAssertFalse(partialParsed.hasForgedPlaintextFairPlayRange)
         let partialScan = partialParsed.scanDirectSyscalls()
         XCTAssertEqual(partialScan.totalCount, 1)
-        XCTAssertEqual(partialScan.sampleSites.first?.fileOffset, Int(textOff) + 12)
+        XCTAssertEqual(partialScan.sampleSites.first?.fileOffset, Int(textOff) + 4096)
 
-        // 3. Split-range: 4 svc words; encrypt ONLY words 1..2 (textOff + 4 ..< textOff + 12) -> detects word 0 (before) and word 3 (after)!
-        var midBin = baseBin
+        // 3. Split-range: svc word 0 (0..<4) + 4096-byte CSPRNG core (4..<4100) + trailing svc word (4100..<4104)
+        var midPayload = Self.svc0x80Bytes
+        midPayload.append(M1TestCMSFixtures.csprngBytes(count: 4096))
+        midPayload.append(Self.svc0x80Bytes)
+        var midBin = buildThin64(
+            segments: [
+                RawSegmentSpec(
+                    name: "__TEXT",
+                    initprot: 5,
+                    maxprot: 7,
+                    sections: [
+                        CustomSectionSpec(
+                            segName: "__TEXT",
+                            sectName: "__text",
+                            flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
+                            payload: midPayload
+                        )
+                    ]
+                )
+            ],
+            encryption: (cryptid: 1, cryptoff: 0, cryptsize: 0)
+        )
+        let midTextOff = try XCTUnwrap(MachOParser.shared.parse(data: midBin).textSegment?.sections.first?.offset)
         var midEnc = encryption_info_command_64(
             cmd: UInt32(LC_ENCRYPTION_INFO_64),
             cmdsize: UInt32(MemoryLayout<encryption_info_command_64>.size),
-            cryptoff: textOff + 4,
-            cryptsize: 8,
+            cryptoff: midTextOff + 4,
+            cryptsize: 4096,
             cryptid: 1,
             pad: 0
         )
         patchStruct(&midEnc, into: &midBin, at: encCmdOffset)
-        let midScan = try MachOParser.shared.parse(data: midBin).scanDirectSyscalls()
+        let midParsed = try MachOParser.shared.parse(data: midBin)
+        XCTAssertFalse(midParsed.hasForgedPlaintextFairPlayRange)
+        let midScan = midParsed.scanDirectSyscalls()
         XCTAssertEqual(midScan.totalCount, 2)
-        XCTAssertEqual(midScan.sampleSites.map(\.fileOffset), [Int(textOff), Int(textOff) + 12])
+        XCTAssertEqual(midScan.sampleSites.map(\.fileOffset), [Int(midTextOff), Int(midTextOff) + 4100])
 
         // 4. Embedded framework with fake partial FairPlay + svc #0x80 inside an App-Store-encrypted main app (0 App Groups)
         let evilFramework = SyntheticMachOGenerator.shared.generateThin(config: .init(
@@ -1187,13 +1244,10 @@ final class AdversarialV130Round1SyscallTests: XCTestCase {
             cryptsize: 0x20,
             textInstructions: [Self.svc0x80, Self.retInsn]
         ))
-        let cleanEncryptedMain = SyntheticMachOGenerator.shared.generateThin(config: .init(
-            arch: .arm64,
-            cryptid: 1,
-            cryptoff: 0,
-            cryptsize: 0x4000,
-            textInstructions: [Self.nopInsn, Self.retInsn]
-        ))
+        let (cleanEncryptedMain, _) = try M1TestCMSFixtures.buildSignedMachO(
+            identifier: "com.test.cleanencryptedmain",
+            cryptid: 1
+        )
         let (fwBundle, fwIPA) = try makeBundleAndIPA(
             appName: "EncryptedMainFakeFw",
             executable: cleanEncryptedMain,

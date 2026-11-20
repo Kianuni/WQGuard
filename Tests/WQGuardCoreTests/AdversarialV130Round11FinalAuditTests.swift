@@ -1448,10 +1448,15 @@ final class AdversarialV130Round11FinalAuditTests: XCTestCase {
             try runOpenSSL(["dgst", "-sha256", "-sign", lKey.path, "-out", sigOutURL.path, attrsInURL.path])
             let sigBytes = try IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: sigOutURL)
 
-            // Use v3 SignerInfo with [0] SubjectKeyIdentifier (0x80) AND indefinite-length BER (0x80) outer SignedData
+            let leafSecCert = try XCTUnwrap(SecCertificateCreateWithData(nil, leafCertDER as CFData))
+            let leafPubKey = try XCTUnwrap(SecCertificateCopyKey(leafSecCert))
+            let leafPubRaw = try XCTUnwrap(SecKeyCopyExternalRepresentation(leafPubKey, nil) as Data?)
+            let leafSKI = Data(Insecure.SHA1.hash(data: leafPubRaw))
+
+            // Use v3 SignerInfo with [0] SubjectKeyIdentifier (0x80) matching leaf cert's SKI AND indefinite-length BER (0x80) outer SignedData
             let signerInfo = derTLV(0x30,
                 derTLV(0x02, Data([0x03])) +
-                derTLV(0x80, Data([0x01, 0x02, 0x03, 0x04])) +
+                derTLV(0x80, leafSKI) +
                 derTLV(0x30, oidSHA256) +
                 berIndef(0xA0, attrsInner) +
                 derTLV(0x30, oidECDSASHA256) +

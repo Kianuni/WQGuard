@@ -8,6 +8,7 @@
 
 import Darwin
 import Foundation
+import Security
 
 /// Classifies application installation channels based on FairPlay DRM encryption (cryptid),
 /// embedded mobileprovision profiles, and receipt metadata.
@@ -23,6 +24,8 @@ public enum ChannelClassifier {
         public let hasMobileProvision: Bool
         public let hasReceipt: Bool
         public let isFairPlayEncrypted: Bool
+        public let isProvisionCMSVerified: Bool
+        public let verifiedProvisionTeamPrefixes: Set<String>
         public let details: String
         
         public init(
@@ -34,6 +37,8 @@ public enum ChannelClassifier {
             hasMobileProvision: Bool = false,
             hasReceipt: Bool = false,
             isFairPlayEncrypted: Bool = false,
+            isProvisionCMSVerified: Bool = false,
+            verifiedProvisionTeamPrefixes: Set<String> = [],
             details: String = ""
         ) {
             self.channel = channel
@@ -44,6 +49,8 @@ public enum ChannelClassifier {
             self.hasMobileProvision = hasMobileProvision
             self.hasReceipt = hasReceipt
             self.isFairPlayEncrypted = isFairPlayEncrypted
+            self.isProvisionCMSVerified = isProvisionCMSVerified
+            self.verifiedProvisionTeamPrefixes = verifiedProvisionTeamPrefixes
             self.details = details
         }
     }
@@ -205,24 +212,64 @@ public enum ChannelClassifier {
         receiptData: Data? = nil,
         hasSandboxReceipt: Bool = false,
         hasMobileProvisionArtifact: Bool = false,
-        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic
+        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic,
+        sandboxReceiptData: Data? = nil,
+        verifiedSignerKind: AppleVerifiedSignerKind = .none,
+        hasMissingCodeSignature: Bool = false
     ) -> ClassificationResult {
+        classify(
+            cryptid: cryptid,
+            mobileprovisionData: mobileprovisionData,
+            receiptData: receiptData,
+            hasSandboxReceipt: hasSandboxReceipt,
+            hasMobileProvisionArtifact: hasMobileProvisionArtifact,
+            codeSignatureTrust: codeSignatureTrust,
+            sandboxReceiptData: sandboxReceiptData,
+            verifiedSignerKind: verifiedSignerKind,
+            hasMissingCodeSignature: hasMissingCodeSignature,
+            customAnchorCertificates: nil
+        )
+    }
+
+    internal static func classify(
+        cryptid: UInt32,
+        mobileprovisionData: Data? = nil,
+        receiptData: Data? = nil,
+        hasSandboxReceipt: Bool = false,
+        hasMobileProvisionArtifact: Bool = false,
+        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic,
+        sandboxReceiptData: Data? = nil,
+        verifiedSignerKind: AppleVerifiedSignerKind = .none,
+        hasMissingCodeSignature: Bool = false,
+        customAnchorCertificates: [SecCertificate]?
+    ) -> ClassificationResult {
+        _ = hasSandboxReceipt
         let isEncrypted = (cryptid != 0)
         let hasProvision = hasMobileProvisionArtifact || (mobileprovisionData != nil)
-        let hasReceipt = (receiptData != nil && !receiptData!.isEmpty) || hasSandboxReceipt
-        
+
         var parsedPlist: [String: Any]? = nil
+        var isProvisionCMSVerified = false
         if let data = mobileprovisionData, !data.isEmpty {
-            parsedPlist = extractPlist(from: data)
+            let cmsEval = CSBlobParser.shared.verifyProvisioningProfileCMS(
+                data,
+                customAnchorCertificates: customAnchorCertificates
+            )
+            if cmsEval.isVerified, let verifiedPlist = cmsEval.plist {
+                parsedPlist = verifiedPlist
+                isProvisionCMSVerified = true
+            } else {
+                parsedPlist = extractPlist(from: data)
+            }
         }
-        
+
         var isEnterprise = false
         var hasProvisionedDevices = false
         var teamId: String? = nil
+        var verifiedProvisionTeamPrefixes: Set<String> = []
         var teamName: String? = nil
         var profileName: String? = nil
         var hasBetaReportsActive = false
-        
+
         if let plist = parsedPlist {
             if (plist["ProvisionsAllDevices"] as? Bool == true) || ((plist["ProvisionsAllDevices"] as? NSNumber)?.boolValue == true) {
                 isEnterprise = true
@@ -243,6 +290,13 @@ public enum ChannelClassifier {
             } else if let first = prefixCandidates.first {
                 teamId = first
             }
+            if isProvisionCMSVerified {
+                for candidate in teamCandidates + prefixCandidates {
+                    if ExpandedThreatCatalog.isStrictTenCharTeamId(candidate) {
+                        verifiedProvisionTeamPrefixes.insert(candidate.lowercased())
+                    }
+                }
+            }
             teamName = plist["TeamName"] as? String
             profileName = plist["Name"] as? String
             if (plist["BetaReportsActive"] as? Bool == true) || ((plist["BetaReportsActive"] as? NSNumber)?.boolValue == true) {
@@ -253,13 +307,29 @@ public enum ChannelClassifier {
                 hasBetaReportsActive = true
             }
         }
-        
+
+        var hasVerifiedReceipt = false
+        var hasVerifiedSandboxReceipt = false
+        for candidateReceipt in [sandboxReceiptData, receiptData].compactMap({ $0 }) where !candidateReceipt.isEmpty {
+            let receiptEval = CSBlobParser.shared.verifyAppReceiptCMS(
+                candidateReceipt,
+                customAnchorCertificates: customAnchorCertificates
+            )
+            if receiptEval.isVerified {
+                hasVerifiedReceipt = true
+                if receiptEval.isSandbox {
+                    hasVerifiedSandboxReceipt = true
+                }
+            }
+        }
+        let hasReceipt = hasVerifiedReceipt
+
         // FairPlay Encrypted Binaries:
         // Official App Store releases NEVER ship an `embedded.mobileprovision` file.
         // Whenever `hasProvision` is true (including malformed/truncated CMS/XML, 0-byte files, profiles omitting
         // ProvisionedDevices, or escaping/oversized mobileprovision artifacts), fail closed and never classify as .appStore.
         if isEncrypted {
-            if isEnterprise {
+            if isEnterprise && !hasMissingCodeSignature && codeSignatureTrust != .adHocOrUnsigned {
                 return ClassificationResult(
                     channel: .enterpriseInHouse,
                     teamIdentifier: teamId,
@@ -269,11 +339,18 @@ public enum ChannelClassifier {
                     hasMobileProvision: true,
                     hasReceipt: hasReceipt,
                     isFairPlayEncrypted: true,
+                    isProvisionCMSVerified: isProvisionCMSVerified,
+                    verifiedProvisionTeamPrefixes: verifiedProvisionTeamPrefixes,
                     details: "Enterprise In-House: Encrypted binary re-signed with enterprise provisioning profile (ProvisionsAllDevices: true)."
                 )
             }
             if hasProvision {
-                if !codeSignatureTrust.isDisqualifiedFromAppStore && parsedPlist != nil && hasBetaReportsActive && !hasProvisionedDevices {
+                if codeSignatureTrust == .appleAppStoreVerified
+                    && !hasMissingCodeSignature
+                    && isProvisionCMSVerified
+                    && parsedPlist != nil
+                    && hasBetaReportsActive
+                    && !hasProvisionedDevices {
                     return ClassificationResult(
                         channel: .testFlight,
                         teamIdentifier: teamId,
@@ -283,7 +360,9 @@ public enum ChannelClassifier {
                         hasMobileProvision: true,
                         hasReceipt: true,
                         isFairPlayEncrypted: true,
-                        details: "TestFlight Beta: FairPlay DRM encrypted binary (cryptid=1) with valid beta-reports-active provisioning profile."
+                        isProvisionCMSVerified: isProvisionCMSVerified,
+                        verifiedProvisionTeamPrefixes: verifiedProvisionTeamPrefixes,
+                        details: "TestFlight Beta: FairPlay DRM encrypted binary (cryptid=1) with CMS-verified beta-reports-active provisioning profile."
                     )
                 }
                 let reason: String
@@ -291,6 +370,8 @@ public enum ChannelClassifier {
                     reason = "Encrypted binary carries malformed, unreadable, or unparseable embedded.mobileprovision (rejected App Store trust)."
                 } else if hasProvisionedDevices {
                     reason = "Encrypted binary re-signed with UDID-scoped developer provisioning profile (ProvisionedDevices)."
+                } else if hasBetaReportsActive && !isProvisionCMSVerified {
+                    reason = "Encrypted binary carries unverified BetaReportsActive embedded.mobileprovision (rejected TestFlight trust)."
                 } else {
                     reason = "Encrypted binary carries non-TestFlight embedded.mobileprovision profile (re-signed or sideloaded bundle)."
                 }
@@ -303,19 +384,26 @@ public enum ChannelClassifier {
                     hasMobileProvision: true,
                     hasReceipt: hasReceipt,
                     isFairPlayEncrypted: true,
+                    isProvisionCMSVerified: isProvisionCMSVerified,
+                    verifiedProvisionTeamPrefixes: verifiedProvisionTeamPrefixes,
                     details: "Developer Sideloaded: \(reason)"
                 )
             }
 
-            var isTestFlight = hasSandboxReceipt || hasBetaReportsActive
-            if !isTestFlight, let rData = receiptData {
-                let receiptStr = String(decoding: rData, as: UTF8.self).lowercased()
-                if receiptStr.contains("sandbox") || receiptStr.contains("betareportsactive") || receiptStr.contains("testflight") {
-                    isTestFlight = true
-                }
+            // Strictly enforce Apple-anchored CMS verification and non-missing LC_CODE_SIGNATURE for .appStore and .testFlight
+            if hasMissingCodeSignature {
+                return ClassificationResult(
+                    channel: .developerSideloaded,
+                    teamIdentifier: teamId,
+                    teamName: teamName,
+                    profileName: profileName,
+                    isEnterprise: false,
+                    hasMobileProvision: false,
+                    hasReceipt: hasReceipt,
+                    isFairPlayEncrypted: true,
+                    details: "Developer Sideloaded: Binary header sets cryptid!=0 while LC_CODE_SIGNATURE is missing (rejected App Store/TestFlight trust)."
+                )
             }
-            
-            // Reject forged cryptid!=0 headers carrying CS_ADHOC / empty CMS or non-App-Store X.509 certificate chains
             switch codeSignatureTrust {
             case .adHocOrUnsigned:
                 return ClassificationResult(
@@ -342,10 +430,23 @@ public enum ChannelClassifier {
                     isFairPlayEncrypted: true,
                     details: "Developer Sideloaded: Binary header sets cryptid!=0 while CMS signature is '\(signerDesc)' rather than AppleRootCA-anchored Apple iPhone OS Application Signing."
                 )
-            case .appleAppStoreVerified, .absentOrSynthetic:
+            case .absentOrSynthetic:
+                return ClassificationResult(
+                    channel: .developerSideloaded,
+                    teamIdentifier: teamId,
+                    teamName: teamName,
+                    profileName: profileName,
+                    isEnterprise: false,
+                    hasMobileProvision: false,
+                    hasReceipt: hasReceipt,
+                    isFairPlayEncrypted: true,
+                    details: "Developer Sideloaded: Binary header sets cryptid!=0 without a verified Apple CMS code signature (rejected App Store/TestFlight trust)."
+                )
+            case .appleAppStoreVerified:
                 break
             }
 
+            let isTestFlight = (verifiedSignerKind == .testFlight) || hasVerifiedSandboxReceipt
             if isTestFlight {
                 return ClassificationResult(
                     channel: .testFlight,
@@ -354,9 +455,11 @@ public enum ChannelClassifier {
                     profileName: profileName,
                     isEnterprise: false,
                     hasMobileProvision: false,
-                    hasReceipt: true,
+                    hasReceipt: hasVerifiedSandboxReceipt || hasReceipt,
                     isFairPlayEncrypted: true,
-                    details: "TestFlight Beta: FairPlay DRM encrypted binary (cryptid=1) with sandbox or beta receipt markers."
+                    details: verifiedSignerKind == .testFlight
+                        ? "TestFlight Beta: FairPlay DRM encrypted binary (cryptid=1) signed by verified Apple TestFlight Beta Distribution leaf certificate."
+                        : "TestFlight Beta: FairPlay DRM encrypted binary (cryptid=1) with verified Apple sandbox receipt."
                 )
             } else {
                 return ClassificationResult(
@@ -372,9 +475,9 @@ public enum ChannelClassifier {
                 )
             }
         }
-        
+
         // Unencrypted Binaries (Sideloaded or Enterprise)
-        if isEnterprise {
+        if isEnterprise && !hasMissingCodeSignature && codeSignatureTrust != .adHocOrUnsigned {
             return ClassificationResult(
                 channel: .enterpriseInHouse,
                 teamIdentifier: teamId,
@@ -384,6 +487,8 @@ public enum ChannelClassifier {
                 hasMobileProvision: true,
                 hasReceipt: hasReceipt,
                 isFairPlayEncrypted: false,
+                isProvisionCMSVerified: isProvisionCMSVerified,
+                verifiedProvisionTeamPrefixes: verifiedProvisionTeamPrefixes,
                 details: "Enterprise In-House: Unencrypted binary signed with enterprise provisioning profile (ProvisionsAllDevices: true)."
             )
         } else {
@@ -399,6 +504,8 @@ public enum ChannelClassifier {
                 hasMobileProvision: hasProvision,
                 hasReceipt: hasReceipt,
                 isFairPlayEncrypted: false,
+                isProvisionCMSVerified: isProvisionCMSVerified,
+                verifiedProvisionTeamPrefixes: verifiedProvisionTeamPrefixes,
                 details: "Developer Sideloaded: \(note)"
             )
         }
@@ -410,14 +517,36 @@ public enum ChannelClassifier {
     ///   - bundleURL: The URL of the `.app` bundle directory.
     ///   - cryptid: The encryption identifier parsed from the main executable Mach-O header.
     ///   - codeSignatureTrust: Optional cryptographic signature authenticity disposition from Mach-O `LC_CODE_SIGNATURE`.
+    ///   - verifiedSignerKind: Optional Apple leaf signer category from `CodeSignatureTrustEvaluation`.
+    ///   - hasMissingCodeSignature: True if any selected audit slice lacks `LC_CODE_SIGNATURE`.
     /// - Returns: A `ClassificationResult`.
     public static func classifyBundle(
         at bundleURL: URL,
         cryptid: UInt32,
-        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic
+        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic,
+        verifiedSignerKind: AppleVerifiedSignerKind = .none,
+        hasMissingCodeSignature: Bool = false
     ) -> ClassificationResult {
-        let bundleResolved = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
-        let bundleResolvedPrefix = bundleResolved.hasSuffix("/") ? bundleResolved : bundleResolved + "/"
+        classifyBundle(
+            at: bundleURL,
+            cryptid: cryptid,
+            codeSignatureTrust: codeSignatureTrust,
+            verifiedSignerKind: verifiedSignerKind,
+            hasMissingCodeSignature: hasMissingCodeSignature,
+            customAnchorCertificates: nil
+        )
+    }
+
+    internal static func classifyBundle(
+        at bundleURL: URL,
+        cryptid: UInt32,
+        codeSignatureTrust: CodeSignatureTrustDisposition = .absentOrSynthetic,
+        verifiedSignerKind: AppleVerifiedSignerKind = .none,
+        hasMissingCodeSignature: Bool = false,
+        customAnchorCertificates: [SecCertificate]?
+    ) -> ClassificationResult {
+        let bundleResolved = IPAPackageScanner.lexicalStandardizedPath(bundleURL.resolvingSymlinksInPath().path)
+        let bundleResolvedPrefix = IPAPackageScanner.lexicalStandardizedPrefix(bundleResolved)
 
         func hasEntryNoFollow(_ relativeSubpath: String) -> Bool {
             let fullPath = bundleURL.appendingPathComponent(relativeSubpath).path
@@ -438,7 +567,8 @@ public enum ChannelClassifier {
             // while still enforcing O_NOFOLLOW | O_NONBLOCK and `maxBytes` on the resolved target.
             let candidate = bundleURL.appendingPathComponent(relativeSubpath)
             let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
-            guard resolved.path.hasPrefix(bundleResolvedPrefix) else {
+            let resolvedStd = IPAPackageScanner.lexicalStandardizedPath(resolved.path)
+            guard resolvedStd.hasPrefix(bundleResolvedPrefix) else {
                 return nil
             }
             if case .success(let dataOpt) = ContainerScanner.readBoundedRegularFileNoFollow(
@@ -453,16 +583,20 @@ public enum ChannelClassifier {
 
         let hasProvArtifact = hasEntryNoFollow("embedded.mobileprovision")
         let provData = readInBundleFile("embedded.mobileprovision")
-        let hasSandboxReceipt = readInBundleFile("StoreKit/sandboxReceipt", maxBytes: 4 * 1024 * 1024) != nil
+        let sandboxReceiptData = readInBundleFile("StoreKit/sandboxReceipt", maxBytes: 4 * 1024 * 1024)
         let receiptData = readInBundleFile("_MASReceipt/receipt") ?? readInBundleFile("StoreKit/receipt")
-        
+
         return classify(
             cryptid: cryptid,
             mobileprovisionData: provData,
             receiptData: receiptData,
-            hasSandboxReceipt: hasSandboxReceipt,
+            hasSandboxReceipt: false,
             hasMobileProvisionArtifact: hasProvArtifact,
-            codeSignatureTrust: codeSignatureTrust
+            codeSignatureTrust: codeSignatureTrust,
+            sandboxReceiptData: sandboxReceiptData,
+            verifiedSignerKind: verifiedSignerKind,
+            hasMissingCodeSignature: hasMissingCodeSignature,
+            customAnchorCertificates: customAnchorCertificates
         )
     }
 }

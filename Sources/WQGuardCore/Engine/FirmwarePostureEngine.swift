@@ -26,6 +26,10 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
     /// `"alpha<N>"`, `"dev"`, or `nil` for GA builds.
     public let prerelease: String?
 
+    enum CodingKeys: String, CodingKey {
+        case major, minor, patch, build, rawString, prerelease
+    }
+
     public init(major: Int, minor: Int, patch: Int = 0, build: String? = nil, rawString: String? = nil, prerelease: String? = nil) {
         self.major = major
         self.minor = minor
@@ -33,6 +37,26 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
         self.build = build
         self.rawString = rawString
         self.prerelease = prerelease
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let major = try container.decode(Int.self, forKey: .major)
+        let minor = try container.decode(Int.self, forKey: .minor)
+        let patch = try container.decode(Int.self, forKey: .patch)
+        guard major >= 0, minor >= 0, patch >= 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .major,
+                in: container,
+                debugDescription: "OS version components must be non-negative"
+            )
+        }
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+        self.build = try container.decodeIfPresent(String.self, forKey: .build)
+        self.rawString = try container.decodeIfPresent(String.self, forKey: .rawString)
+        self.prerelease = try container.decodeIfPresent(String.self, forKey: .prerelease)
     }
 
     public init(operatingSystemVersion: OperatingSystemVersion, build: String? = nil) {
@@ -44,11 +68,24 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
         self.prerelease = nil
     }
 
+    private static let versionCoreRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"(\d+)\.(\d+)(?:\.(\d+))?(?:[^\w]*\(([\w]+)\))?"#
+    )
+    private static let rsrSuffixRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"\(\s*[a-zA-Z]\s*\)"#
+    )
+    private static let prereleaseRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"(?:^|[\-_.(]\s*|\s+)(?:(?:developer|public)\s+)?(beta|seed|rc|alpha|dev|b|a)(?![A-Za-z])(?:\s*[-_.]?\s*([0-9]+))?"#,
+        options: [.caseInsensitive]
+    )
+
     /// Parses version strings such as "26.2", "iOS 27.1", "26.7.2 (24B123)", "27.2.1-beta1", "27.3b1",
     /// "27.3 beta 1 (24D5001a)", "27.3.0-rc".
     public init?(string: String) {
-        let pattern = #"(\d+)\.(\d+)(?:\.(\d+))?(?:[^\w]*\(([\w]+)\))?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
+        guard !string.isEmpty, string.utf8.count <= 256 else {
+            return nil
+        }
+        guard let regex = Self.versionCoreRegex,
               let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)) else {
             return nil
         }
@@ -79,6 +116,8 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
             return nil
         }
 
+        // Fail-safe: on oversized/non-ASCII patch component, fall back to 0 (< patched threshold) so
+        // vulnerable builds like "26.7.99999999999999999999" and "26.7.\u{FF13}" stay EXPOSED.
         let patch = extract(group: 3).flatMap { Int($0) } ?? 0
         let build = extract(group: 4)
 
@@ -105,52 +144,62 @@ public struct SystemOSVersion: Codable, Sendable, Equatable, Hashable, Comparabl
     /// as the EARLIEST pre-release (fail-safe: never assumed to contain a mid-beta fix).
     static func parsePrerelease(_ remainder: String) -> String? {
         guard !remainder.isEmpty else { return nil }
+        guard remainder.utf8.count <= 256 else { return "beta" }
+
         // Strip Apple Rapid Security Response / Background Security Improvement post-GA suffixes such as " (a)", " (b)", " (c)"
         // so "iOS 27.3 (a)" is never misclassified as an alpha/beta pre-release.
-        let cleanedRemainder = remainder.replacingOccurrences(
-            of: #"\(\s*[a-zA-Z]\s*\)"#,
-            with: " ",
-            options: .regularExpression
-        )
-        let pattern = #"(?:^|[\s\-_.(])\s*(?:(?:developer|public)\s+)?(beta|seed|rc|alpha|dev|b|a)(?![A-Za-z])\s*[-_.]?\s*([0-9]+)?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let m = regex.firstMatch(in: cleanedRemainder, range: NSRange(cleanedRemainder.startIndex..., in: cleanedRemainder)),
-              let tagRange = Range(m.range(at: 1), in: cleanedRemainder) else {
-            // Any other mention of a pre-release keyword => unclassifiable beta (fail-safe).
-            let lower = cleanedRemainder.lowercased()
-            if lower.contains("beta") || lower.contains("seed") || lower.contains("alpha") {
-                return "beta"
+        let cleanedRemainder: String
+        if let rsrRegex = Self.rsrSuffixRegex {
+            let range = NSRange(remainder.startIndex..<remainder.endIndex, in: remainder)
+            cleanedRemainder = rsrRegex.stringByReplacingMatches(in: remainder, range: range, withTemplate: " ")
+        } else {
+            cleanedRemainder = remainder
+        }
+
+        if let regex = Self.prereleaseRegex {
+            let matches = regex.matches(
+                in: cleanedRemainder,
+                range: NSRange(cleanedRemainder.startIndex..., in: cleanedRemainder)
+            )
+            for m in matches {
+                guard let tagRange = Range(m.range(at: 1), in: cleanedRemainder) else { continue }
+                let tag = cleanedRemainder[tagRange].lowercased()
+                var number: Int?
+                if let numRange = Range(m.range(at: 2), in: cleanedRemainder) {
+                    number = Int(cleanedRemainder[numRange])
+                    if number == nil { return tag == "rc" ? "rc" : "beta" } // overflow => unclassifiable
+                }
+                // Single-letter "a"/"b" without an explicit number is only treated as alpha/beta when directly attached (e.g. "27.3b"),
+                // avoiding false pre-release matches on standalone words/initials while continuing to scan later tokens (e.g. "27.3 A beta 1").
+                if (tag == "a" || tag == "b") && number == nil {
+                    guard let fullRange = Range(m.range(at: 0), in: cleanedRemainder) else { continue }
+                    let matchedSlice = cleanedRemainder[fullRange]
+                    if matchedSlice.first?.isWhitespace == true || matchedSlice.first == "(" {
+                        continue
+                    }
+                }
+                switch tag {
+                case "beta", "b", "seed":
+                    if let n = number { return "beta\(n)" }
+                    return "beta"
+                case "rc":
+                    if let n = number { return "rc\(n)" }
+                    return "rc"
+                case "alpha", "a":
+                    if let n = number { return "alpha\(n)" }
+                    return "alpha"
+                default:
+                    return "dev"
+                }
             }
-            return nil
         }
-        let tag = cleanedRemainder[tagRange].lowercased()
-        var number: Int?
-        if let numRange = Range(m.range(at: 2), in: cleanedRemainder) {
-            number = Int(cleanedRemainder[numRange])
-            if number == nil { return tag == "rc" ? "rc" : "beta" } // overflow => unclassifiable
-        }
-        // Single-letter "a"/"b" without an explicit number is only treated as alpha/beta when directly attached (e.g. "27.3b"),
-        // avoiding false pre-release matches on standalone words/initials.
-        if (tag == "a" || tag == "b") && number == nil {
-            let fullRange = Range(m.range(at: 0), in: cleanedRemainder)!
-            let matchedSlice = cleanedRemainder[fullRange]
-            if matchedSlice.first?.isWhitespace == true || matchedSlice.first == "(" {
-                return nil
-            }
-        }
-        switch tag {
-        case "beta", "b", "seed":
-            if let n = number { return "beta\(n)" }
+
+        // Any other mention of a pre-release keyword => unclassifiable beta (fail-safe).
+        let lower = cleanedRemainder.lowercased()
+        if lower.contains("beta") || lower.contains("seed") || lower.contains("alpha") {
             return "beta"
-        case "rc":
-            if let n = number { return "rc\(n)" }
-            return "rc"
-        case "alpha", "a":
-            if let n = number { return "alpha\(n)" }
-            return "alpha"
-        default:
-            return "dev"
         }
+        return nil
     }
 
     /// Beta ordinal for pre-release builds: `nil` for GA / RC builds, `0` for unclassifiable or
@@ -329,6 +378,9 @@ public final class FirmwarePostureEngine: Sendable {
 
     /// Evaluates vulnerability exposure for a specific OS version.
     public func isVulnerable(_ cve: FirmwareCVEID, in version: SystemOSVersion) -> Bool {
+        guard version.major >= 0, version.minor >= 0, version.patch >= 0 else {
+            return true // Fail-closed on negative version components
+        }
         switch cve {
         case .worseQuery0day:
             // Patched in iOS 27.3 beta 2+ / iOS 27.3; iOS 26.0 - 26.7.3 and 27.0 - 27.2.1 remain exposed

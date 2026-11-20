@@ -48,18 +48,26 @@ public struct SettingsView: View {
                 } else {
                     ForEach(customTools) { tool in
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: 3) {
                                 Text(tool.name)
                                     .font(.subheadline.bold())
                                 Text(tool.allowedBundleIds.joined(separator: ", "))
                                     .font(.caption.monospaced())
                                     .foregroundColor(.gray)
+                                if !tool.allowedAppGroups.isEmpty {
+                                    Text("Groups: \(tool.allowedAppGroups.joined(separator: ", "))")
+                                        .font(.caption2.monospaced())
+                                        .foregroundColor(.secondary)
+                                }
+                                Text(WQStrings.ruleSheetTeamSummary(tool.allowedTeamIds))
+                                    .font(.caption2.monospaced())
+                                    .foregroundColor((tool.allowedTeamIds ?? []).isEmpty ? .orange : .teal)
                             }
                             Spacer()
                         }
                     }
                     .onDelete { indexSet in
-                        for idx in indexSet {
+                        for idx in indexSet where idx < customTools.count {
                             let tool = customTools[idx]
                             vm.removeCustomWhitelistRule(named: tool.name)
                         }
@@ -86,13 +94,13 @@ public struct SettingsView: View {
                 HStack {
                     Text(WQStrings.settingsEngineVersion)
                     Spacer()
-                    Text("WQGuardCore v1.3.4").foregroundColor(.gray)
+                    Text("WQGuardCore v1.3.5").foregroundColor(.gray)
                 }
                 HStack {
                     Text(WQStrings.settingsAppBuild)
                     Spacer()
-                    let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.4"
-                    let bld = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "25"
+                    let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.5"
+                    let bld = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "26"
                     Text("\(ver) (Build \(bld))").foregroundColor(.gray)
                 }
                 HStack {

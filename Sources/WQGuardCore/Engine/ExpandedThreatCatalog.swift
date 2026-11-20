@@ -105,6 +105,100 @@ public enum ExpandedThreatCatalog {
         )
     ]
 
+    /// Additional major domestic / global messenger & payment apps frequently repackaged on sideload channels.
+    public static let extraSideloadImpersonationTargets: [ImpersonatedBrand] = [
+        ImpersonatedBrand(
+            name: "WeChat (微信)",
+            bundleIdPatterns: ["com.tencent.xin", "com.tencent.wx"],
+            displayNames: ["微信", "wechat"],
+            description: "国民级社交通讯与支付应用，第三方多开/防撤回重打包版本常见聊天记录与账密窃取插件",
+            descriptionEn: "Major messaging & payment app; unofficial clone/tweak repackages frequently bundle credential or chat-history stealers"
+        ),
+        ImpersonatedBrand(
+            name: "Alipay (支付宝)",
+            bundleIdPatterns: ["com.alipay.iphoneclient"],
+            displayNames: ["支付宝", "alipay"],
+            description: "核心移动支付应用，严禁安装任何非 App Store 侧载篡改版本",
+            descriptionEn: "Critical mobile payment app; never install any non-App Store sideloaded or modified build"
+        ),
+        ImpersonatedBrand(
+            name: "WhatsApp",
+            bundleIdPatterns: ["net.whatsapp.whatsapp"],
+            displayNames: ["whatsapp"],
+            description: "端到端加密通讯软件，非官方企业签/自签包常见会话劫持木马",
+            descriptionEn: "End-to-end encrypted messenger; unofficial enterprise/sideloaded builds frequently carry session-hijacking trojans"
+        )
+    ]
+
+    private static let extraProtectedVictimAppGroupTokens: [String] = [
+        "sixdays", "okex", "okinc", "im.token", "consenlabs",
+        "tencent.xin", "tencent.wx", "iphoneclient", "mytokenpocket",
+        "coinbase", "bybit", "ledger", "onekey", "trustwallet",
+        "metamask", "phantom", "imtoken", "tokenpocket", "bitkeep",
+        "bitget", "okx", "binance", "telegram", "whatsapp",
+        "alipay", "wechat"
+    ]
+
+    private static let protectedVictimAppGroupTokens: [String] = {
+        var tokens = Set(extraProtectedVictimAppGroupTokens)
+        for brand in targetBrands + extraSideloadImpersonationTargets {
+            for pat in brand.bundleIdPatterns {
+                let lower = pat.lowercased()
+                if !lower.isEmpty { tokens.insert(lower) }
+            }
+            for dn in brand.displayNames {
+                let lower = dn.lowercased()
+                let isASCII = lower.unicodeScalars.allSatisfy { $0.isASCII }
+                // Skip ultra-short 2-char ASCII acronyms like "tg" to avoid substring false positives ("netguard"),
+                // while preserving 2-char CJK brand names ("微信", "币安", "欧易").
+                if !isASCII || lower.count >= 3 {
+                    tokens.insert(lower)
+                }
+            }
+        }
+        return tokens.sorted()
+    }()
+
+    /// Returns `true` when an App Group targets Apple system/first-party namespaces or known protected wallet/messenger/exchange brands
+    /// (applying zero-width/NFKD/combining-mark/homoglyph folding). Empty strings, control characters, and enclosing marks fail closed (`true`).
+    public static func isProtectedVictimOrAppleSystemAppGroup(_ rawGroup: String) -> Bool {
+        let trimmed = rawGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        let hasDisallowedScalar: (String) -> Bool = { text in
+            text.unicodeScalars.contains { scalar in
+                let v = scalar.value
+                if v == 0x3164 || v == 0xFFA0 || v == 0x2800 || v == 0x180E || v == 0x115F || v == 0x1160 {
+                    return true
+                }
+                if scalar.properties.isWhitespace {
+                    return true
+                }
+                let cat = scalar.properties.generalCategory
+                return cat == .control
+                    || cat == .enclosingMark
+                    || cat == .spaceSeparator
+                    || cat == .lineSeparator
+                    || cat == .paragraphSeparator
+                    || cat == .privateUse
+                    || cat == .surrogate
+                    || cat == .unassigned
+            }
+        }
+        guard !hasDisallowedScalar(trimmed) else { return true }
+        let foldedLower = foldConfusablesToASCII(trimmed)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !foldedLower.isEmpty, !hasDisallowedScalar(foldedLower) else { return true }
+        if foldedLower == "group.com.apple"
+            || foldedLower == "systemgroup.com.apple"
+            || foldedLower.hasPrefix("group.com.apple.")
+            || foldedLower.hasPrefix("systemgroup.com.apple.")
+            || InstalledAppRegistryScanner.isAppleOwnedAppGroup(foldedLower) {
+            return true
+        }
+        return protectedVictimAppGroupTokens.contains { foldedLower.contains($0) }
+    }
+
     // MARK: - 2. Private Photos Bypass Signatures
     public static let photosFrameworks: Set<String> = [
         IOCTokenArmor.tPhotoLibFw,
@@ -119,6 +213,17 @@ public enum ExpandedThreatCatalog {
         IOCTokenArmor.tPhotoLibSvc,
         IOCTokenArmor.tSysPhotoLib,
         "sharedPhotoLibrary"
+    ]
+
+    /// Canonical deterministic evaluation order for `photosSymbols` (preferring `IOCTokenArmor.tPLPhotoLib` first)
+    /// so emitted `ThreatIndicator.signature` and `matchedSymbols` never fluctuate across processes.
+    public static let orderedPhotosSymbols: [String] = [
+        IOCTokenArmor.tPLPhotoLib,
+        "_OBJC_CLASS_$_\(IOCTokenArmor.tPLPhotoLib)",
+        "-[\(IOCTokenArmor.tPLPhotoLib)",
+        "+[\(IOCTokenArmor.tPLPhotoLib)",
+        IOCTokenArmor.tPhotoLibSvc,
+        IOCTokenArmor.tSysPhotoLib
     ]
 
     public static let photosEntitlementPrefix = "com.apple.private.photos."
@@ -203,10 +308,10 @@ public enum ExpandedThreatCatalog {
             }
         }
 
-        // Symbol checks
+        // Symbol checks (deterministic canonical order so signature never depends on Set hash randomization)
         let privateSelectorsOnly: Set<String> = [IOCTokenArmor.tSysPhotoLib]
         for sym in symbols {
-            for targetSym in photosSymbols where targetSym != "sharedPhotoLibrary" {
+            for targetSym in orderedPhotosSymbols {
                 let matched = privateSelectorsOnly.contains(targetSym) ? (sym == targetSym || sym.contains(" \(targetSym)]")) : sym.contains(targetSym)
                 if matched {
                     indicators.append(ThreatIndicator(
@@ -294,7 +399,10 @@ public enum ExpandedThreatCatalog {
 
     private static let confusableScalarToASCII: [UInt32: Character] = [
         // Latin Extended / IPA visual lookalikes not folded by NFKC
-        0x0131: "i", 0x0141: "L", 0x0142: "l", 0x0261: "g", 0x026A: "i",
+        0x0131: "i", 0x0141: "L", 0x0142: "l", 0x0251: "a", 0x0261: "g", 0x026A: "i",
+        0x0274: "n", 0x0280: "r", 0x028F: "y", 0x0299: "b", 0x029C: "h", 0x029F: "l",
+        0x1D00: "a", 0x1D04: "c", 0x1D05: "d", 0x1D07: "e", 0x1D0D: "m", 0x1D0F: "o",
+        0x1D18: "p", 0x1D1B: "t", 0x1D1C: "u", 0x1D20: "v", 0x1D21: "w", 0x1D22: "z",
         // Cyrillic uppercase -> Latin uppercase (preserves CamelCase splits like "МеtаМаsk")
         0x0410: "A", 0x0412: "B", 0x0421: "C", 0x0415: "E", 0x0405: "S", 0x0406: "I",
         0x0408: "J", 0x041A: "K", 0x041C: "M", 0x041D: "H", 0x041E: "O", 0x0420: "P",
@@ -303,18 +411,23 @@ public enum ExpandedThreatCatalog {
         0x0430: "a", 0x0435: "e", 0x0455: "s", 0x0456: "i", 0x0458: "j", 0x043A: "k",
         0x043C: "m", 0x043E: "o", 0x0440: "p", 0x0441: "c", 0x0442: "t", 0x0443: "y",
         0x0445: "x", 0x04BB: "h", 0x04CF: "l", 0x0501: "d", 0x051D: "w",
-        // Greek uppercase & lowercase confusables
+        // Greek uppercase & lowercase confusables (including micro sign 0x00B5 -> 0x03BC after NFKC)
+        0x00B5: "m",
         0x0391: "A", 0x0392: "B", 0x0395: "E", 0x0396: "Z", 0x0397: "H", 0x0399: "I",
         0x039A: "K", 0x039C: "M", 0x039D: "N", 0x039F: "O", 0x03A1: "P", 0x03A4: "T",
         0x03A5: "Y", 0x03A7: "X",
-        0x03B1: "a", 0x03B5: "e", 0x03B9: "i", 0x03BA: "k", 0x03BD: "v", 0x03BF: "o",
-        0x03C1: "p", 0x03C4: "t", 0x03C5: "u", 0x03C7: "x",
+        0x03B1: "a", 0x03B5: "e", 0x03B9: "i", 0x03BA: "k", 0x03BC: "m", 0x03BD: "v",
+        0x03BF: "o", 0x03C1: "p", 0x03C4: "t", 0x03C5: "u", 0x03C7: "x",
         // Armenian confusables commonly abused in wallet phishing
-        0x054D: "U", 0x0555: "O", 0x0570: "h", 0x0578: "n", 0x057D: "u", 0x0584: "p", 0x0585: "o"
+        0x054D: "U", 0x0555: "O", 0x0570: "h", 0x0578: "n", 0x057D: "u", 0x0584: "p", 0x0585: "o",
+        // Cherokee lookalikes
+        0x13AA: "A", 0x13AC: "E", 0x13B7: "M", 0x13C2: "h", 0x13DA: "S", 0x13DE: "L",
+        0x13DF: "C", 0x13E2: "P", 0x13E6: "K", 0x13F4: "B"
     ]
 
-    /// Strips zero-width/format/variation-selector characters, applies NFKC normalization (folding fullwidth/mathematical Latin),
-    /// and maps Cyrillic/Greek/Armenian/Latin-Extended visual homoglyphs to ASCII while leaving CJK characters untouched.
+    /// Strips zero-width/format/variation-selector characters, applies NFKD decomposition before stripping combining marks
+    /// (so combining diacritics on Latin vowels like `e\u{0301}` or precomposed `é` fold to ASCII `e` rather than recomposing),
+    /// re-normalizes via NFKC, and maps Cyrillic/Greek/Armenian/Latin-Extended visual homoglyphs to ASCII while leaving CJK characters untouched.
     public static func foldConfusablesToASCII(_ input: String) -> String {
         let strippedScalars = input.unicodeScalars.filter { scalar in
             let v = scalar.value
@@ -324,14 +437,22 @@ public enum ExpandedThreatCatalog {
             }
             return scalar.properties.generalCategory != .format
         }
-        let nfkc = String(String.UnicodeScalarView(strippedScalars)).precomposedStringWithCompatibilityMapping
+        let nfkd = String(String.UnicodeScalarView(strippedScalars)).decomposedStringWithCompatibilityMapping
+        let strippedMarks = nfkd.unicodeScalars.filter { scalar in
+            let cat = scalar.properties.generalCategory
+            return cat != .nonspacingMark && cat != .enclosingMark && cat != .spacingMark
+        }
+        let nfkc = String(String.UnicodeScalarView(strippedMarks)).precomposedStringWithCompatibilityMapping
         var out: [Character] = []
         out.reserveCapacity(nfkc.count)
         for scalar in nfkc.unicodeScalars {
             if let mapped = confusableScalarToASCII[scalar.value] {
                 out.append(mapped)
-            } else if scalar.properties.generalCategory != .nonspacingMark {
-                out.append(Character(scalar))
+            } else {
+                let cat = scalar.properties.generalCategory
+                if cat != .nonspacingMark && cat != .enclosingMark && cat != .spacingMark {
+                    out.append(Character(scalar))
+                }
             }
         }
         return String(out)
@@ -999,14 +1120,24 @@ public enum ExpandedThreatCatalog {
                 continue
             }
             let lower = group.lowercased()
-            if lower.contains("apple") {
+            let foldedLower = foldConfusablesToASCII(group).lowercased()
+            let isAppleTargetedWildcard = foldedLower.hasPrefix("com.apple.")
+                || foldedLower.contains(".com.apple.")
+                || foldedLower.hasPrefix("apple.")
+                || foldedLower.contains(".apple.")
+            if isAppleTargetedWildcard {
                 dangerous.append(group)
                 continue
             }
             if group.hasSuffix(".*") {
                 let prefixLower = String(lower.dropLast(2))
-                if normalizedAllowed.contains(prefixLower)
-                    || normalizedAllowed.contains(where: { prefixLower.hasPrefix($0 + ".") }) {
+                let hasValidASCIIPrefix = !prefixLower.isEmpty
+                    && !prefixLower.contains("*")
+                    && !prefixLower.contains("?")
+                    && prefixLower.utf8.allSatisfy { $0 >= 0x21 && $0 < 0x7F }
+                if hasValidASCIIPrefix
+                    && (normalizedAllowed.contains(prefixLower)
+                        || normalizedAllowed.contains(where: { prefixLower.hasPrefix($0 + ".") })) {
                     continue
                 }
                 dangerous.append(group)

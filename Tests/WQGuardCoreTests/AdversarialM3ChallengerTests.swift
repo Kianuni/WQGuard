@@ -930,6 +930,12 @@ final class AdversarialM3ChallengerTests: XCTestCase {
         )
         let ipaURL = trackTempFile(try MockIPAGenerator.shared.createIPA(config: config))
 
+        let tmpPath = FileManager.default.temporaryDirectory.path
+        let beforeLeftovers = Set(
+            (try FileManager.default.contentsOfDirectory(atPath: tmpPath))
+                .filter { $0.hasPrefix("wqguard_ipa_") }
+        )
+
         // 1. Scan valid IPA
         _ = try IPAPackageScanner.shared.scan(ipaURL: ipaURL)
 
@@ -941,9 +947,12 @@ final class AdversarialM3ChallengerTests: XCTestCase {
         try badZipData.write(to: badURL)
         XCTAssertThrowsError(try IPAPackageScanner.shared.scan(ipaURL: badURL))
 
-        // Verify zero leftover wqguard_ipa_* directories in temporaryDirectory
-        let tempContents = try FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)
-        let leftovers = tempContents.filter { $0.hasPrefix("wqguard_ipa_") }
+        // Verify zero new leftover wqguard_ipa_* directories in temporaryDirectory
+        let afterLeftovers = Set(
+            (try FileManager.default.contentsOfDirectory(atPath: tmpPath))
+                .filter { $0.hasPrefix("wqguard_ipa_") }
+        )
+        let leftovers = afterLeftovers.subtracting(beforeLeftovers).sorted()
         XCTAssertTrue(leftovers.isEmpty, "Found uncleaned sandbox directories: \(leftovers)")
     }
 

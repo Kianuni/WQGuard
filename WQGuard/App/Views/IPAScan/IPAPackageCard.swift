@@ -35,17 +35,17 @@ public struct IPAPackageCard: View {
 
             // Pre-install advisory banner
             HStack(spacing: 10) {
-                Image(systemName: finding.riskTier == .highRisk ? "xmark.octagon.fill" : "checkmark.seal.fill")
-                    .foregroundColor(finding.riskTier == .highRisk ? .red : .green)
+                Image(systemName: preinstallIconName)
+                    .foregroundColor(preinstallColor)
                     .font(.title3)
 
-                Text(finding.riskTier == .highRisk ? WQStrings.preinstallAlertHighRisk : WQStrings.preinstallAlertSafe)
+                Text(preinstallBannerText)
                     .font(.subheadline.bold())
-                    .foregroundColor(finding.riskTier == .highRisk ? .red : .green)
+                    .foregroundColor(preinstallColor)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background((finding.riskTier == .highRisk ? Color.red : Color.green).opacity(0.12))
+            .background(preinstallColor.opacity(0.12))
             .clipShape(RoundedRectangle(cornerRadius: 12))
 
             // Details Grid
@@ -86,5 +86,32 @@ public struct IPAPackageCard: View {
             RoundedRectangle(cornerRadius: 18)
                 .fill(Color(red: 0.10, green: 0.11, blue: 0.15))
         )
+    }
+
+    private var preinstallColor: Color {
+        switch finding.riskTier {
+        case .highRisk: return .red
+        case .caution: return .orange
+        case .knownTool: return .yellow
+        case .safe: return .green
+        }
+    }
+
+    private var preinstallIconName: String {
+        switch finding.riskTier {
+        case .highRisk: return "xmark.octagon.fill"
+        case .caution: return "exclamationmark.triangle.fill"
+        case .knownTool: return "wrench.and.screwdriver.fill"
+        case .safe: return "checkmark.seal.fill"
+        }
+    }
+
+    private var preinstallBannerText: String {
+        switch finding.riskTier {
+        case .highRisk: return WQStrings.preinstallAlertHighRisk
+        case .caution: return WQStrings.preinstallAlertCaution
+        case .knownTool: return WQStrings.preinstallAlertKnownTool
+        case .safe: return WQStrings.preinstallAlertSafe
+        }
     }
 }

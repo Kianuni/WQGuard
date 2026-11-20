@@ -262,8 +262,10 @@ final class AdversarialV130Round10DeepAuditTests: XCTestCase {
         XCTAssertEqual(symBundleClass.channel, .developerSideloaded)
         XCTAssertNil(symBundleClass.teamIdentifier)
 
-        // Negative control: genuine cryptid = 1 without embedded.mobileprovision remains .appStore
-        XCTAssertEqual(ChannelClassifier.classify(cryptid: 1, mobileprovisionData: nil).channel, .appStore)
+        // Option A control: unsigned synthetic cryptid = 1 without Apple CMS trust never becomes .appStore,
+        // while Apple App Store verified cryptid = 1 without embedded.mobileprovision classifies as .appStore.
+        XCTAssertEqual(ChannelClassifier.classify(cryptid: 1, mobileprovisionData: nil).channel, .developerSideloaded)
+        XCTAssertEqual(ChannelClassifier.classify(cryptid: 1, mobileprovisionData: nil, codeSignatureTrust: .appleAppStoreVerified).channel, .appStore)
     }
 
     // MARK: - 2. MachOParser LC_DYLD_INFO_ONLY lazy_bind Random-Access Poisoning & Desync Defense
@@ -481,13 +483,35 @@ final class AdversarialV130Round10DeepAuditTests: XCTestCase {
         XCTAssertEqual(finding.riskTier, .highRisk)
         XCTAssertTrue(finding.indicators.contains { $0.signature == "systemPhotoLibrary" })
 
-        // Negative control: 100% FairPlay-encrypted __objc_methname returns empty selectors and .safe
-        let fullEncBin = buildMachOWithObjCMethnameAndInfoPlist(
-            selectors: ["systemPhotoLibrary"],
+        // Negative control: 100% FairPlay-encrypted __objc_methname (high-entropy CSPRNG >= 4096 bytes) returns empty selectors and .safe
+        var fullEncBin = SyntheticMachOGenerator.shared.generateThin(config: .init(
+            arch: .arm64,
             cryptid: 1,
-            fullyEncryptMethname: true
-        )
+            cryptoff: 0,
+            cryptsize: 0x4000,
+            textInstructions: [Self.retWord],
+            customSections: [
+                (segName: "__TEXT", sectName: "__objc_methname", flags: 0x02, payload: M1TestCMSFixtures.csprngBytes(count: 4096))
+            ]
+        ))
+        let preFullParsed = try MachOParser.parse(data: fullEncBin)
+        let methSect = try XCTUnwrap(preFullParsed.segments.flatMap(\.sections).first { $0.sectionName == "__objc_methname" })
+        let fullNcmds = fullEncBin.withUnsafeBytes { $0.load(fromByteOffset: 16, as: UInt32.self) }
+        var fullLcCur = MemoryLayout<mach_header_64>.size
+        for _ in 0..<fullNcmds {
+            let cmd = fullEncBin.withUnsafeBytes { $0.load(fromByteOffset: fullLcCur, as: UInt32.self) }
+            let csz = fullEncBin.withUnsafeBytes { $0.load(fromByteOffset: fullLcCur + 4, as: UInt32.self) }
+            if cmd == UInt32(LC_ENCRYPTION_INFO_64) {
+                var offLE = methSect.offset.littleEndian
+                var szLE = UInt32(methSect.size).littleEndian
+                withUnsafeBytes(of: &offLE) { fullEncBin.replaceSubrange((fullLcCur + 8)..<(fullLcCur + 12), with: $0) }
+                withUnsafeBytes(of: &szLE) { fullEncBin.replaceSubrange((fullLcCur + 12)..<(fullLcCur + 16), with: $0) }
+                break
+            }
+            fullLcCur += Int(csz)
+        }
         let parsedFull = try MachOParser.parse(data: fullEncBin)
+        XCTAssertFalse(parsedFull.hasForgedPlaintextFairPlayRange)
         XCTAssertTrue(parsedFull.objcMethodNames.isEmpty)
         let fullURL = makeTempURL("full_enc_methname_bin")
         try fullEncBin.write(to: fullURL)

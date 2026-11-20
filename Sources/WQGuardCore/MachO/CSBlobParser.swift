@@ -71,6 +71,31 @@ public enum CodeSignatureTrustDisposition: Sendable, Equatable {
     }
 }
 
+/// Verified Apple leaf signer identity category derived from CMS X.509 leaf subject summary.
+public enum AppleVerifiedSignerKind: String, Sendable, Equatable {
+    case none
+    case appStore
+    case testFlight
+    case macSoftware
+}
+
+/// Full cryptographic code-signature evaluation combining disposition and verified Apple leaf signer provenance.
+public struct CodeSignatureTrustEvaluation: Sendable, Equatable {
+    public let disposition: CodeSignatureTrustDisposition
+    public let signerKind: AppleVerifiedSignerKind
+    public let leafSubjectSummary: String?
+
+    public init(
+        disposition: CodeSignatureTrustDisposition,
+        signerKind: AppleVerifiedSignerKind,
+        leafSubjectSummary: String? = nil
+    ) {
+        self.disposition = disposition
+        self.signerKind = signerKind
+        self.leafSubjectSummary = leafSubjectSummary
+    }
+}
+
 // MARK: - Errors
 
 public enum CSBlobError: Error, LocalizedError, Equatable {
@@ -633,7 +658,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
     private func parseBlobIndices(from buffer: UnsafeRawBufferPointer, totalLength: Int) throws -> [CSBlobIndexEntry] {
         guard let countU32 = Self.readUInt32BE(from: buffer, at: 8) else { return [] }
         let rawCount = Int(countU32)
-        let maxSlots = (totalLength - 12) / 8
+        let maxSlots = min(max(0, (totalLength - 12) / 8), 4096)
         let safeCount = min(max(0, rawCount), maxSlots)
 
         var entries: [CSBlobIndexEntry] = []
@@ -738,51 +763,69 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
     /// claiming `cryptid != 0` App Store status, while preserving `.absentOrSynthetic` for minimal synthetic test fixtures
     /// lacking both `CodeDirectory` and `CSSLOT_CMS_SIGNATURE`.
     public func inspectCodeSignatureTrust(fromSlices slices: [MachOFile]) -> CodeSignatureTrustDisposition {
-        inspectCodeSignatureTrust(fromSlices: slices, customAnchorCertificates: nil)
+        inspectCodeSignatureTrustEvaluation(fromSlices: slices, customAnchorCertificates: nil).disposition
     }
 
     internal func inspectCodeSignatureTrust(
         fromSlices slices: [MachOFile],
         customAnchorCertificates: [SecCertificate]?
     ) -> CodeSignatureTrustDisposition {
+        inspectCodeSignatureTrustEvaluation(fromSlices: slices, customAnchorCertificates: customAnchorCertificates).disposition
+    }
+
+    public func inspectCodeSignatureTrustEvaluation(fromSlices slices: [MachOFile]) -> CodeSignatureTrustEvaluation {
+        inspectCodeSignatureTrustEvaluation(fromSlices: slices, customAnchorCertificates: nil)
+    }
+
+    internal func inspectCodeSignatureTrustEvaluation(
+        fromSlices slices: [MachOFile],
+        customAnchorCertificates: [SecCertificate]?
+    ) -> CodeSignatureTrustEvaluation {
         let auditSlices = MachOParser.selectAuditSlices(from: slices)
         var sawAppleVerified = false
         var sawAbsent = false
+        var verifiedKinds: [AppleVerifiedSignerKind] = []
+        var verifiedSummary: String? = nil
+
         for slice in auditSlices {
             if !slice.codeSignatures.isEmpty {
                 for cs in slice.codeSignatures {
                     if cs.datasize < 12 || UInt64(cs.dataoff) + UInt64(cs.datasize) > UInt64(slice.sliceData.count) {
-                        return .adHocOrUnsigned
+                        return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
                     }
                 }
             }
             let blobs = slice.allCodeSignatureData
             if blobs.isEmpty {
-                let disp = inspectCodeSignatureTrust(
+                let eval = inspectCodeSignatureTrustEvaluation(
                     from: slice.codeSignatureData,
                     sliceData: slice.sliceData,
                     customAnchorCertificates: customAnchorCertificates
                 )
-                switch disp {
+                switch eval.disposition {
                 case .adHocOrUnsigned, .nonAppStoreSigner:
-                    return disp
+                    return eval
                 case .appleAppStoreVerified:
                     sawAppleVerified = true
+                    verifiedKinds.append(eval.signerKind)
+                    if verifiedSummary == nil { verifiedSummary = eval.leafSubjectSummary }
                 case .absentOrSynthetic:
                     sawAbsent = true
                 }
             } else {
                 for blob in blobs {
-                    let disp = inspectCodeSignatureTrust(
+                    let eval = inspectCodeSignatureTrustEvaluation(
                         from: blob,
                         sliceData: slice.sliceData,
                         customAnchorCertificates: customAnchorCertificates
                     )
-                    switch disp {
+                    switch eval.disposition {
                     case .adHocOrUnsigned, .nonAppStoreSigner:
-                        return disp
+                        return eval
                     case .appleAppStoreVerified:
                         sawAppleVerified = true
+                        verifiedKinds.append(eval.signerKind)
+                        if verifiedSummary == nil { verifiedSummary = eval.leafSubjectSummary }
                     case .absentOrSynthetic:
                         sawAbsent = true
                     }
@@ -790,19 +833,40 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             }
         }
         if sawAppleVerified && sawAbsent {
-            return .adHocOrUnsigned
+            return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
         }
-        return sawAppleVerified ? .appleAppStoreVerified : .absentOrSynthetic
+        if sawAppleVerified {
+            let aggregatedKind: AppleVerifiedSignerKind
+            if verifiedKinds.contains(.testFlight) {
+                aggregatedKind = .testFlight
+            } else if verifiedKinds.contains(.appStore) {
+                aggregatedKind = .appStore
+            } else if verifiedKinds.contains(.macSoftware) {
+                aggregatedKind = .macSoftware
+            } else {
+                aggregatedKind = .none
+            }
+            return CodeSignatureTrustEvaluation(
+                disposition: .appleAppStoreVerified,
+                signerKind: aggregatedKind,
+                leafSubjectSummary: verifiedSummary
+            )
+        }
+        return CodeSignatureTrustEvaluation(disposition: .absentOrSynthetic, signerKind: .none, leafSubjectSummary: nil)
     }
 
     public func inspectCodeSignatureTrust(from codeSignatureData: Data?) -> CodeSignatureTrustDisposition {
-        inspectCodeSignatureTrust(from: codeSignatureData, sliceData: nil, customAnchorCertificates: nil)
+        inspectCodeSignatureTrustEvaluation(from: codeSignatureData, sliceData: nil, customAnchorCertificates: nil).disposition
+    }
+
+    public func inspectCodeSignatureTrustEvaluation(from codeSignatureData: Data?) -> CodeSignatureTrustEvaluation {
+        inspectCodeSignatureTrustEvaluation(from: codeSignatureData, sliceData: nil, customAnchorCertificates: nil)
     }
 
     private func parseBlobIndicesStrict(from buffer: UnsafeRawBufferPointer, totalLength: Int) -> [CSBlobIndexEntry]? {
         guard let countU32 = Self.readUInt32BE(from: buffer, at: 8) else { return nil }
-        let maxSlots = (totalLength - 12) / 8
-        guard UInt64(countU32) <= UInt64(max(0, maxSlots)) else { return nil }
+        let maxSlots = min(max(0, (totalLength - 12) / 8), 4096)
+        guard UInt64(countU32) <= UInt64(maxSlots) else { return nil }
         let count = Int(countU32)
 
         var entries: [CSBlobIndexEntry] = []
@@ -840,23 +904,35 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         sliceData: Data?,
         customAnchorCertificates: [SecCertificate]? = nil
     ) -> CodeSignatureTrustDisposition {
+        inspectCodeSignatureTrustEvaluation(
+            from: codeSignatureData,
+            sliceData: sliceData,
+            customAnchorCertificates: customAnchorCertificates
+        ).disposition
+    }
+
+    internal func inspectCodeSignatureTrustEvaluation(
+        from codeSignatureData: Data?,
+        sliceData: Data?,
+        customAnchorCertificates: [SecCertificate]? = nil
+    ) -> CodeSignatureTrustEvaluation {
         guard let rawCSData = codeSignatureData, !rawCSData.isEmpty else {
-            return .absentOrSynthetic
+            return CodeSignatureTrustEvaluation(disposition: .absentOrSynthetic, signerKind: .none, leafSubjectSummary: nil)
         }
         guard rawCSData.count >= 12 else {
-            return .adHocOrUnsigned
+            return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
         }
         let data = rawCSData.startIndex == 0 ? rawCSData : Data(rawCSData)
-        return data.withUnsafeBytes { buffer -> CodeSignatureTrustDisposition in
+        return data.withUnsafeBytes { buffer -> CodeSignatureTrustEvaluation in
             guard let magic = Self.readUInt32BE(from: buffer, at: 0),
                   magic == CSBlobConstants.superBlobMagic,
                   let lengthU32 = Self.readUInt32BE(from: buffer, at: 4) else {
-                return .adHocOrUnsigned
+                return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
             }
             let totalLength = Int(lengthU32)
             guard totalLength >= 12, totalLength <= buffer.count,
                   let entries = parseBlobIndicesStrict(from: buffer, totalLength: totalLength) else {
-                return .adHocOrUnsigned
+                return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
             }
 
             var sawCodeDirectorySlot = false
@@ -877,12 +953,12 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                     if entry.length >= 16,
                        let flags = Self.readUInt32BE(from: buffer, at: entry.offset + 12),
                        (flags & CSBlobConstants.csAdhocFlag) != 0 {
-                        return .adHocOrUnsigned
+                        return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
                     }
                     let blobStart = entry.offset
                     let blobEnd = entry.offset + entry.length
                     guard blobStart >= 12, blobEnd <= totalLength, blobStart < blobEnd else {
-                        return .adHocOrUnsigned
+                        return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
                     }
                     codeDirectoryEntries.append((entry.type, Data(buffer[blobStart..<blobEnd])))
                 }
@@ -921,11 +997,13 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
 
             if cmsPayloads.isEmpty {
                 if sawCodeDirectorySlot || sawCMSWrapperSlot || sawNonEntitlementSlot || entries.isEmpty {
-                    return .adHocOrUnsigned
+                    return CodeSignatureTrustEvaluation(disposition: .adHocOrUnsigned, signerKind: .none, leafSubjectSummary: nil)
                 }
-                return .absentOrSynthetic
+                return CodeSignatureTrustEvaluation(disposition: .absentOrSynthetic, signerKind: .none, leafSubjectSummary: nil)
             }
 
+            var verifiedKinds: [AppleVerifiedSignerKind] = []
+            var verifiedSummary: String? = nil
             for cmsData in cmsPayloads {
                 let cmsEval = Self.verifyAppleAppStoreCMSSignature(
                     cmsData,
@@ -935,18 +1013,36 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                     sliceData: sliceData,
                     customAnchorCertificates: customAnchorCertificates
                 )
-                if cmsEval != .appleAppStoreVerified {
+                if cmsEval.disposition != .appleAppStoreVerified {
                     return cmsEval
                 }
+                verifiedKinds.append(cmsEval.signerKind)
+                if verifiedSummary == nil {
+                    verifiedSummary = cmsEval.leafSubjectSummary
+                }
             }
-            return .appleAppStoreVerified
+            let aggregatedKind: AppleVerifiedSignerKind
+            if verifiedKinds.contains(.testFlight) {
+                aggregatedKind = .testFlight
+            } else if verifiedKinds.contains(.appStore) {
+                aggregatedKind = .appStore
+            } else if verifiedKinds.contains(.macSoftware) {
+                aggregatedKind = .macSoftware
+            } else {
+                aggregatedKind = .none
+            }
+            return CodeSignatureTrustEvaluation(
+                disposition: .appleAppStoreVerified,
+                signerKind: aggregatedKind,
+                leafSubjectSummary: verifiedSummary
+            )
         }
     }
 
     /// Verifies that an `.app` bundle's `Info.plist` matches the main binary's signed `CodeDirectory`
     /// (`identOffset` bundle identifier and Special Slot `-1` `CSSLOT_INFOSLOT` hash when populated),
     /// defeating whole-binary transplantation of a benign App Store Mach-O into a spoofed `Info.plist` bundle.
-    /// Returns `nil` when no non-ad-hoc `CodeDirectory` is present (e.g. minimal synthetic test fixtures) or when binding succeeds;
+    /// Returns `nil` when no `CodeDirectory` with populated binding slots is present (e.g. minimal synthetic test fixtures) or when binding succeeds;
     /// returns `.nonAppStoreSigner` when `Info.plist` diverges from the signed `CodeDirectory`.
     public func verifyBundleInfoPlistBinding(
         fromSlices slices: [MachOFile],
@@ -984,7 +1080,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                         let end = entry.offset + entry.length
                         guard start >= 12, end <= totalLength, start < end else { return true }
                         let cdBytes = Data(buffer[start..<end])
-                        guard let parsedCD = Self.parseCodeDirectory(slotType: entry.type, blobData: cdBytes) else {
+                        guard let parsedCD = Self.parseCodeDirectory(slotType: entry.type, blobData: cdBytes, allowAdHoc: true) else {
                             continue
                         }
                         if let cdIdent = parsedCD.identifier?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1027,6 +1123,23 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         "dylib", "so", "py", "lua", "sh"
     ]
 
+    internal struct ArchiveSealedRegularFile: Sendable {
+        let declaredSize: Int
+        let readData: @Sendable (_ maxBytes: Int) -> Data?
+    }
+
+    internal enum ArchiveSealedResourceEntry: Sendable {
+        case symlink(target: String)
+        case regular(files: [ArchiveSealedRegularFile])
+    }
+
+    internal struct ArchiveBundleResourceLookup: Sendable {
+        let resolveEntry: @Sendable (_ relativePath: String) -> ArchiveSealedResourceEntry?
+        let unextractedRegularPaths: @Sendable () -> [String]
+        let allSymlinks: @Sendable () -> [String: String]
+        let allRegularPaths: @Sendable () -> [String]
+    }
+
     /// Verifies `CodeDirectory` Special Slot `-3` (`CSSLOT_RESOURCEDIR` -> `_CodeSignature/CodeResources`)
     /// and sealed resource file digests (`files2` / `files`) when Special Slot `-3` is populated,
     /// defeating hybrid tampering of React Native / WebView / Capacitor bundle assets (e.g. `main.jsbundle`, `index.html`)
@@ -1035,6 +1148,28 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
     public func verifyBundleCodeResourcesSeal(
         fromSlices slices: [MachOFile],
         bundleURL: URL
+    ) -> CodeSignatureTrustDisposition? {
+        verifyBundleCodeResourcesSeal(fromSlices: slices, bundleURL: bundleURL, archiveLookup: nil)
+    }
+
+    internal func verifyBundleCodeResourcesSeal(
+        fromSlices slices: [MachOFile],
+        bundleURL: URL,
+        archiveLookup: ArchiveBundleResourceLookup?
+    ) -> CodeSignatureTrustDisposition? {
+        verifyBundleCodeResourcesSealInternal(
+            fromSlices: slices,
+            bundleURL: bundleURL,
+            archiveLookup: archiveLookup,
+            depth: 0
+        )
+    }
+
+    private func verifyBundleCodeResourcesSealInternal(
+        fromSlices slices: [MachOFile],
+        bundleURL: URL,
+        archiveLookup: ArchiveBundleResourceLookup?,
+        depth: Int
     ) -> CodeSignatureTrustDisposition? {
         let auditSlices = MachOParser.selectAuditSlices(from: slices)
         var requiredSlot3Specs: [(hashType: UInt8, expectedDigest: Data)] = []
@@ -1066,7 +1201,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                         let end = entry.offset + entry.length
                         guard start >= 12, end <= totalLength, start < end else { continue }
                         let cdBytes = Data(buffer[start..<end])
-                        guard let parsedCD = Self.parseCodeDirectory(slotType: entry.type, blobData: cdBytes),
+                        guard let parsedCD = Self.parseCodeDirectory(slotType: entry.type, blobData: cdBytes, allowAdHoc: true),
                               let slot3 = parsedCD.specialSlotHash(3),
                               !slot3.allSatisfy({ $0 == 0 }) else {
                             continue
@@ -1081,39 +1216,63 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             return nil
         }
 
-        let resolvedBundleURL = bundleURL.resolvingSymlinksInPath().standardizedFileURL
-        let bundlePrefix = resolvedBundleURL.path.hasSuffix("/") ? resolvedBundleURL.path : resolvedBundleURL.path + "/"
+        let resolvedBundlePath = IPAPackageScanner.lexicalStandardizedPath(bundleURL.resolvingSymlinksInPath().path)
+        let resolvedBundleURL = URL(fileURLWithPath: resolvedBundlePath)
+        let bundlePrefix = IPAPackageScanner.lexicalStandardizedPrefix(resolvedBundlePath)
 
-        let layoutCandidates: [(codeResRel: String, resRootRel: String, isFlat: Bool)] = [
-            ("_CodeSignature/CodeResources", "", true),
-            ("Contents/_CodeSignature/CodeResources", "Contents", false),
-            ("Versions/Current/_CodeSignature/CodeResources", "Versions/Current", false),
-            ("Versions/A/_CodeSignature/CodeResources", "Versions/A", false)
+        let layoutCandidates: [(codeResRel: String, resRootRel: String)] = [
+            ("_CodeSignature/CodeResources", ""),
+            ("Contents/_CodeSignature/CodeResources", "Contents"),
+            ("Versions/Current/_CodeSignature/CodeResources", "Versions/Current"),
+            ("Versions/A/_CodeSignature/CodeResources", "Versions/A")
         ]
 
         var matchedCodeResourcesData: Data? = nil
         var resourceRootURL: URL = resolvedBundleURL
-        var isFlatBundle = true
+        var matchedResRootRel = ""
 
         for cand in layoutCandidates {
             let candidateURL = resolvedBundleURL.appendingPathComponent(cand.codeResRel)
             var st = stat()
-            guard lstat(candidateURL.path, &st) == 0 else { continue }
-            // Reject symlinked CodeResources files; allow Versions/Current directory symlink inside bundle
-            if (st.st_mode & S_IFMT) == S_IFLNK {
-                return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+            if lstat(candidateURL.path, &st) == 0 {
+                // Reject symlinked CodeResources files; allow Versions/Current directory symlink inside bundle
+                if (st.st_mode & S_IFMT) == S_IFLNK {
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                }
+                let resolvedCR = candidateURL.resolvingSymlinksInPath().standardizedFileURL
+                let resolvedCRPath = IPAPackageScanner.lexicalStandardizedPath(resolvedCR.path)
+                guard resolvedCRPath.hasPrefix(bundlePrefix),
+                      let crData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: resolvedCR, maxBytes: 32 * 1024 * 1024) else {
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                }
+                matchedCodeResourcesData = crData
+                matchedResRootRel = cand.resRootRel
+                let rawRootURL = cand.resRootRel.isEmpty
+                    ? resolvedBundleURL
+                    : resolvedBundleURL.appendingPathComponent(cand.resRootRel).resolvingSymlinksInPath().standardizedFileURL
+                resourceRootURL = URL(fileURLWithPath: IPAPackageScanner.lexicalStandardizedPath(rawRootURL.path))
+                break
+            } else if let lookup = archiveLookup,
+                      let archiveCR = lookup.resolveEntry(cand.codeResRel) {
+                switch archiveCR {
+                case .symlink:
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                case .regular(let files):
+                    guard files.count == 1,
+                          files[0].declaredSize <= 32 * 1024 * 1024,
+                          let crData = files[0].readData(32 * 1024 * 1024) else {
+                        return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    }
+                    matchedCodeResourcesData = crData
+                    matchedResRootRel = cand.resRootRel
+                    resourceRootURL = cand.resRootRel.isEmpty
+                        ? resolvedBundleURL
+                        : resolvedBundleURL.appendingPathComponent(cand.resRootRel)
+                }
+                if matchedCodeResourcesData != nil {
+                    break
+                }
             }
-            let resolvedCR = candidateURL.resolvingSymlinksInPath().standardizedFileURL
-            guard resolvedCR.path.hasPrefix(bundlePrefix),
-                  let crData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: resolvedCR, maxBytes: 32 * 1024 * 1024) else {
-                return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
-            }
-            matchedCodeResourcesData = crData
-            resourceRootURL = cand.resRootRel.isEmpty
-                ? resolvedBundleURL
-                : resolvedBundleURL.appendingPathComponent(cand.resRootRel).resolvingSymlinksInPath().standardizedFileURL
-            isFlatBundle = cand.isFlat
-            break
         }
 
         guard let codeResourcesData = matchedCodeResourcesData else {
@@ -1131,10 +1290,11 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
         }
 
-        guard resourceRootURL.path == resolvedBundleURL.path || resourceRootURL.path.hasPrefix(bundlePrefix) else {
+        let resourceRootStd = IPAPackageScanner.lexicalStandardizedPath(resourceRootURL.path)
+        guard resourceRootStd == resolvedBundlePath || resourceRootStd.hasPrefix(bundlePrefix) else {
             return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
         }
-        let resourcePrefix = resourceRootURL.path.hasSuffix("/") ? resourceRootURL.path : resourceRootURL.path + "/"
+        let resourcePrefix = IPAPackageScanner.lexicalStandardizedPrefix(resourceRootStd)
 
         let files2Dict = crPlist["files2"] as? [String: Any]
         let files1Dict = crPlist["files"] as? [String: Any]
@@ -1142,7 +1302,14 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
         }
 
-        let primaryMap = files2Dict ?? files1Dict ?? [:]
+        let primaryMap: [String: Any]
+        if let f2 = files2Dict, !f2.isEmpty {
+            primaryMap = f2
+        } else if let f1 = files1Dict, !f1.isEmpty {
+            primaryMap = f1
+        } else {
+            primaryMap = files2Dict ?? files1Dict ?? [:]
+        }
         let orderedKeys = primaryMap.keys.sorted { lhs, rhs in
             let lExt = (lhs as NSString).pathExtension.lowercased()
             let rExt = (rhs as NSString).pathExtension.lowercased()
@@ -1200,90 +1367,677 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                 return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
             }
 
+            let archiveRelKey = matchedResRootRel.isEmpty ? relKey : "\(matchedResRootRel)/\(relKey)"
             let targetURL = resourceRootURL.appendingPathComponent(relKey)
             var lst = stat()
-            if lstat(targetURL.path, &lst) != 0 {
-                if isOptional { continue }
-                return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
-            }
+            let diskExists = (lstat(targetURL.path, &lst) == 0)
 
-            let mode = lst.st_mode & S_IFMT
             if let expLink = expectedSymlink {
-                guard mode == S_IFLNK else {
+                if diskExists && (lst.st_mode & S_IFMT) == S_IFLNK {
+                    var linkBuf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+                    let linkLen = readlink(targetURL.path, &linkBuf, Int(PATH_MAX))
+                    guard linkLen >= 0 else {
+                        return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    }
+                    let actualLink = String(cString: linkBuf)
+                    if actualLink != expLink {
+                        return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    }
+                    continue
+                } else if let lookup = archiveLookup,
+                          case .symlink(let archiveTarget) = lookup.resolveEntry(archiveRelKey) {
+                    if archiveTarget != expLink {
+                        return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    }
+                    continue
+                } else {
                     return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
                 }
-                var linkBuf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
-                let linkLen = readlink(targetURL.path, &linkBuf, Int(PATH_MAX))
-                guard linkLen >= 0 else {
-                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
-                }
-                let actualLink = String(cString: linkBuf)
-                if actualLink != expLink {
-                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
-                }
-                continue
             }
 
-            guard mode == S_IFREG else {
+            if diskExists {
+                let mode = lst.st_mode & S_IFMT
+                guard mode == S_IFREG else {
+                    if isOptional { continue }
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                }
+                let resolvedTarget = targetURL.resolvingSymlinksInPath().standardizedFileURL
+                let resolvedTargetStd = IPAPackageScanner.lexicalStandardizedPath(resolvedTarget.path)
+                guard resolvedTargetStd.hasPrefix(bundlePrefix) && resolvedTargetStd.hasPrefix(resourcePrefix) else {
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                }
+
+                let fileSize = Int(max(0, lst.st_size))
+                guard fileSize <= maxSingleFileBytes, totalVerifiedBytes + fileSize <= maxTotalVerifyBytes else {
+                    continue
+                }
+                guard let fileBytes = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: resolvedTarget, maxBytes: maxSingleFileBytes) else {
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                }
+                totalVerifiedBytes += fileBytes.count
+
+                if let sha256Expected = expectedSHA256 {
+                    if Data(SHA256.hash(data: fileBytes)) != sha256Expected {
+                        return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    }
+                } else if let sha1Expected = expectedSHA1 {
+                    if Data(Insecure.SHA1.hash(data: fileBytes)) != sha1Expected {
+                        return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    }
+                }
+            } else if let lookup = archiveLookup {
+                guard let resolvedArchive = lookup.resolveEntry(archiveRelKey) else {
+                    if isOptional { continue }
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                }
+                switch resolvedArchive {
+                case .symlink:
+                    if isOptional { continue }
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                case .regular(let fileCopies):
+                    guard !fileCopies.isEmpty else {
+                        if isOptional { continue }
+                        return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                    }
+                    for copy in fileCopies {
+                        let fileSize = max(0, copy.declaredSize)
+                        guard fileSize <= maxSingleFileBytes, totalVerifiedBytes + fileSize <= maxTotalVerifyBytes else {
+                            continue
+                        }
+                        guard let fileBytes = copy.readData(maxSingleFileBytes) else {
+                            return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                        }
+                        totalVerifiedBytes += fileBytes.count
+                        if let sha256Expected = expectedSHA256 {
+                            if Data(SHA256.hash(data: fileBytes)) != sha256Expected {
+                                return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                            }
+                        } else if let sha1Expected = expectedSHA1 {
+                            if Data(Insecure.SHA1.hash(data: fileBytes)) != sha1Expected {
+                                return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                            }
+                        }
+                    }
+                }
+            } else {
                 if isOptional { continue }
                 return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
             }
-            let resolvedTarget = targetURL.resolvingSymlinksInPath().standardizedFileURL
-            guard resolvedTarget.path.hasPrefix(bundlePrefix) && resolvedTarget.path.hasPrefix(resourcePrefix) else {
-                return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
-            }
+        }
 
-            let fileSize = Int(max(0, lst.st_size))
-            guard fileSize <= maxSingleFileBytes, totalVerifiedBytes + fileSize <= maxTotalVerifyBytes else {
-                continue
-            }
-            guard let fileBytes = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: resolvedTarget, maxBytes: maxSingleFileBytes) else {
-                return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
-            }
-            totalVerifiedBytes += fileBytes.count
-
-            if let sha256Expected = expectedSHA256 {
-                if Data(SHA256.hash(data: fileBytes)) != sha256Expected {
+        // Reject unsealed script/web/dylib files injected into ANY bundle layout outside sealed CodeResources keys
+        var rawSealedRelPaths = Set(files2Dict?.keys ?? [String: Any]().keys)
+        if let f1 = files1Dict {
+            rawSealedRelPaths.formUnion(f1.keys)
+        }
+        var verifiedVersionsTarget: String? = nil
+        if let lookup = archiveLookup {
+            if case .symlink(let rawTarget)? = lookup.resolveEntry("Versions/Current") {
+                if lookup.unextractedRegularPaths().contains(where: { $0.hasPrefix("Versions/Current/") }) {
                     return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
                 }
-            } else if let sha1Expected = expectedSHA1 {
-                if Data(Insecure.SHA1.hash(data: fileBytes)) != sha1Expected {
-                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                let comps = rawTarget.split(separator: "/").filter { !$0.isEmpty && $0 != "." }.map(String.init)
+                if !rawTarget.hasPrefix("/"),
+                   !rawTarget.contains("\\"),
+                   !rawTarget.contains("\0"),
+                   comps.count == 1,
+                   comps[0] != ".." {
+                    verifiedVersionsTarget = "Versions/\(comps[0])"
+                }
+            }
+        } else {
+            let vcURL = resolvedBundleURL.appendingPathComponent("Versions/Current")
+            var vcSt = stat()
+            if lstat(vcURL.path, &vcSt) == 0, (vcSt.st_mode & S_IFMT) == S_IFLNK {
+                let versionsPrefix = IPAPackageScanner.lexicalStandardizedPrefix(resolvedBundleURL.appendingPathComponent("Versions").path)
+                let resolvedVC = vcURL.resolvingSymlinksInPath().standardizedFileURL
+                let resolvedVCStd = IPAPackageScanner.lexicalStandardizedPath(resolvedVC.path)
+                var targetSt = stat()
+                if resolvedVCStd.hasPrefix(versionsPrefix),
+                   lstat(resolvedVCStd, &targetSt) == 0,
+                   (targetSt.st_mode & S_IFMT) == S_IFDIR,
+                   IPAPackageScanner.lexicalStandardizedPath(resolvedVC.deletingLastPathComponent().path) == IPAPackageScanner.lexicalStandardizedPath(resolvedBundleURL.appendingPathComponent("Versions").path),
+                   !resolvedVC.lastPathComponent.isEmpty {
+                    verifiedVersionsTarget = "Versions/\(resolvedVC.lastPathComponent)"
                 }
             }
         }
 
-        // Reject unsealed script/web/dylib files injected into flat iOS bundles outside sealed CodeResources keys
-        if isFlatBundle {
-            var sealedRelPaths = Set(files2Dict?.keys ?? [String: Any]().keys)
-            if let f1 = files1Dict {
-                sealedRelPaths.formUnion(f1.keys)
+        var sealedPrefixes: [String] = [matchedResRootRel]
+        if matchedResRootRel == "Versions/Current", let verTarget = verifiedVersionsTarget {
+            if !sealedPrefixes.contains(verTarget) {
+                sealedPrefixes.append(verTarget)
             }
-            var dummyEscapes: [String] = []
-            let candidates = IPAPackageScanner.enumerateCandidateFiles(
-                in: resolvedBundleURL,
-                bundleRootResolvedPrefix: bundlePrefix,
-                escapingSymlinks: &dummyEscapes,
-                bundleRootURL: resolvedBundleURL
-            )
-            if !dummyEscapes.isEmpty {
+        } else if matchedResRootRel.hasPrefix("Versions/"), let verTarget = verifiedVersionsTarget, verTarget == matchedResRootRel {
+            if !sealedPrefixes.contains("Versions/Current") {
+                sealedPrefixes.append("Versions/Current")
+            }
+        }
+
+        var sealedRelPaths: Set<String> = []
+        sealedRelPaths.reserveCapacity(rawSealedRelPaths.count * sealedPrefixes.count)
+        for pfx in sealedPrefixes {
+            if pfx.isEmpty {
+                sealedRelPaths.formUnion(rawSealedRelPaths)
+            } else {
+                for key in rawSealedRelPaths {
+                    sealedRelPaths.insert("\(pfx)/\(key)")
+                }
+            }
+        }
+
+        let isVersionedLayout = matchedResRootRel == "Versions/Current" || matchedResRootRel.hasPrefix("Versions/")
+        var archiveDirSymlinkAliases: [String: String] = [:]
+        if let lookup = archiveLookup {
+            let allSymlinks = lookup.allSymlinks()
+            let allRegulars = lookup.allRegularPaths()
+            var regularExactSet: Set<String> = []
+            var regularAncestorPrefixes: Set<String> = []
+            regularExactSet.reserveCapacity(allRegulars.count)
+            regularAncestorPrefixes.reserveCapacity(allRegulars.count * 2)
+            for reg in allRegulars {
+                regularExactSet.insert(reg)
+                var slashIdx = reg.startIndex
+                while let nextSlash = reg[slashIdx...].firstIndex(of: "/") {
+                    regularAncestorPrefixes.insert(String(reg[..<nextSlash]))
+                    slashIdx = reg.index(after: nextSlash)
+                }
+                regularAncestorPrefixes.insert(reg)
+            }
+
+            func resolveArchiveDirSymlink(_ startRel: String) -> String? {
+                var comps = startRel.split(separator: "/").filter { !$0.isEmpty && $0 != "." }.map(String.init)
+                guard !comps.isEmpty, !comps.contains("..") else { return nil }
+                var visited: Set<String> = []
+                var hops = 0
+                while hops < 8 {
+                    var matchedEndIdx: Int? = nil
+                    var matchedTarget: String? = nil
+                    for endIdx in stride(from: comps.count, through: 1, by: -1) {
+                        let key = comps[0..<endIdx].joined(separator: "/")
+                        if let t = allSymlinks[key] {
+                            if regularAncestorPrefixes.contains(key) {
+                                return nil
+                            }
+                            matchedEndIdx = endIdx
+                            matchedTarget = t
+                            break
+                        }
+                    }
+                    guard let endIdx = matchedEndIdx, let rawTarget = matchedTarget else {
+                        break
+                    }
+                    let key = comps[0..<endIdx].joined(separator: "/")
+                    guard visited.insert(key).inserted else { return nil }
+                    guard !rawTarget.isEmpty,
+                          !rawTarget.hasPrefix("/"),
+                          !rawTarget.contains("\\"),
+                          !rawTarget.contains("\0") else {
+                        return nil
+                    }
+                    var resolvedBase = Array(comps[0..<(endIdx - 1)])
+                    for tc in rawTarget.split(separator: "/").map(String.init) {
+                        if tc.isEmpty || tc == "." { continue }
+                        if tc == ".." {
+                            guard !resolvedBase.isEmpty else { return nil }
+                            resolvedBase.removeLast()
+                        } else {
+                            resolvedBase.append(tc)
+                        }
+                    }
+                    guard !resolvedBase.isEmpty else { return nil }
+                    comps = resolvedBase + Array(comps[endIdx...])
+                    hops += 1
+                }
+                for endIdx in stride(from: comps.count, through: 1, by: -1) {
+                    let key = comps[0..<endIdx].joined(separator: "/")
+                    if allSymlinks[key] != nil { return nil }
+                }
+                let finalRel = comps.joined(separator: "/")
+                guard !regularExactSet.contains(finalRel) else { return nil }
+                guard sealedPrefixes.contains(where: { finalRel == $0 || finalRel.hasPrefix($0 + "/") }) else {
+                    return nil
+                }
+                return finalRel
+            }
+
+            for (linkRel, _) in allSymlinks {
+                if regularAncestorPrefixes.contains(linkRel) {
+                    return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+                }
+                if isVersionedLayout, let resolvedTarget = resolveArchiveDirSymlink(linkRel) {
+                    archiveDirSymlinkAliases[linkRel] = resolvedTarget
+                }
+            }
+        }
+
+        var diskDirSymlinkCache: [String: String] = [:]
+        var diskDirSymlinkMisses: Set<String> = []
+        func resolveVerifiedDiskDirSymlink(_ linkRel: String) -> String? {
+            if let hit = diskDirSymlinkCache[linkRel] {
+                return hit
+            }
+            if diskDirSymlinkMisses.contains(linkRel) {
+                return nil
+            }
+            let startURL = resolvedBundleURL.appendingPathComponent(linkRel)
+            var lst = stat()
+            guard lstat(startURL.path, &lst) == 0, (lst.st_mode & S_IFMT) == S_IFLNK else {
+                diskDirSymlinkMisses.insert(linkRel)
+                return nil
+            }
+            var comps = linkRel.split(separator: "/").filter { !$0.isEmpty && $0 != "." }.map(String.init)
+            guard !comps.isEmpty, !comps.contains("..") else {
+                diskDirSymlinkMisses.insert(linkRel)
+                return nil
+            }
+            var visited: Set<String> = []
+            var hops = 0
+            while hops < 8 {
+                var foundSymlinkIdx: Int? = nil
+                for endIdx in 1...comps.count {
+                    let partialRel = comps[0..<endIdx].joined(separator: "/")
+                    let partialURL = resolvedBundleURL.appendingPathComponent(partialRel)
+                    var pst = stat()
+                    guard lstat(partialURL.path, &pst) == 0 else {
+                        diskDirSymlinkMisses.insert(linkRel)
+                        return nil
+                    }
+                    if (pst.st_mode & S_IFMT) == S_IFLNK {
+                        foundSymlinkIdx = endIdx
+                        break
+                    } else if endIdx < comps.count && (pst.st_mode & S_IFMT) != S_IFDIR {
+                        diskDirSymlinkMisses.insert(linkRel)
+                        return nil
+                    }
+                }
+                guard let endIdx = foundSymlinkIdx else {
+                    break
+                }
+                let partialRel = comps[0..<endIdx].joined(separator: "/")
+                guard visited.insert(partialRel).inserted else {
+                    diskDirSymlinkMisses.insert(linkRel)
+                    return nil
+                }
+                let partialURL = resolvedBundleURL.appendingPathComponent(partialRel)
+                var linkBuf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+                let linkLen = readlink(partialURL.path, &linkBuf, Int(PATH_MAX))
+                guard linkLen > 0 else {
+                    diskDirSymlinkMisses.insert(linkRel)
+                    return nil
+                }
+                let rawTarget = String(cString: linkBuf)
+                guard !rawTarget.isEmpty,
+                      !rawTarget.hasPrefix("/"),
+                      !rawTarget.contains("\\"),
+                      !rawTarget.contains("\0") else {
+                    diskDirSymlinkMisses.insert(linkRel)
+                    return nil
+                }
+                var resolvedBase = Array(comps[0..<(endIdx - 1)])
+                for tc in rawTarget.split(separator: "/").map(String.init) {
+                    if tc.isEmpty || tc == "." { continue }
+                    if tc == ".." {
+                        guard !resolvedBase.isEmpty else {
+                            diskDirSymlinkMisses.insert(linkRel)
+                            return nil
+                        }
+                        resolvedBase.removeLast()
+                    } else {
+                        resolvedBase.append(tc)
+                    }
+                }
+                guard !resolvedBase.isEmpty else {
+                    diskDirSymlinkMisses.insert(linkRel)
+                    return nil
+                }
+                comps = resolvedBase + Array(comps[endIdx...])
+                hops += 1
+            }
+            for endIdx in 1...comps.count {
+                let partialRel = comps[0..<endIdx].joined(separator: "/")
+                let partialURL = resolvedBundleURL.appendingPathComponent(partialRel)
+                var pst = stat()
+                guard lstat(partialURL.path, &pst) == 0 else {
+                    diskDirSymlinkMisses.insert(linkRel)
+                    return nil
+                }
+                if (pst.st_mode & S_IFMT) == S_IFLNK {
+                    diskDirSymlinkMisses.insert(linkRel)
+                    return nil
+                }
+            }
+            let finalRel = comps.joined(separator: "/")
+            let finalURL = resolvedBundleURL.appendingPathComponent(finalRel)
+            var fst = stat()
+            guard lstat(finalURL.path, &fst) == 0, (fst.st_mode & S_IFMT) == S_IFDIR else {
+                diskDirSymlinkMisses.insert(linkRel)
+                return nil
+            }
+            let finalStd = IPAPackageScanner.lexicalStandardizedPath(finalURL.resolvingSymlinksInPath().standardizedFileURL.path)
+            guard finalStd.hasPrefix(bundlePrefix),
+                  sealedPrefixes.contains(where: { finalRel == $0 || finalRel.hasPrefix($0 + "/") }) else {
+                diskDirSymlinkMisses.insert(linkRel)
+                return nil
+            }
+            diskDirSymlinkCache[linkRel] = finalRel
+            return finalRel
+        }
+
+        func resolveVersionedSymlinkAliasedRelPath(_ relPath: String, parts: [String]) -> String? {
+            guard isVersionedLayout, parts.count >= 2 else { return nil }
+            var prefix = ""
+            for idx in 0..<(parts.count - 1) {
+                prefix = prefix.isEmpty ? parts[idx] : "\(prefix)/\(parts[idx])"
+                let targetBase: String?
+                if archiveLookup != nil {
+                    targetBase = archiveDirSymlinkAliases[prefix]
+                } else {
+                    targetBase = resolveVerifiedDiskDirSymlink(prefix)
+                }
+                if let resolvedBase = targetBase {
+                    let subRel = parts[(idx + 1)...].joined(separator: "/")
+                    return "\(resolvedBase)/\(subRel)"
+                }
+            }
+            return nil
+        }
+
+        var dummyEscapes: [String] = []
+        let candidates = IPAPackageScanner.enumerateCandidateFiles(
+            in: resolvedBundleURL,
+            bundleRootResolvedPrefix: bundlePrefix,
+            escapingSymlinks: &dummyEscapes,
+            bundleRootURL: resolvedBundleURL
+        )
+        if !dummyEscapes.isEmpty {
+            return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
+        }
+        let nestedBundleExts: Set<String> = ["framework", "appex", "xpc", "app"]
+        let systemExemptTopDirs: Set<String> = ["_codesignature", "sc_info", "_masreceipt", "storekit"]
+        var nestedBundleSealCache: [String: Bool] = [:]
+
+            func isNestedBundleSelfSealed(_ nestedRel: String) -> Bool {
+                if let cached = nestedBundleSealCache[nestedRel] {
+                    return cached
+                }
+                guard depth < 4 else {
+                    nestedBundleSealCache[nestedRel] = false
+                    return false
+                }
+
+                let nestedDiskURL = resolvedBundleURL.appendingPathComponent(nestedRel)
+                let resolvedNestedURL: URL
+                var nst = stat()
+                let diskExists = (lstat(nestedDiskURL.path, &nst) == 0)
+                if diskExists {
+                    let mode = nst.st_mode & S_IFMT
+                    guard mode == S_IFDIR || mode == S_IFLNK else {
+                        nestedBundleSealCache[nestedRel] = false
+                        return false
+                    }
+                    let candResolved = nestedDiskURL.resolvingSymlinksInPath().standardizedFileURL
+                    let candStd = IPAPackageScanner.lexicalStandardizedPath(candResolved.path)
+                    guard candStd.hasPrefix(bundlePrefix) else {
+                        nestedBundleSealCache[nestedRel] = false
+                        return false
+                    }
+                    var rnst = stat()
+                    guard lstat(candResolved.path, &rnst) == 0,
+                          (rnst.st_mode & S_IFMT) == S_IFDIR else {
+                        nestedBundleSealCache[nestedRel] = false
+                        return false
+                    }
+                    resolvedNestedURL = URL(fileURLWithPath: candStd)
+                } else {
+                    resolvedNestedURL = nestedDiskURL
+                }
+                let nestedDiskPrefix = IPAPackageScanner.lexicalStandardizedPrefix(resolvedNestedURL.path)
+
+                let isArchiveSymlink: Bool
+                if let lookup = archiveLookup,
+                   case .symlink? = lookup.resolveEntry(nestedRel) {
+                    isArchiveSymlink = true
+                    if lookup.unextractedRegularPaths().contains(where: { $0.hasPrefix(nestedRel + "/") }) {
+                        nestedBundleSealCache[nestedRel] = false
+                        return false
+                    }
+                } else {
+                    isArchiveSymlink = false
+                }
+
+                // 1. Nested bundle MUST actually possess its own CodeResources file (no-follow regular file or archive regular entry)
+                var foundNestedCR: Data? = nil
+                for cand in layoutCandidates {
+                    if diskExists {
+                        let crURL = resolvedNestedURL.appendingPathComponent(cand.codeResRel)
+                        var crSt = stat()
+                        if lstat(crURL.path, &crSt) == 0 {
+                            if (crSt.st_mode & S_IFMT) == S_IFLNK {
+                                nestedBundleSealCache[nestedRel] = false
+                                return false
+                            }
+                            let resCR = crURL.resolvingSymlinksInPath().standardizedFileURL
+                            let resCRStd = IPAPackageScanner.lexicalStandardizedPath(resCR.path)
+                            if resCRStd.hasPrefix(nestedDiskPrefix),
+                               let crBytes = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: resCR, maxBytes: 32 * 1024 * 1024) {
+                                foundNestedCR = crBytes
+                                break
+                            }
+                            nestedBundleSealCache[nestedRel] = false
+                            return false
+                        }
+                    }
+                    if let lookup = archiveLookup,
+                       let archiveCR = lookup.resolveEntry("\(nestedRel)/\(cand.codeResRel)") {
+                        switch archiveCR {
+                        case .symlink:
+                            nestedBundleSealCache[nestedRel] = false
+                            return false
+                        case .regular(let files):
+                            if files.count == 1,
+                               files[0].declaredSize <= 32 * 1024 * 1024,
+                               let crBytes = files[0].readData(32 * 1024 * 1024) {
+                                foundNestedCR = crBytes
+                            } else {
+                                nestedBundleSealCache[nestedRel] = false
+                                return false
+                            }
+                        }
+                        if foundNestedCR != nil {
+                            break
+                        }
+                    }
+                }
+
+                guard let nestedCRData = foundNestedCR, diskExists else {
+                    nestedBundleSealCache[nestedRel] = false
+                    return false
+                }
+
+                // 2. Verify at least one Mach-O executable in the nested bundle has non-zero Special Slot -3 binding that CodeResources
+                //    AND (when not an archive symlink) verify the nested bundle's own CodeResources seal recursively.
+                let nestedArchivePrefix = nestedRel + "/"
+                let nestedArchiveLookup: ArchiveBundleResourceLookup? = archiveLookup.map { parentLookup in
+                    ArchiveBundleResourceLookup(
+                        resolveEntry: { rel in
+                            parentLookup.resolveEntry(nestedArchivePrefix + rel)
+                        },
+                        unextractedRegularPaths: {
+                            parentLookup.unextractedRegularPaths().compactMap { p in
+                                p.hasPrefix(nestedArchivePrefix) ? String(p.dropFirst(nestedArchivePrefix.count)) : nil
+                            }
+                        },
+                        allSymlinks: {
+                            var scoped: [String: String] = [:]
+                            for (k, v) in parentLookup.allSymlinks() where k.hasPrefix(nestedArchivePrefix) {
+                                let sub = String(k.dropFirst(nestedArchivePrefix.count))
+                                if !sub.isEmpty { scoped[sub] = v }
+                            }
+                            return scoped
+                        },
+                        allRegularPaths: {
+                            parentLookup.allRegularPaths().compactMap { p in
+                                p.hasPrefix(nestedArchivePrefix) ? String(p.dropFirst(nestedArchivePrefix.count)) : nil
+                            }
+                        }
+                    )
+                }
+
+                let binDirs = [
+                    resolvedNestedURL,
+                    resolvedNestedURL.appendingPathComponent("Contents/MacOS"),
+                    resolvedNestedURL.appendingPathComponent("Versions/Current"),
+                    resolvedNestedURL.appendingPathComponent("Versions/A")
+                ]
+                var checkedFiles = 0
+                var probedRegularFiles = 0
+                var visitedBinDirs: Set<String> = []
+                for dirURL in binDirs where checkedFiles < 32 && probedRegularFiles < 4096 {
+                    var dst = stat()
+                    guard lstat(dirURL.path, &dst) == 0 else { continue }
+                    let resolvedDir: URL
+                    if (dst.st_mode & S_IFMT) == S_IFLNK {
+                        let rd = dirURL.resolvingSymlinksInPath().standardizedFileURL
+                        let rdStd = IPAPackageScanner.lexicalStandardizedPath(rd.path)
+                        guard rdStd.hasPrefix(nestedDiskPrefix) else { continue }
+                        var rdst = stat()
+                        guard lstat(rd.path, &rdst) == 0, (rdst.st_mode & S_IFMT) == S_IFDIR else { continue }
+                        resolvedDir = rd
+                    } else if (dst.st_mode & S_IFMT) == S_IFDIR {
+                        resolvedDir = dirURL
+                    } else {
+                        continue
+                    }
+                    let resolvedDirStd = IPAPackageScanner.lexicalStandardizedPath(resolvedDir.path)
+                    guard visitedBinDirs.insert(resolvedDirStd).inserted else { continue }
+
+                    guard let dp = opendir(resolvedDir.path) else { continue }
+                    var fileNames: [String] = []
+                    while let ent = readdir(dp) {
+                        let name = withUnsafeBytes(of: ent.pointee.d_name) { raw -> String in
+                            String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+                        }
+                        if name != "." && name != ".." && !name.hasPrefix("._") {
+                            fileNames.append(name)
+                        }
+                    }
+                    closedir(dp)
+                    fileNames.sort()
+
+                    for name in fileNames where checkedFiles < 32 && probedRegularFiles < 4096 {
+                        let fileURL = resolvedDir.appendingPathComponent(name)
+                        var fst = stat()
+                        guard lstat(fileURL.path, &fst) == 0,
+                              (fst.st_mode & S_IFMT) == S_IFREG else {
+                            continue
+                        }
+                        probedRegularFiles += 1
+                        let (pfx, fsz) = IPAPackageScanner.readMachOHeaderPrefix(of: fileURL)
+                        guard IPAPackageScanner.isMachOOrFatMagic(pfx, fileSize: fsz) else {
+                            continue
+                        }
+                        checkedFiles += 1
+                        guard let binData = try? IPAPackageScanner.readBoundedRegularFileDirectNoFollow(at: fileURL, maxBytes: 128 * 1024 * 1024),
+                              let binSlices = try? MachOParser.shared.parseAllSlices(data: binData),
+                              !binSlices.isEmpty else {
+                            continue
+                        }
+
+                        var hasMatchingSlot3 = false
+                        for slice in MachOParser.selectAuditSlices(from: binSlices) {
+                            let blobs = slice.allCodeSignatureData.isEmpty
+                                ? (slice.codeSignatureData.map { [$0] } ?? [])
+                                : slice.allCodeSignatureData
+                            for rawBlob in blobs {
+                                let bd = rawBlob.startIndex == 0 ? rawBlob : Data(rawBlob)
+                                bd.withUnsafeBytes { buf in
+                                    guard buf.count >= 12,
+                                          let magic = Self.readUInt32BE(from: buf, at: 0),
+                                          magic == CSBlobConstants.superBlobMagic,
+                                          let len32 = Self.readUInt32BE(from: buf, at: 4) else { return }
+                                    let tLen = Int(len32)
+                                    guard tLen >= 12, tLen <= buf.count,
+                                          let entries = try? parseBlobIndices(from: buf, totalLength: tLen) else { return }
+                                    for entry in entries {
+                                        let isCD = entry.type == CSBlobConstants.slotCodeDirectory
+                                            || (entry.type >= CSBlobConstants.slotAlternateCodeDirectories && entry.type <= CSBlobConstants.slotAlternateCodeDirectories + 5)
+                                            || entry.magic == CSBlobConstants.codeDirectoryMagic
+                                        guard isCD, entry.offset >= 12, entry.offset + entry.length <= tLen, entry.length > 0 else { continue }
+                                        if let parsedCD = Self.parseCodeDirectory(slotType: entry.type, blobData: Data(buf[entry.offset..<(entry.offset + entry.length)]), allowAdHoc: true),
+                                           let slot3 = parsedCD.specialSlotHash(3),
+                                           !slot3.allSatisfy({ $0 == 0 }),
+                                           let digest = Self.computeCodeDirectorySlotDigest(nestedCRData, hashType: parsedCD.hashType),
+                                           digest == slot3 {
+                                            hasMatchingSlot3 = true
+                                            return
+                                        }
+                                    }
+                                }
+                                if hasMatchingSlot3 { break }
+                            }
+                            if hasMatchingSlot3 { break }
+                        }
+
+                        if hasMatchingSlot3 {
+                            if isArchiveSymlink {
+                                nestedBundleSealCache[nestedRel] = true
+                                return true
+                            }
+                            let subSealFailure = verifyBundleCodeResourcesSealInternal(
+                                fromSlices: binSlices,
+                                bundleURL: resolvedNestedURL,
+                                archiveLookup: nestedArchiveLookup,
+                                depth: depth + 1
+                            )
+                            let ok = (subSealFailure == nil)
+                            nestedBundleSealCache[nestedRel] = ok
+                            return ok
+                        }
+                    }
+                }
+
+                nestedBundleSealCache[nestedRel] = false
+                return false
+            }
+
+            func isForbiddenUnsealed(relPath: String, pathExt: String) -> Bool {
+                let parts = relPath.split(separator: "/").map(String.init)
+                guard let firstComp = parts.first else { return false }
+                if systemExemptTopDirs.contains(firstComp.lowercased()) {
+                    return false
+                }
+                if let nestedIdx = parts.dropLast().indices.first(where: { nestedBundleExts.contains((parts[$0] as NSString).pathExtension.lowercased()) }) {
+                    let nestedRel = parts[0...nestedIdx].joined(separator: "/")
+                    if isNestedBundleSelfSealed(nestedRel) {
+                        return false
+                    }
+                }
+                guard Self.unsealedForbiddenActiveExtensions.contains(pathExt) else {
+                    return false
+                }
+                if sealedRelPaths.contains(relPath) {
+                    return false
+                }
+                if let aliasedRel = resolveVersionedSymlinkAliasedRelPath(relPath, parts: parts),
+                   sealedRelPaths.contains(aliasedRel) {
+                    return false
+                }
+                return true
+            }
+
+        for cand in candidates {
+            let rel = IPAPackageScanner.bundleRelativePath(of: cand.logicalURL, in: resolvedBundleURL)
+            let ext = cand.logicalURL.pathExtension.lowercased()
+            if isForbiddenUnsealed(relPath: rel, pathExt: ext) {
                 return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
             }
-            let nestedBundleExts: Set<String> = ["framework", "appex", "xpc", "app", "bundle"]
-            let systemExemptTopDirs: Set<String> = ["_codesignature", "sc_info", "_masreceipt", "storekit"]
+        }
 
-            for cand in candidates {
-                let rel = IPAPackageScanner.bundleRelativePath(of: cand.logicalURL, in: resolvedBundleURL)
-                let parts = rel.split(separator: "/").map(String.init)
-                guard let firstComp = parts.first else { continue }
-                if systemExemptTopDirs.contains(firstComp.lowercased()) {
-                    continue
-                }
-                if parts.dropLast().contains(where: { nestedBundleExts.contains(($0 as NSString).pathExtension.lowercased()) }) {
-                    continue
-                }
-                let ext = cand.logicalURL.pathExtension.lowercased()
-                if Self.unsealedForbiddenActiveExtensions.contains(ext) && !sealedRelPaths.contains(rel) {
+        if let lookup = archiveLookup {
+            for rel in lookup.unextractedRegularPaths() {
+                let ext = (rel as NSString).pathExtension.lowercased()
+                if isForbiddenUnsealed(relPath: rel, pathExt: ext) {
                     return .nonAppStoreSigner(subjectSummary: "CodeDirectory/CodeResources Mismatch")
                 }
             }
@@ -1292,7 +2046,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         return nil
     }
 
-    private static func parseCodeDirectory(slotType: UInt32, blobData rawData: Data) -> ParsedCodeDirectory? {
+    private static func parseCodeDirectory(slotType: UInt32, blobData rawData: Data, allowAdHoc: Bool = false) -> ParsedCodeDirectory? {
         let data = rawData.startIndex == 0 ? rawData : Data(rawData)
         guard data.count >= 44 else { return nil }
         return data.withUnsafeBytes { buf -> ParsedCodeDirectory? in
@@ -1302,7 +2056,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                   Int(lenU32) == data.count,
                   let version = readUInt32BE(from: buf, at: 8),
                   let flags = readUInt32BE(from: buf, at: 12),
-                  (flags & CSBlobConstants.csAdhocFlag) == 0,
+                  (allowAdHoc || (flags & CSBlobConstants.csAdhocFlag) == 0),
                   let hashOffU32 = readUInt32BE(from: buf, at: 16),
                   let identOffU32 = readUInt32BE(from: buf, at: 20),
                   let nSpecU32 = readUInt32BE(from: buf, at: 24),
@@ -1610,11 +2364,11 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         derEntitlementBlobs: [Data],
         sliceData: Data?,
         customAnchorCertificates: [SecCertificate]?
-    ) -> CodeSignatureTrustDisposition {
+    ) -> CodeSignatureTrustEvaluation {
         let parsedCMS = parseCMSSignedData(cmsData)
         let certDERs = parsedCMS?.certificateDERs ?? extractX509CertificatesFallback(cmsData)
         guard !certDERs.isEmpty else {
-            return .nonAppStoreSigner(subjectSummary: nil)
+            return CodeSignatureTrustEvaluation(disposition: .nonAppStoreSigner(subjectSummary: nil), signerKind: .none, leafSubjectSummary: nil)
         }
 
         var certDERBySummary: [(cert: SecCertificate, der: Data, summary: String)] = []
@@ -1624,7 +2378,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             certDERBySummary.append((cert, der, summary))
         }
         guard !certDERBySummary.isEmpty else {
-            return .nonAppStoreSigner(subjectSummary: nil)
+            return CodeSignatureTrustEvaluation(disposition: .nonAppStoreSigner(subjectSummary: nil), signerKind: .none, leafSubjectSummary: nil)
         }
 
         let appleLeafCandidates = certDERBySummary.filter { item in
@@ -1638,7 +2392,11 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         guard !appleLeafCandidates.isEmpty else {
             let nonRootSummary = certDERBySummary.first { !$0.summary.hasPrefix("Apple Root CA") && !$0.summary.contains("Certification Authority") }?.summary
                 ?? certDERBySummary.first?.summary
-            return .nonAppStoreSigner(subjectSummary: nonRootSummary)
+            return CodeSignatureTrustEvaluation(
+                disposition: .nonAppStoreSigner(subjectSummary: nonRootSummary),
+                signerKind: .none,
+                leafSubjectSummary: nonRootSummary
+            )
         }
 
         let fallbackSummary = appleLeafCandidates.first?.summary
@@ -1647,23 +2405,39 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
               signedData.encapContentTypeOID == oidPKCS7Data,
               !codeDirectoryEntries.isEmpty,
               let sliceBytes = sliceData else {
-            return .nonAppStoreSigner(subjectSummary: fallbackSummary)
+            return CodeSignatureTrustEvaluation(
+                disposition: .nonAppStoreSigner(subjectSummary: fallbackSummary),
+                signerKind: .none,
+                leafSubjectSummary: fallbackSummary
+            )
         }
 
         // Parse all CodeDirectory slots and require primary Slot 0 CodeDirectory
         var parsedCDs: [ParsedCodeDirectory] = []
         for cdEntry in codeDirectoryEntries {
             guard let parsed = parseCodeDirectory(slotType: cdEntry.slotType, blobData: cdEntry.blob) else {
-                return .nonAppStoreSigner(subjectSummary: fallbackSummary)
+                return CodeSignatureTrustEvaluation(
+                    disposition: .nonAppStoreSigner(subjectSummary: fallbackSummary),
+                    signerKind: .none,
+                    leafSubjectSummary: fallbackSummary
+                )
             }
             parsedCDs.append(parsed)
         }
         guard let primaryCD = parsedCDs.first(where: { $0.slotType == CSBlobConstants.slotCodeDirectory }) ?? parsedCDs.first else {
-            return .nonAppStoreSigner(subjectSummary: fallbackSummary)
+            return CodeSignatureTrustEvaluation(
+                disposition: .nonAppStoreSigner(subjectSummary: fallbackSummary),
+                signerKind: .none,
+                leafSubjectSummary: fallbackSummary
+            )
         }
 
         if let attachedContent = signedData.encapContentBytes, attachedContent != primaryCD.rawBlob {
-            return .nonAppStoreSigner(subjectSummary: fallbackSummary)
+            return CodeSignatureTrustEvaluation(
+                disposition: .nonAppStoreSigner(subjectSummary: fallbackSummary),
+                signerKind: .none,
+                leafSubjectSummary: fallbackSummary
+            )
         }
 
         // Verify every CodeDirectory slot against sliceData (Page-0 + code slots) and SuperBlob Slot 5/7
@@ -1674,7 +2448,11 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                 xmlEntitlementBlobs: xmlEntitlementBlobs,
                 derEntitlementBlobs: derEntitlementBlobs
             ) else {
-                return .nonAppStoreSigner(subjectSummary: fallbackSummary)
+                return CodeSignatureTrustEvaluation(
+                    disposition: .nonAppStoreSigner(subjectSummary: fallbackSummary),
+                    signerKind: .none,
+                    leafSubjectSummary: fallbackSummary
+                )
             }
         }
 
@@ -1710,6 +2488,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             guard chainValid,
                   let evaluatedChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
                   evaluatedChain.count >= 2,
+                  (SecCertificateCopyData(evaluatedChain[0]) as Data) == leafItem.der,
                   let rootCert = evaluatedChain.last,
                   let rootSummary = SecCertificateCopySubjectSummary(rootCert) as String?,
                   rootSummary.hasPrefix("Apple Root CA"),
@@ -1719,18 +2498,27 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             }
 
             let leafIssuerSerial = extractX509IssuerAndSerial(from: leafItem.der)
+            let leafSubjectKeyIdentifier = extractX509SubjectKeyIdentifier(from: leafItem.der)
 
             // Require at least one SignerInfo bound to this Apple-anchored leaf certificate, primary CodeDirectory, and Apple CDHashes
             for signerInfo in signedData.signerInfos {
-                if case .issuerAndSerial(let sidIssuer, let sidSerial) = signerInfo.sid {
+                switch signerInfo.sid {
+                case .issuerAndSerial(let sidIssuer, let sidSerial):
                     guard let certIS = leafIssuerSerial,
                           certIS.issuerTLV == sidIssuer,
                           trimASN1IntegerLeadingZero(certIS.serialBytes) == trimASN1IntegerLeadingZero(sidSerial) else {
                         continue
                     }
+                case .subjectKeyIdentifier(let sidSKI):
+                    guard !sidSKI.isEmpty,
+                          let leafSKI = leafSubjectKeyIdentifier,
+                          leafSKI == sidSKI else {
+                        continue
+                    }
                 }
 
-                guard signerInfo.contentTypeValues.count == 1,
+                guard !signerInfo.retaggedSignedAttrs.isEmpty,
+                      signerInfo.contentTypeValues.count == 1,
                       signerInfo.contentTypeValues[0] == oidPKCS7Data,
                       signerInfo.messageDigestValues.count == 1,
                       let expectedDigest = computeCMSDigest(primaryCD.rawBlob, algorithmOID: signerInfo.digestAlgorithmOID),
@@ -1756,12 +2544,320 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                     signerInfo.signatureBytes as CFData,
                     nil
                 ) {
-                    return .appleAppStoreVerified
+                    let kind: AppleVerifiedSignerKind
+                    switch leafItem.summary {
+                    case "TestFlight Beta Distribution", "Apple TestFlight Beta Distribution":
+                        kind = .testFlight
+                    case "Apple iPhone OS Application Signing":
+                        kind = .appStore
+                    case "Software Signing", "macOS Software Signing", "Apple Mac OS Application Signing":
+                        kind = .macSoftware
+                    default:
+                        kind = .none
+                    }
+                    return CodeSignatureTrustEvaluation(
+                        disposition: .appleAppStoreVerified,
+                        signerKind: kind,
+                        leafSubjectSummary: leafItem.summary
+                    )
                 }
             }
         }
 
-        return .nonAppStoreSigner(subjectSummary: fallbackSummary)
+        return CodeSignatureTrustEvaluation(
+            disposition: .nonAppStoreSigner(subjectSummary: fallbackSummary),
+            signerKind: .none,
+            leafSubjectSummary: fallbackSummary
+        )
+    }
+
+    private static let allowedProvisioningLeafSummaries: Set<String> = [
+        "Apple iPhone OS Provisioning Profile Signing",
+        "Apple Provisioning Profile Signing",
+        "iPhone Provisioning Profile Signing",
+        "Apple Mac OS Provisioning Profile Signing",
+        "Mac OS Provisioning Profile Signing"
+    ]
+
+    public func verifyProvisioningProfileCMS(_ rawInput: Data) -> (isVerified: Bool, plist: [String: Any]?, leafSummary: String?) {
+        verifyProvisioningProfileCMS(rawInput, customAnchorCertificates: nil)
+    }
+
+    internal func verifyProvisioningProfileCMS(
+        _ rawInput: Data,
+        customAnchorCertificates: [SecCertificate]? = nil
+    ) -> (isVerified: Bool, plist: [String: Any]?, leafSummary: String?) {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
+        guard !data.isEmpty,
+              let signedData = Self.parseCMSSignedData(data, requireSignedAttrs: false),
+              signedData.encapContentTypeOID == Self.oidPKCS7Data,
+              let encapBytes = signedData.encapContentBytes,
+              !encapBytes.isEmpty,
+              !signedData.signerInfos.isEmpty,
+              !signedData.certificateDERs.isEmpty else {
+            return (false, nil, nil)
+        }
+
+        guard let plist = (try? PropertyListSerialization.propertyList(from: encapBytes, options: [], format: nil)) as? [String: Any] else {
+            return (false, nil, nil)
+        }
+
+        var certItems: [(cert: SecCertificate, der: Data, summary: String)] = []
+        for der in signedData.certificateDERs {
+            guard let cert = SecCertificateCreateWithData(nil, der as CFData) else { continue }
+            let summary = (SecCertificateCopySubjectSummary(cert) as String?) ?? ""
+            certItems.append((cert, der, summary))
+        }
+        let leafCandidates = certItems.filter { Self.allowedProvisioningLeafSummaries.contains($0.summary) }
+        guard !leafCandidates.isEmpty else {
+            return (false, nil, nil)
+        }
+
+        let policy = SecPolicyCreateBasicX509()
+        for leafItem in leafCandidates {
+            var orderedCerts: [SecCertificate] = [leafItem.cert]
+            for item in certItems where item.der != leafItem.der {
+                orderedCerts.append(item.cert)
+            }
+            var trustOpt: SecTrust?
+            guard SecTrustCreateWithCertificates(orderedCerts as CFArray, policy, &trustOpt) == errSecSuccess,
+                  let trust = trustOpt else {
+                continue
+            }
+            _ = SecTrustSetNetworkFetchAllowed(trust, false)
+            if let customAnchors = customAnchorCertificates {
+                guard SecTrustSetAnchorCertificates(trust, customAnchors as CFArray) == errSecSuccess,
+                      SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess else {
+                    continue
+                }
+            }
+            var chainValid = SecTrustEvaluateWithError(trust, nil)
+            if !chainValid, let notBefore = Self.extractX509NotBeforeDate(from: leafItem.der) {
+                _ = SecTrustSetVerifyDate(trust, notBefore.addingTimeInterval(60) as CFDate)
+                chainValid = SecTrustEvaluateWithError(trust, nil)
+            }
+            guard chainValid,
+                  let evaluatedChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                  evaluatedChain.count >= 2,
+                  (SecCertificateCopyData(evaluatedChain[0]) as Data) == leafItem.der,
+                  let rootCert = evaluatedChain.last,
+                  let rootSummary = SecCertificateCopySubjectSummary(rootCert) as String?,
+                  rootSummary.hasPrefix("Apple Root CA"),
+                  (customAnchorCertificates != nil || Self.isOfficialAppleRootCertificate(rootCert)),
+                  let leafPublicKey = SecCertificateCopyKey(leafItem.cert) else {
+                continue
+            }
+
+            let leafIssuerSerial = Self.extractX509IssuerAndSerial(from: leafItem.der)
+            let leafSKI = Self.extractX509SubjectKeyIdentifier(from: leafItem.der)
+
+            for signerInfo in signedData.signerInfos {
+                switch signerInfo.sid {
+                case .issuerAndSerial(let sidIssuer, let sidSerial):
+                    guard let certIS = leafIssuerSerial,
+                          certIS.issuerTLV == sidIssuer,
+                          Self.trimASN1IntegerLeadingZero(certIS.serialBytes) == Self.trimASN1IntegerLeadingZero(sidSerial) else {
+                        continue
+                    }
+                case .subjectKeyIdentifier(let sidSKI):
+                    guard !sidSKI.isEmpty,
+                          let lSKI = leafSKI,
+                          lSKI == sidSKI else {
+                        continue
+                    }
+                }
+
+                let signedPayload: Data
+                if !signerInfo.retaggedSignedAttrs.isEmpty {
+                    guard signerInfo.contentTypeValues.count == 1,
+                          signerInfo.contentTypeValues[0] == Self.oidPKCS7Data,
+                          signerInfo.messageDigestValues.count == 1,
+                          let expectedDigest = Self.computeCMSDigest(encapBytes, algorithmOID: signerInfo.digestAlgorithmOID),
+                          expectedDigest == signerInfo.messageDigestValues[0] else {
+                        continue
+                    }
+                    signedPayload = signerInfo.retaggedSignedAttrs
+                } else {
+                    signedPayload = encapBytes
+                }
+
+                guard let secKeyAlg = Self.resolveSecKeyAlgorithm(
+                    signatureAlgOID: signerInfo.signatureAlgorithmOID,
+                    digestAlgOID: signerInfo.digestAlgorithmOID
+                ) else {
+                    continue
+                }
+
+                if SecKeyVerifySignature(
+                    leafPublicKey,
+                    secKeyAlg,
+                    signedPayload as CFData,
+                    signerInfo.signatureBytes as CFData,
+                    nil
+                ) {
+                    return (true, plist, leafItem.summary)
+                }
+            }
+        }
+
+        return (false, nil, nil)
+    }
+
+    public func verifyAppReceiptCMS(_ rawInput: Data) -> (isVerified: Bool, isSandbox: Bool) {
+        verifyAppReceiptCMS(rawInput, customAnchorCertificates: nil)
+    }
+
+    internal func verifyAppReceiptCMS(
+        _ rawInput: Data,
+        customAnchorCertificates: [SecCertificate]? = nil
+    ) -> (isVerified: Bool, isSandbox: Bool) {
+        let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
+        guard !data.isEmpty,
+              let signedData = Self.parseCMSSignedData(data, requireSignedAttrs: false),
+              signedData.encapContentTypeOID == Self.oidPKCS7Data,
+              let encapBytes = signedData.encapContentBytes,
+              !encapBytes.isEmpty,
+              !signedData.signerInfos.isEmpty,
+              !signedData.certificateDERs.isEmpty else {
+            return (false, false)
+        }
+
+        guard let receiptRoot = try? ASN1DERDecoder.decode(encapBytes),
+              case .set(let receiptAttrs) = receiptRoot,
+              !receiptAttrs.isEmpty else {
+            return (false, false)
+        }
+
+        var foundValidAttribute = false
+        var isSandboxEnv = false
+        for attrNode in receiptAttrs {
+            guard case .sequence(let fields) = attrNode,
+                  fields.count == 3,
+                  case .integer(let attrType) = fields[0],
+                  case .integer(_) = fields[1],
+                  case .data(let attrBytes) = fields[2] else {
+                continue
+            }
+            foundValidAttribute = true
+            if attrType == 0,
+               let envNode = try? ASN1DERDecoder.decode(attrBytes),
+               case .string(let envValue) = envNode {
+                let lowerEnv = envValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if lowerEnv == "productionsandbox" || lowerEnv == "sandbox" {
+                    isSandboxEnv = true
+                }
+            }
+        }
+        guard foundValidAttribute else {
+            return (false, false)
+        }
+
+        var certItems: [(cert: SecCertificate, der: Data, summary: String)] = []
+        for der in signedData.certificateDERs {
+            guard let cert = SecCertificateCreateWithData(nil, der as CFData) else { continue }
+            let summary = (SecCertificateCopySubjectSummary(cert) as String?) ?? ""
+            certItems.append((cert, der, summary))
+        }
+        let leafCandidates = certItems.filter { item in
+            let s = item.summary
+            return s.contains("Receipt Signing")
+                || s == "Apple iPhone OS Application Signing"
+                || s == "TestFlight Beta Distribution"
+                || s == "Apple TestFlight Beta Distribution"
+                || s == "Apple Inc. Application Integration"
+        }
+        guard !leafCandidates.isEmpty else {
+            return (false, false)
+        }
+
+        let policy = SecPolicyCreateBasicX509()
+        for leafItem in leafCandidates {
+            var orderedCerts: [SecCertificate] = [leafItem.cert]
+            for item in certItems where item.der != leafItem.der {
+                orderedCerts.append(item.cert)
+            }
+            var trustOpt: SecTrust?
+            guard SecTrustCreateWithCertificates(orderedCerts as CFArray, policy, &trustOpt) == errSecSuccess,
+                  let trust = trustOpt else {
+                continue
+            }
+            _ = SecTrustSetNetworkFetchAllowed(trust, false)
+            if let customAnchors = customAnchorCertificates {
+                guard SecTrustSetAnchorCertificates(trust, customAnchors as CFArray) == errSecSuccess,
+                      SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess else {
+                    continue
+                }
+            }
+            var chainValid = SecTrustEvaluateWithError(trust, nil)
+            if !chainValid, let notBefore = Self.extractX509NotBeforeDate(from: leafItem.der) {
+                _ = SecTrustSetVerifyDate(trust, notBefore.addingTimeInterval(60) as CFDate)
+                chainValid = SecTrustEvaluateWithError(trust, nil)
+            }
+            guard chainValid,
+                  let evaluatedChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                  evaluatedChain.count >= 2,
+                  (SecCertificateCopyData(evaluatedChain[0]) as Data) == leafItem.der,
+                  let rootCert = evaluatedChain.last,
+                  let rootSummary = SecCertificateCopySubjectSummary(rootCert) as String?,
+                  rootSummary.hasPrefix("Apple Root CA"),
+                  (customAnchorCertificates != nil || Self.isOfficialAppleRootCertificate(rootCert)),
+                  let leafPublicKey = SecCertificateCopyKey(leafItem.cert) else {
+                continue
+            }
+
+            let leafIssuerSerial = Self.extractX509IssuerAndSerial(from: leafItem.der)
+            let leafSKI = Self.extractX509SubjectKeyIdentifier(from: leafItem.der)
+
+            for signerInfo in signedData.signerInfos {
+                switch signerInfo.sid {
+                case .issuerAndSerial(let sidIssuer, let sidSerial):
+                    guard let certIS = leafIssuerSerial,
+                          certIS.issuerTLV == sidIssuer,
+                          Self.trimASN1IntegerLeadingZero(certIS.serialBytes) == Self.trimASN1IntegerLeadingZero(sidSerial) else {
+                        continue
+                    }
+                case .subjectKeyIdentifier(let sidSKI):
+                    guard !sidSKI.isEmpty,
+                          let lSKI = leafSKI,
+                          lSKI == sidSKI else {
+                        continue
+                    }
+                }
+
+                let signedPayload: Data
+                if !signerInfo.retaggedSignedAttrs.isEmpty {
+                    guard signerInfo.contentTypeValues.count == 1,
+                          signerInfo.contentTypeValues[0] == Self.oidPKCS7Data,
+                          signerInfo.messageDigestValues.count == 1,
+                          let expectedDigest = Self.computeCMSDigest(encapBytes, algorithmOID: signerInfo.digestAlgorithmOID),
+                          expectedDigest == signerInfo.messageDigestValues[0] else {
+                        continue
+                    }
+                    signedPayload = signerInfo.retaggedSignedAttrs
+                } else {
+                    signedPayload = encapBytes
+                }
+
+                guard let secKeyAlg = Self.resolveSecKeyAlgorithm(
+                    signatureAlgOID: signerInfo.signatureAlgorithmOID,
+                    digestAlgOID: signerInfo.digestAlgorithmOID
+                ) else {
+                    continue
+                }
+
+                if SecKeyVerifySignature(
+                    leafPublicKey,
+                    secKeyAlg,
+                    signedPayload as CFData,
+                    signerInfo.signatureBytes as CFData,
+                    nil
+                ) {
+                    return (true, isSandboxEnv)
+                }
+            }
+        }
+
+        return (false, false)
     }
 
     private static func verifyAppleCDHashesAttributes(
@@ -1928,7 +3024,36 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         return BERElement(tag: tag, isIndefinite: false, contentRange: contentRange, fullRange: elemStart..<cur)
     }
 
-    private static func parseCMSSignedData(_ rawCMS: Data) -> ParsedCMSSignedData? {
+    private static func extractBEROctetStringBytes(
+        in data: Data,
+        element: BERElement,
+        depth: Int = 0,
+        maxBytes: Int = 16 * 1024 * 1024,
+        into acc: inout Data
+    ) -> Bool {
+        guard depth <= 8 else { return false }
+        if element.tag == 0x04 {
+            let len = element.contentRange.count
+            guard acc.count + len <= maxBytes else { return false }
+            if len > 0 {
+                acc.append(data.subdata(in: element.contentRange))
+            }
+            return true
+        } else if element.tag == 0x24 {
+            var cCur = element.contentRange.lowerBound
+            let cLim = element.contentRange.upperBound
+            while cCur < cLim {
+                guard let part = readBERElement(in: data, at: &cCur, limit: cLim),
+                      extractBEROctetStringBytes(in: data, element: part, depth: depth + 1, maxBytes: maxBytes, into: &acc) else {
+                    return false
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    private static func parseCMSSignedData(_ rawCMS: Data, requireSignedAttrs: Bool = true) -> ParsedCMSSignedData? {
         let data = rawCMS.startIndex == 0 ? rawCMS : Data(rawCMS)
         var topCur = 0
         guard let contentInfo = readBERElement(in: data, at: &topCur, limit: data.count),
@@ -1973,21 +3098,14 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
            let eContentExp = readBERElement(in: data, at: &encCur, limit: encLim),
            eContentExp.tag == 0xA0 {
             var innerCur = eContentExp.contentRange.lowerBound
-            if let oct = readBERElement(in: data, at: &innerCur, limit: eContentExp.contentRange.upperBound) {
-                if oct.tag == 0x04 {
-                    encapContentBytes = data.subdata(in: oct.contentRange)
-                } else if oct.tag == 0x24 {
-                    // Constructed BER OCTET STRING
-                    var acc = Data()
-                    var cCur = oct.contentRange.lowerBound
-                    while cCur < oct.contentRange.upperBound,
-                          let part = readBERElement(in: data, at: &cCur, limit: oct.contentRange.upperBound),
-                          part.tag == 0x04 {
-                        acc.append(data.subdata(in: part.contentRange))
-                    }
-                    encapContentBytes = acc
-                }
+            guard let oct = readBERElement(in: data, at: &innerCur, limit: eContentExp.contentRange.upperBound) else {
+                return nil
             }
+            var acc = Data()
+            guard extractBEROctetStringBytes(in: data, element: oct, depth: 0, maxBytes: 16 * 1024 * 1024, into: &acc) else {
+                return nil
+            }
+            encapContentBytes = acc
         }
 
         var certs: [Data] = []
@@ -2031,7 +3149,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                   siElem.tag == 0x30 else {
                 break
             }
-            if let parsedSI = parseSingleSignerInfo(in: data, range: siElem.contentRange) {
+            if let parsedSI = parseSingleSignerInfo(in: data, range: siElem.contentRange, requireSignedAttrs: requireSignedAttrs) {
                 parsedSigners.append(parsedSI)
             }
         }
@@ -2044,7 +3162,7 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         )
     }
 
-    private static func parseSingleSignerInfo(in data: Data, range: Range<Int>) -> ParsedCMSSignerInfo? {
+    private static func parseSingleSignerInfo(in data: Data, range: Range<Int>, requireSignedAttrs: Bool = true) -> ParsedCMSSignerInfo? {
         var cur = range.lowerBound
         let lim = range.upperBound
 
@@ -2084,92 +3202,103 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         }
         let digestAlgorithmOID = data.subdata(in: digOID.contentRange)
 
-        // 4. signedAttrs ([0] IMPLICIT SignedAttributes 0xA0) — mandatory for cryptographic messageDigest binding
-        guard let signedAttrsElem = readBERElement(in: data, at: &cur, limit: lim),
-              signedAttrsElem.tag == 0xA0 else {
+        // 4. signedAttrs ([0] IMPLICIT SignedAttributes 0xA0) — mandatory when `requireSignedAttrs` is true
+        guard let nextElem = readBERElement(in: data, at: &cur, limit: lim) else {
             return nil
         }
-        let retaggedSignedAttrs: Data
-        if signedAttrsElem.isIndefinite {
-            retaggedSignedAttrs = encodeDefiniteDERTLV(tag: 0x31, content: data.subdata(in: signedAttrsElem.contentRange))
-        } else {
-            var copy = data.subdata(in: signedAttrsElem.fullRange)
-            copy[0] = 0x31
-            retaggedSignedAttrs = copy
-        }
 
+        let retaggedSignedAttrs: Data
         var contentTypeValues: [Data] = []
         var messageDigestValues: [Data] = []
         var appleCDHashesPlistBlobs: [Data] = []
         var appleCDHashesDEREntries: [(algOID: Data, hashes: [Data])] = []
+        let sigAlgSeq: BERElement
 
-        var attrCur = signedAttrsElem.contentRange.lowerBound
-        let attrLim = signedAttrsElem.contentRange.upperBound
-        while attrCur < attrLim {
-            guard let attrSeq = readBERElement(in: data, at: &attrCur, limit: attrLim),
-                  attrSeq.tag == 0x30 else {
-                return nil
+        if nextElem.tag == 0xA0 {
+            let signedAttrsElem = nextElem
+            if signedAttrsElem.isIndefinite {
+                retaggedSignedAttrs = encodeDefiniteDERTLV(tag: 0x31, content: data.subdata(in: signedAttrsElem.contentRange))
+            } else {
+                var copy = data.subdata(in: signedAttrsElem.fullRange)
+                copy[0] = 0x31
+                retaggedSignedAttrs = copy
             }
-            var aCur = attrSeq.contentRange.lowerBound
-            let aLim = attrSeq.contentRange.upperBound
-            guard let aType = readBERElement(in: data, at: &aCur, limit: aLim), aType.tag == 0x06,
-                  let aVals = readBERElement(in: data, at: &aCur, limit: aLim), aVals.tag == 0x31 else {
-                return nil
-            }
-            let attrOID = data.subdata(in: aType.contentRange)
-            var vCur = aVals.contentRange.lowerBound
-            let vLim = aVals.contentRange.upperBound
 
-            if attrOID == oidContentType {
-                while vCur < vLim {
-                    guard let v = readBERElement(in: data, at: &vCur, limit: vLim), v.tag == 0x06 else { return nil }
-                    contentTypeValues.append(data.subdata(in: v.contentRange))
+            var attrCur = signedAttrsElem.contentRange.lowerBound
+            let attrLim = signedAttrsElem.contentRange.upperBound
+            while attrCur < attrLim {
+                guard let attrSeq = readBERElement(in: data, at: &attrCur, limit: attrLim),
+                      attrSeq.tag == 0x30 else {
+                    return nil
                 }
-            } else if attrOID == oidMessageDigest {
-                while vCur < vLim {
-                    guard let v = readBERElement(in: data, at: &vCur, limit: vLim), v.tag == 0x04 else { return nil }
-                    messageDigestValues.append(data.subdata(in: v.contentRange))
+                var aCur = attrSeq.contentRange.lowerBound
+                let aLim = attrSeq.contentRange.upperBound
+                guard let aType = readBERElement(in: data, at: &aCur, limit: aLim), aType.tag == 0x06,
+                      let aVals = readBERElement(in: data, at: &aCur, limit: aLim), aVals.tag == 0x31 else {
+                    return nil
                 }
-            } else if attrOID == oidAppleCDHashesPlist {
-                while vCur < vLim {
-                    guard let v = readBERElement(in: data, at: &vCur, limit: vLim) else { return nil }
-                    if v.tag == 0x04 || v.tag == 0x0C || v.tag == 0x16 {
-                        appleCDHashesPlistBlobs.append(data.subdata(in: v.contentRange))
-                    } else {
-                        return nil
+                let attrOID = data.subdata(in: aType.contentRange)
+                var vCur = aVals.contentRange.lowerBound
+                let vLim = aVals.contentRange.upperBound
+
+                if attrOID == oidContentType {
+                    while vCur < vLim {
+                        guard let v = readBERElement(in: data, at: &vCur, limit: vLim), v.tag == 0x06 else { return nil }
+                        contentTypeValues.append(data.subdata(in: v.contentRange))
                     }
-                }
-            } else if attrOID == oidAppleCDHashesDER {
-                while vCur < vLim {
-                    guard let seq = readBERElement(in: data, at: &vCur, limit: vLim), seq.tag == 0x30 else { return nil }
-                    var sCur = seq.contentRange.lowerBound
-                    let sLim = seq.contentRange.upperBound
-                    guard let hOIDElem = readBERElement(in: data, at: &sCur, limit: sLim), hOIDElem.tag == 0x06,
-                          let hSetElem = readBERElement(in: data, at: &sCur, limit: sLim),
-                          (hSetElem.tag == 0x30 || hSetElem.tag == 0x31 || hSetElem.tag == 0x04) else {
-                        return nil
+                } else if attrOID == oidMessageDigest {
+                    while vCur < vLim {
+                        guard let v = readBERElement(in: data, at: &vCur, limit: vLim), v.tag == 0x04 else { return nil }
+                        messageDigestValues.append(data.subdata(in: v.contentRange))
                     }
-                    let hOID = data.subdata(in: hOIDElem.contentRange)
-                    var hashes: [Data] = []
-                    if hSetElem.tag == 0x04 {
-                        hashes.append(data.subdata(in: hSetElem.contentRange))
-                    } else {
-                        var hsCur = hSetElem.contentRange.lowerBound
-                        let hsLim = hSetElem.contentRange.upperBound
-                        while hsCur < hsLim {
-                            guard let hOct = readBERElement(in: data, at: &hsCur, limit: hsLim), hOct.tag == 0x04 else { return nil }
-                            hashes.append(data.subdata(in: hOct.contentRange))
+                } else if attrOID == oidAppleCDHashesPlist {
+                    while vCur < vLim {
+                        guard let v = readBERElement(in: data, at: &vCur, limit: vLim) else { return nil }
+                        if v.tag == 0x04 || v.tag == 0x0C || v.tag == 0x16 {
+                            appleCDHashesPlistBlobs.append(data.subdata(in: v.contentRange))
+                        } else {
+                            return nil
                         }
                     }
-                    appleCDHashesDEREntries.append((hOID, hashes))
+                } else if attrOID == oidAppleCDHashesDER {
+                    while vCur < vLim {
+                        guard let seq = readBERElement(in: data, at: &vCur, limit: vLim), seq.tag == 0x30 else { return nil }
+                        var sCur = seq.contentRange.lowerBound
+                        let sLim = seq.contentRange.upperBound
+                        guard let hOIDElem = readBERElement(in: data, at: &sCur, limit: sLim), hOIDElem.tag == 0x06,
+                              let hSetElem = readBERElement(in: data, at: &sCur, limit: sLim),
+                              (hSetElem.tag == 0x30 || hSetElem.tag == 0x31 || hSetElem.tag == 0x04) else {
+                            return nil
+                        }
+                        let hOID = data.subdata(in: hOIDElem.contentRange)
+                        var hashes: [Data] = []
+                        if hSetElem.tag == 0x04 {
+                            hashes.append(data.subdata(in: hSetElem.contentRange))
+                        } else {
+                            var hsCur = hSetElem.contentRange.lowerBound
+                            let hsLim = hSetElem.contentRange.upperBound
+                            while hsCur < hsLim {
+                                guard let hOct = readBERElement(in: data, at: &hsCur, limit: hsLim), hOct.tag == 0x04 else { return nil }
+                                hashes.append(data.subdata(in: hOct.contentRange))
+                            }
+                        }
+                        appleCDHashesDEREntries.append((hOID, hashes))
+                    }
                 }
             }
+
+            guard let parsedSigAlg = readBERElement(in: data, at: &cur, limit: lim), parsedSigAlg.tag == 0x30 else {
+                return nil
+            }
+            sigAlgSeq = parsedSigAlg
+        } else if !requireSignedAttrs, nextElem.tag == 0x30 {
+            retaggedSignedAttrs = Data()
+            sigAlgSeq = nextElem
+        } else {
+            return nil
         }
 
         // 5. signatureAlgorithm (SEQUENCE 0x30 -> OID 0x06) & 6. signature (OCTET STRING 0x04)
-        guard let sigAlgSeq = readBERElement(in: data, at: &cur, limit: lim), sigAlgSeq.tag == 0x30 else {
-            return nil
-        }
         var saCur = sigAlgSeq.contentRange.lowerBound
         guard let sigOID = readBERElement(in: data, at: &saCur, limit: sigAlgSeq.contentRange.upperBound),
               sigOID.tag == 0x06,
@@ -2238,6 +3367,86 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
             return nil
         }
         return (data.subdata(in: issuer.fullRange), data.subdata(in: first.contentRange))
+    }
+
+    private static func extractX509SubjectKeyIdentifier(from certDER: Data) -> Data? {
+        let data = certDER.startIndex == 0 ? certDER : Data(certDER)
+        var cur = 0
+        guard let outer = readBERElement(in: data, at: &cur, limit: data.count), outer.tag == 0x30 else { return nil }
+        var tbsOuterCur = outer.contentRange.lowerBound
+        guard let tbs = readBERElement(in: data, at: &tbsOuterCur, limit: outer.contentRange.upperBound), tbs.tag == 0x30 else { return nil }
+        var tbsCur = tbs.contentRange.lowerBound
+        let tbsLim = tbs.contentRange.upperBound
+        guard var first = readBERElement(in: data, at: &tbsCur, limit: tbsLim) else { return nil }
+        if first.tag == 0xA0 {
+            guard let next = readBERElement(in: data, at: &tbsCur, limit: tbsLim) else { return nil }
+            first = next
+        }
+        guard first.tag == 0x02,
+              let sigAlg = readBERElement(in: data, at: &tbsCur, limit: tbsLim), sigAlg.tag == 0x30,
+              let issuer = readBERElement(in: data, at: &tbsCur, limit: tbsLim), issuer.tag == 0x30,
+              let validity = readBERElement(in: data, at: &tbsCur, limit: tbsLim), validity.tag == 0x30,
+              let subject = readBERElement(in: data, at: &tbsCur, limit: tbsLim), subject.tag == 0x30,
+              let spki = readBERElement(in: data, at: &tbsCur, limit: tbsLim), spki.tag == 0x30 else {
+            return nil
+        }
+
+        let oidSubjectKeyIdentifier = Data([0x55, 0x1D, 0x0E]) // 2.5.29.14
+        while tbsCur < tbsLim {
+            guard let elem = readBERElement(in: data, at: &tbsCur, limit: tbsLim) else { break }
+            if elem.tag == 0xA3 {
+                var extOuterCur = elem.contentRange.lowerBound
+                guard let extSeq = readBERElement(in: data, at: &extOuterCur, limit: elem.contentRange.upperBound),
+                      extSeq.tag == 0x30 else {
+                    break
+                }
+                var extListCur = extSeq.contentRange.lowerBound
+                let extListLim = extSeq.contentRange.upperBound
+                while extListCur < extListLim {
+                    guard let extItem = readBERElement(in: data, at: &extListCur, limit: extListLim),
+                          extItem.tag == 0x30 else {
+                        break
+                    }
+                    var eCur = extItem.contentRange.lowerBound
+                    let eLim = extItem.contentRange.upperBound
+                    guard let extOID = readBERElement(in: data, at: &eCur, limit: eLim),
+                          extOID.tag == 0x06 else {
+                        continue
+                    }
+                    guard data.subdata(in: extOID.contentRange) == oidSubjectKeyIdentifier else {
+                        continue
+                    }
+                    guard var nextExtElem = readBERElement(in: data, at: &eCur, limit: eLim) else {
+                        break
+                    }
+                    if nextExtElem.tag == 0x01 {
+                        guard let valElem = readBERElement(in: data, at: &eCur, limit: eLim) else { break }
+                        nextExtElem = valElem
+                    }
+                    if nextExtElem.tag == 0x04 {
+                        var skiCur = nextExtElem.contentRange.lowerBound
+                        if let skiOctet = readBERElement(in: data, at: &skiCur, limit: nextExtElem.contentRange.upperBound),
+                           skiOctet.tag == 0x04,
+                           !skiOctet.contentRange.isEmpty {
+                            return data.subdata(in: skiOctet.contentRange)
+                        }
+                    }
+                }
+            }
+        }
+
+        // RFC 5280 §4.2.1.2 method 1 fallback when 2.5.29.14 extension is absent: SHA-1 of BIT STRING key bytes
+        var spkiCur = spki.contentRange.lowerBound
+        let spkiLim = spki.contentRange.upperBound
+        if let _ = readBERElement(in: data, at: &spkiCur, limit: spkiLim),
+           let bitStr = readBERElement(in: data, at: &spkiCur, limit: spkiLim),
+           bitStr.tag == 0x03,
+           bitStr.contentRange.count >= 2,
+           data[bitStr.contentRange.lowerBound] == 0x00 {
+            let keyBytes = data.subdata(in: (bitStr.contentRange.lowerBound + 1)..<bitStr.contentRange.upperBound)
+            return Data(Insecure.SHA1.hash(data: keyBytes))
+        }
+        return nil
     }
 
     private static func extractX509NotBeforeDate(from certDER: Data) -> Date? {
@@ -2714,21 +3923,98 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
         let data = rawInput.startIndex == 0 ? rawInput : Data(rawInput)
         guard data.count >= 4 else { return nil }
         let b0 = data[0], b1 = data[1], b2 = data[2], b3 = data[3]
-        let isUTF16LE = (b0 == 0xFF && b1 == 0xFE)
+        var isUTF16LE = (b0 == 0xFF && b1 == 0xFE)
             || (b0 == 0x3C && b1 == 0x00 && (b2 == 0x3F || b2 == 0x70 || b2 == 0x21) && b3 == 0x00)
-        let isUTF16BE = (b0 == 0xFE && b1 == 0xFF)
+        var isUTF16BE = (b0 == 0xFE && b1 == 0xFF)
             || (b0 == 0x00 && b1 == 0x3C && b2 == 0x00 && (b3 == 0x3F || b3 == 0x70 || b3 == 0x21))
+        var startIdx = ((b0 == 0xFF && b1 == 0xFE) || (b0 == 0xFE && b1 == 0xFF)) ? 2 : 0
+        if !isUTF16LE && !isUTF16BE {
+            var off = 0
+            while off + 4 <= data.count {
+                let c0 = data[off], c1 = data[off + 1]
+                let isBEWs = (c0 == 0x00) && (c1 == 0x20 || c1 == 0x09 || c1 == 0x0A || c1 == 0x0D || c1 == 0x00)
+                let isLEWs = (c1 == 0x00) && (c0 == 0x20 || c0 == 0x09 || c0 == 0x0A || c0 == 0x0D || c0 == 0x00)
+                if isBEWs || isLEWs {
+                    off += 2
+                    continue
+                }
+                break
+            }
+            if off + 4 <= data.count {
+                let u0 = data[off], u1 = data[off + 1], u2 = data[off + 2], u3 = data[off + 3]
+                if u0 == 0xFF && u1 == 0xFE {
+                    var bodyOff = off + 2
+                    while bodyOff + 4 <= data.count {
+                        let c0 = data[bodyOff], c1 = data[bodyOff + 1]
+                        if c1 == 0x00 && (c0 == 0x20 || c0 == 0x09 || c0 == 0x0A || c0 == 0x0D || c0 == 0x00) {
+                            bodyOff += 2
+                        } else {
+                            break
+                        }
+                    }
+                    if bodyOff + 4 <= data.count,
+                       data[bodyOff] == 0x3C && data[bodyOff + 1] == 0x00
+                        && (data[bodyOff + 2] == 0x3F || data[bodyOff + 2] == 0x70 || data[bodyOff + 2] == 0x21)
+                        && data[bodyOff + 3] == 0x00 {
+                        isUTF16LE = true
+                        startIdx = bodyOff
+                    }
+                } else if u0 == 0xFE && u1 == 0xFF {
+                    var bodyOff = off + 2
+                    while bodyOff + 4 <= data.count {
+                        let c0 = data[bodyOff], c1 = data[bodyOff + 1]
+                        if c0 == 0x00 && (c1 == 0x20 || c1 == 0x09 || c1 == 0x0A || c1 == 0x0D || c1 == 0x00) {
+                            bodyOff += 2
+                        } else {
+                            break
+                        }
+                    }
+                    if bodyOff + 4 <= data.count,
+                       data[bodyOff] == 0x00 && data[bodyOff + 1] == 0x3C && data[bodyOff + 2] == 0x00
+                        && (data[bodyOff + 3] == 0x3F || data[bodyOff + 3] == 0x70 || data[bodyOff + 3] == 0x21) {
+                        isUTF16BE = true
+                        startIdx = bodyOff
+                    }
+                } else if u0 == 0x3C && u1 == 0x00 && (u2 == 0x3F || u2 == 0x70 || u2 == 0x21) && u3 == 0x00 {
+                    isUTF16LE = true
+                    startIdx = off
+                } else if u0 == 0x00 && u1 == 0x3C && u2 == 0x00 && (u3 == 0x3F || u3 == 0x70 || u3 == 0x21) {
+                    isUTF16BE = true
+                    startIdx = off
+                }
+            }
+        }
         guard isUTF16LE || isUTF16BE else { return nil }
-        let evenCount = data.count & ~1
-        guard evenCount >= 4 else { return nil }
+        let evenCount = startIdx + ((data.count - startIdx) & ~1)
+        guard evenCount - startIdx >= 4 else { return nil }
         let slice = evenCount == data.count ? data : data.prefix(evenCount)
         let encoding: String.Encoding = isUTF16LE ? .utf16LittleEndian : .utf16BigEndian
-        let startIdx = ((b0 == 0xFF && b1 == 0xFE) || (b0 == 0xFE && b1 == 0xFF)) ? 2 : 0
         guard startIdx < slice.count,
               let decoded = String(data: slice.subdata(in: startIdx..<slice.count), encoding: encoding) else {
             return nil
         }
         return Data(decoded.utf8)
+    }
+
+    private static func recoverFirstNonEmptyPlistDict(
+        initialDict: [String: Any],
+        utf8XMLData: Data
+    ) -> [String: Any] {
+        if !initialDict.isEmpty {
+            return initialDict
+        }
+        let docRanges = scanXMLPlistDocumentRanges(in: utf8XMLData, maxDocuments: 4096)
+        if docRanges.count <= 1 {
+            return initialDict
+        }
+        for r in docRanges.dropFirst() {
+            if let nextObj = try? PropertyListSerialization.propertyList(from: utf8XMLData.subdata(in: r), options: [], format: nil),
+               let nextDict = nextObj as? [String: Any],
+               !nextDict.isEmpty {
+                return nextDict
+            }
+        }
+        return initialDict
     }
 
     public func parseXMLPlist(_ data: Data) throws -> [String: Any] {
@@ -2742,42 +4028,37 @@ public final class CSBlobParser: CSBlobParserProtocol, @unchecked Sendable {
                 return directDict
             }
             let utf8Probe = Self.transcodeUTF16XMLToUTF8IfNeeded(data) ?? (data.startIndex == 0 ? data : Data(data))
-            let docRanges = Self.scanXMLPlistDocumentRanges(in: utf8Probe, maxDocuments: 4096)
-            if docRanges.count <= 1 {
-                return directDict
-            }
-            for r in docRanges.dropFirst() {
-                if let nextObj = try? PropertyListSerialization.propertyList(from: utf8Probe.subdata(in: r), options: [], format: nil),
-                   let nextDict = nextObj as? [String: Any],
-                   !nextDict.isEmpty {
-                    return nextDict
-                }
-            }
-            return directDict
+            return Self.recoverFirstNonEmptyPlistDict(initialDict: directDict, utf8XMLData: utf8Probe)
         }
 
         // 2. Transcode UTF-16LE / UTF-16BE XML plists (if padded with trailing nulls/bytes) into UTF-8 before byte-trimming & lexical scanning
         let workingData = Self.transcodeUTF16XMLToUTF8IfNeeded(data) ?? (data.startIndex == 0 ? data : Data(data))
 
         // 3. Strip trailing null bytes / ASCII whitespace padding (added by codesign/ldid)
-        var clean = workingData
-        while let last = clean.last, (last == 0 || last == 0x20 || last == 0x09 || last == 0x0A || last == 0x0D) {
-            clean.removeLast()
+        var trimEnd = workingData.count
+        while trimEnd > 0 {
+            let b = workingData[trimEnd - 1]
+            if b == 0 || b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D {
+                trimEnd -= 1
+            } else {
+                break
+            }
         }
+        let clean = trimEnd == workingData.count ? workingData : workingData.subdata(in: 0..<trimEnd)
         guard !clean.isEmpty else { return [:] }
         do {
             let obj = try PropertyListSerialization.propertyList(from: clean, options: [], format: nil)
-            guard let dict = obj as? [String: Any] else { return [:] }
-            return dict
+            let dict = (obj as? [String: Any]) ?? [:]
+            return Self.recoverFirstNonEmptyPlistDict(initialDict: dict, utf8XMLData: clean)
         } catch let primaryError {
             // XNU's libkern OSUnserializeXML stops parsing at the matching top-level closing `</plist>` tag and ignores
             // trailing padding/bytes, while valid XML may embed thousands of `</plist>` tokens inside `<!--...-->` comments
             // or `<![CDATA[...]]>` blocks. Use O(N) comment/CDATA-aware lexical scanning without truncation or quadratic retries.
             if let endOffset = Self.findMatchingPlistEnd(in: clean, from: 0), endOffset > 0, endOffset <= clean.count {
                 let trimmedXML = clean.subdata(in: 0..<endOffset)
-                if let obj = try? PropertyListSerialization.propertyList(from: trimmedXML, options: [], format: nil),
-                   let dict = obj as? [String: Any] {
-                    return dict
+                if let obj = try? PropertyListSerialization.propertyList(from: trimmedXML, options: [], format: nil) {
+                    let dict = (obj as? [String: Any]) ?? [:]
+                    return Self.recoverFirstNonEmptyPlistDict(initialDict: dict, utf8XMLData: clean)
                 }
             }
             var fallbackEmptyDict: [String: Any]? = nil
@@ -3185,6 +4466,21 @@ public enum ASN1DERDecoder {
             }
         }
 
+        func isAlternatingKeyValueList(_ items: [Node], requireNonStringValue: Bool) -> Bool {
+            guard items.count >= 4, items.count % 2 == 0 else { return false }
+            var sawNonStringValue = false
+            for i in stride(from: 0, to: items.count, by: 2) {
+                guard case .string(let k) = items[i], !k.isEmpty else {
+                    return false
+                }
+                if case .string = items[i + 1] {
+                    continue
+                }
+                sawNonStringValue = true
+            }
+            return !requireNonStringValue || sawNonStringValue
+        }
+
         func convertVal(_ n: Node) -> Any {
             switch n {
             case .boolean(let b): return b
@@ -3201,6 +4497,15 @@ public enum ASN1DERDecoder {
                         }
                         return sub
                     }
+                    if isAlternatingKeyValueList(items, requireNonStringValue: true) {
+                        var sub: [String: Any] = [:]
+                        for i in stride(from: 0, to: items.count, by: 2) {
+                            if case .string(let k) = items[i] {
+                                sub = CSBlobParser.mergeEntitlementDictionaries(sub, [k: convertVal(items[i + 1])])
+                            }
+                        }
+                        return sub
+                    }
                 }
                 return items.map(convertVal)
             case .other(_, let d): return d
@@ -3212,6 +4517,21 @@ public enum ASN1DERDecoder {
             case .sequence(let children), .set(let children), .constructed(_, let children):
                 if let (k, v) = asPair(n) {
                     dict = CSBlobParser.mergeEntitlementDictionaries(dict, [k: convertVal(v)])
+                    return
+                }
+                let pairs = children.compactMap(asPair)
+                if !children.isEmpty && pairs.count == children.count {
+                    for (k, v) in pairs {
+                        dict = CSBlobParser.mergeEntitlementDictionaries(dict, [k: convertVal(v)])
+                    }
+                    return
+                }
+                if isAlternatingKeyValueList(children, requireNonStringValue: false) {
+                    for i in stride(from: 0, to: children.count, by: 2) {
+                        if case .string(let k) = children[i] {
+                            dict = CSBlobParser.mergeEntitlementDictionaries(dict, [k: convertVal(children[i + 1])])
+                        }
+                    }
                     return
                 }
                 for child in children {

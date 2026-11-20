@@ -41,6 +41,7 @@ public struct InstalledScanConfigSheet: View {
     @State private var selectedTutorialTab: TutorialTab = .modeB
     @State private var localBannerText: String? = nil
     @State private var localBannerIsError: Bool = false
+    @State private var subnetDiagnosis: LocalNetworkSubnetDiagnosis? = nil
 
     private let cliInstallPyCommand = #"command -v brew >/dev/null 2>&1 && brew install pymobiledevice3 || python3 -m pip install --user -U pymobiledevice3"#
     private var cliExportCommand: String {
@@ -50,8 +51,24 @@ public struct InstalledScanConfigSheet: View {
         #"ID=$(xcrun devicectl list devices -j - | python3 -c "import sys,json; devs=json.load(sys.stdin).get('result',{}).get('devices',[]); print(next((d['identifier'] for d in devs if 'Simulator' not in str(d)), ''))") && xcrun devicectl device info apps --device "$ID" --include-all-apps --include-app-group-identifiers --include-container-paths --json-output ~/Desktop/installed_apps.json && echo ""# + WQStrings.cliDeviceCtlEchoText + #"""#
     }
 
-    private var subnetDiagnosis: LocalNetworkSubnetDiagnosis {
-        LocalNetworkSubnetDiagnosis.inspect(configuredHost: vm.lockdownHost)
+    private func refreshSubnetDiagnosis(for host: String) {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            let diagnosis = await Task.detached(priority: .utility) {
+                LocalNetworkSubnetDiagnosis.inspect(configuredHost: trimmed)
+            }.value
+            await MainActor.run {
+                self.subnetDiagnosis = diagnosis
+            }
+        }
+    }
+
+    private static func isCompleteIPv4(_ raw: String) -> Bool {
+        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { seg in
+            !seg.isEmpty && seg.count <= 3 && Int(seg).map { $0 >= 0 && $0 <= 255 } == true
+        }
     }
 
     public init() {}
@@ -130,21 +147,30 @@ public struct InstalledScanConfigSheet: View {
                             .multilineTextAlignment(.trailing)
                             .font(.subheadline.monospaced())
                             .foregroundColor(.teal)
+                            .onSubmit {
+                                refreshSubnetDiagnosis(for: vm.lockdownHost)
+                            }
+                            .onChange(of: vm.lockdownHost) { newHost in
+                                if Self.isCompleteIPv4(newHost) {
+                                    refreshSubnetDiagnosis(for: newHost)
+                                }
+                            }
                     }
 
-                    if let wifiIP = subnetDiagnosis.wifiIP,
-                       let recTunnel = subnetDiagnosis.recommendedTunnelCIDR,
-                       let recDevice = subnetDiagnosis.recommendedDeviceCIDR,
-                       let recHost = subnetDiagnosis.recommendedDeviceIP {
+                    if let diag = subnetDiagnosis,
+                       let wifiIP = diag.wifiIP,
+                       let recTunnel = diag.recommendedTunnelCIDR,
+                       let recDevice = diag.recommendedDeviceCIDR,
+                       let recHost = diag.recommendedDeviceIP {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack(spacing: 6) {
-                                Image(systemName: subnetDiagnosis.hasSubnetMismatch ? "exclamationmark.shield.fill" : "checkmark.shield.fill")
-                                    .foregroundColor(subnetDiagnosis.hasSubnetMismatch ? .orange : .green)
-                                Text(subnetDiagnosis.hasSubnetMismatch
+                                Image(systemName: diag.hasSubnetMismatch ? "exclamationmark.shield.fill" : "checkmark.shield.fill")
+                                    .foregroundColor(diag.hasSubnetMismatch ? .orange : .green)
+                                Text(diag.hasSubnetMismatch
                                      ? WQStrings.engine1ASubnetMismatchTitle(wifiIP: wifiIP)
                                      : WQStrings.engine1ASubnetAlignedTitle(wifiIP: wifiIP))
                                     .font(.caption.bold())
-                                    .foregroundColor(subnetDiagnosis.hasSubnetMismatch ? .orange : .green)
+                                    .foregroundColor(diag.hasSubnetMismatch ? .orange : .green)
                             }
                             Text(WQStrings.engine1ASubnetHint)
                                 .font(.caption2)
@@ -390,9 +416,12 @@ public struct InstalledScanConfigSheet: View {
                 if !vm.hasPairingFile && !vm.hasSavedSnapshot {
                     showTutorial = true
                 }
-                if let autoMsg = vm.autoImportFromDocumentsFolderIfNeeded() {
-                    localBannerIsError = false
-                    localBannerText = autoMsg
+                refreshSubnetDiagnosis(for: vm.lockdownHost)
+                Task {
+                    if let autoMsg = await vm.autoImportFromDocumentsFolderIfNeededAsync() {
+                        localBannerIsError = false
+                        localBannerText = autoMsg
+                    }
                 }
             }
         }
@@ -585,15 +614,17 @@ public struct InstalledScanConfigSheet: View {
         #if canImport(UIKit)
         NativeDocumentPickerPresenter.shared.present(kind: .pairingFile) { urls in
             guard let first = urls.first else { return }
-            let result = vm.importPairingFileWithResult(from: first)
-            switch result {
-            case .success(let summary):
-                localBannerIsError = false
-                localBannerText = WQStrings.bannerFilePairingScanning(summary)
-                vm.testLiveLockdownConnectionAndScan()
-            case .failure(let err):
-                localBannerIsError = true
-                localBannerText = err.localizedDescription
+            Task {
+                let result = await vm.importPairingFileAsync(from: first)
+                switch result {
+                case .success(let summary):
+                    localBannerIsError = false
+                    localBannerText = WQStrings.bannerFilePairingScanning(summary)
+                    vm.testLiveLockdownConnectionAndScan()
+                case .failure(let err):
+                    localBannerIsError = true
+                    localBannerText = err.localizedDescription
+                }
             }
         }
         #endif
@@ -603,14 +634,16 @@ public struct InstalledScanConfigSheet: View {
         #if canImport(UIKit)
         NativeDocumentPickerPresenter.shared.present(kind: .registrySnapshot) { urls in
             guard let first = urls.first else { return }
-            let result = vm.importRegistrySnapshotWithResult(from: first, autoScan: true)
-            switch result {
-            case .success(let msg):
-                localBannerIsError = false
-                localBannerText = msg
-            case .failure(let err):
-                localBannerIsError = true
-                localBannerText = err.localizedDescription
+            Task {
+                let result = await vm.importRegistrySnapshotAsync(from: first, autoScan: true)
+                switch result {
+                case .success(let msg):
+                    localBannerIsError = false
+                    localBannerText = msg
+                case .failure(let err):
+                    localBannerIsError = true
+                    localBannerText = err.localizedDescription
+                }
             }
         }
         #endif

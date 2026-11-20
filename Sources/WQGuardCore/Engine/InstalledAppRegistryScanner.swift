@@ -193,12 +193,6 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
                 strEnts[k] = s
             }
         }
-        if (dict["BetaApp"] as? Bool == true)
-            || (dict["IsTestFlight"] as? Bool == true)
-            || (dict["betaExternalVersionIdentifier"] != nil)
-            || ((dict["iTunesMetadata"] as? [String: Any])?["betaExternalVersionIdentifier"] != nil) {
-            boolEnts["beta-reports-active"] = true
-        }
 
         let appGroups = extractTrimmedStrings(entDict["com.apple.security.application-groups"])
         let keychainGroups = extractTrimmedStrings(entDict["keychain-access-groups"])
@@ -228,8 +222,12 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         }
 
         let bgModes = extractTrimmedStrings(dict["UIBackgroundModes"])
-        let bundlePath = (dict["Path"] as? String)
-            ?? (dict["BundlePath"] as? String)
+        let nonEmptyPath: (Any?) -> String? = { raw in
+            guard let s = raw as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return s
+        }
+        let bundlePath = nonEmptyPath(dict["Path"])
+            ?? nonEmptyPath(dict["BundlePath"])
             ?? "/var/containers/Bundle/Application/\(bundleId)"
         let containerPath = dict["Container"] as? String
 
@@ -278,26 +276,105 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             if dict["provisioningProfile"] != nil { return true }
             return nil
         }()
-        let resolvedBundlePath: String = {
-            if let urlStr = dict["url"] as? String, let u = URL(string: urlStr), u.isFileURL {
-                return u.path
+        let rawURLString = dict["url"] as? String
+        let rawContainerString = dict["bundleContainerPath"] as? String
+        let containerPathCandidate = rawContainerString?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var hasNonLocalFileURL = false
+        let rawBundlePath: String = {
+            if let urlStr = rawURLString, !urlStr.isEmpty {
+                let hasLeadingOrTrailingWhitespace = (urlStr.trimmingCharacters(in: .whitespacesAndNewlines) != urlStr)
+                let hasLiteralControlChar = InstalledAppRegistryScanner.containsASCIIControlCharacter(urlStr)
+                if !hasLeadingOrTrailingWhitespace && !hasLiteralControlChar {
+                    if let u = URL(string: urlStr), u.isFileURL {
+                        let host = u.host
+                        let isLocalHost = (host == nil
+                            || host?.isEmpty == true
+                            || host?.caseInsensitiveCompare("localhost") == .orderedSame)
+                            && u.user == nil
+                            && u.password == nil
+                            && u.port == nil
+                        if !isLocalHost || u.path.isEmpty || !u.path.hasPrefix("/") {
+                            hasNonLocalFileURL = true
+                            return urlStr
+                        }
+                        return u.path
+                    }
+                    if urlStr.lowercased().hasPrefix("file://") {
+                        let dropped = String(urlStr.dropFirst("file://".count))
+                        if dropped.hasPrefix("/") {
+                            return dropped
+                        }
+                        if dropped.lowercased().hasPrefix("localhost/") {
+                            return String(dropped.dropFirst("localhost".count))
+                        }
+                    }
+                }
+                hasNonLocalFileURL = true
+                return urlStr
             }
-            if let container = dict["bundleContainerPath"] as? String, !container.isEmpty {
+            if let container = containerPathCandidate, !container.isEmpty {
                 return container
             }
             return isDefaultApp ? "/Applications/\(bundleId).app" : "/var/containers/Bundle/Application/\(bundleId)"
         }()
-
+        let resolvedBundlePath = InstalledAppRegistryScanner.standardizedAbsolutePath(rawBundlePath)
         let lowerBundlePath = resolvedBundlePath.lowercased()
-        let isPrebootJailbreak = lowerBundlePath.contains("/preboot/")
-            && !lowerBundlePath.contains("/preboot/cryptexes/")
-            && (lowerBundlePath.contains("/jb-")
-                || lowerBundlePath.contains("/jb/")
-                || lowerBundlePath.contains("/dopamine")
-                || lowerBundlePath.contains("/procursus"))
-        let isTrollStoreOrJailbreakPath = lowerBundlePath.contains("/var/jb/")
+
+        let rawHazards = InstalledAppRegistryScanner.inspectPathHazards(rawBundlePath)
+        let urlRawHazards: InstalledAppRegistryScanner.PathHazardFlags? = {
+            guard let urlStr = rawURLString,
+                  !urlStr.isEmpty else {
+                return nil
+            }
+            if urlStr == rawBundlePath {
+                return rawHazards
+            }
+            return InstalledAppRegistryScanner.inspectPathHazards(urlStr)
+        }()
+        let containerHazards = rawContainerString.flatMap { rawContainer -> InstalledAppRegistryScanner.PathHazardFlags? in
+            let rawInspect = InstalledAppRegistryScanner.inspectPathHazards(rawContainer)
+            if rawInspect.hasAny {
+                return rawInspect
+            }
+            let trimmed = rawContainer.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != rawBundlePath else { return nil }
+            return InstalledAppRegistryScanner.inspectPathHazards(trimmed)
+        }
+        let isExplicitJailbreakMarker = rawHazards.hasJailbreakMarker
+            || (urlRawHazards?.hasJailbreakMarker == true)
+            || (containerHazards?.hasJailbreakMarker == true)
+        let isPrebootJailbreak = rawHazards.isNonCryptexPreboot
+            || (urlRawHazards?.isNonCryptexPreboot == true)
+            || (containerHazards?.isNonCryptexPreboot == true)
+        let isDeveloperMountPath = rawHazards.isDeveloperMount
+            || (urlRawHazards?.isDeveloperMount == true)
+            || (containerHazards?.isDeveloperMount == true)
+        let hasTraversalSegment = rawHazards.hasTraversal
+            || (urlRawHazards?.hasTraversal == true)
+            || (containerHazards?.hasTraversal == true)
+        let hasControlCharHazard = rawHazards.hasControlChar
+            || (urlRawHazards?.hasControlChar == true)
+            || (containerHazards?.hasControlChar == true)
+        let hasInvalidContainerPath: Bool = {
+            guard let rawContainer = rawContainerString, !rawContainer.isEmpty else { return false }
+            let trimmed = rawContainer.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed != rawContainer
+                || trimmed.isEmpty
+                || !trimmed.hasPrefix("/")
+                || InstalledAppRegistryScanner.containsASCIIControlCharacter(rawContainer)
+        }()
+        let isTrollStoreOrJailbreakPath = isExplicitJailbreakMarker
             || isPrebootJailbreak
-            || (!isDefaultApp && !isInternalApp && lowerBundlePath.hasPrefix("/applications/"))
+            || isDeveloperMountPath
+            || hasTraversalSegment
+            || hasControlCharHazard
+            || hasNonLocalFileURL
+            || hasInvalidContainerPath
+            || (!isDefaultApp && !isInternalApp
+                && (lowerBundlePath.hasPrefix("/applications/")
+                    || lowerBundlePath.hasPrefix("/private/applications/")
+                    || lowerBundlePath.hasPrefix("/var/applications/")
+                    || lowerBundlePath.hasPrefix("/private/var/applications/")))
 
         let isEnterpriseFlag = (dict["enterpriseApp"] as? Bool == true) || (dict["isEnterpriseApp"] as? Bool == true)
         let isAdHocFlag = (dict["adHoc"] as? Bool == true) || (dict["isAdHoc"] as? Bool == true)
@@ -308,7 +385,28 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             || isTrollStoreOrJailbreakPath
             || (dict["provisioningProfile"] != nil)
 
-        let appType = (isDefaultApp || isInternalApp) ? "System" : "User"
+        let appType = ((isDefaultApp || isInternalApp) && !isTrollStoreOrJailbreakPath) ? "System" : "User"
+        let resolvedRawHazards = InstalledAppRegistryScanner.inspectDirectLowerPathHazards(lowerBundlePath)
+        let rawLostDangerousMarker = (rawHazards.hasJailbreakMarker && !resolvedRawHazards.hasJailbreakMarker)
+            || (rawHazards.isNonCryptexPreboot && !resolvedRawHazards.isNonCryptexPreboot)
+            || (rawHazards.isDeveloperMount && !resolvedRawHazards.isDeveloperMount)
+            || rawHazards.hasTraversal
+            || rawHazards.hasControlChar
+            || hasNonLocalFileURL
+            || (hasInvalidContainerPath && rawBundlePath == containerPathCandidate)
+        let containerHasHazard = (containerHazards?.hasAny == true) || hasInvalidContainerPath
+        let storedBundlePath: String = {
+            if rawLostDangerousMarker {
+                return rawBundlePath
+            }
+            if urlRawHazards?.hasAny == true, let urlStr = rawURLString, !urlStr.isEmpty {
+                return urlStr
+            }
+            if containerHasHazard && !rawHazards.hasAny, let rawContainer = rawContainerString, !rawContainer.isEmpty {
+                return rawContainer
+            }
+            return resolvedBundlePath
+        }()
         let profileValidated = explicitProfileValidated ?? (builtByDeveloper || isEnterpriseFlag)
         var groupSet: Set<String> = []
         if let arr = dict["appGroupIdentifiers"] as? [Any] {
@@ -331,8 +429,9 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         var tccServices: [String] = []
         var allEntKeySet: Set<String> = []
         var teamId = dict["teamIdentifier"] as? String
+        let rawEntDict = (dict["entitlements"] as? [String: Any]) ?? (dict["Entitlements"] as? [String: Any])
 
-        if let rawEntDict = (dict["entitlements"] as? [String: Any]) ?? (dict["Entitlements"] as? [String: Any]),
+        if let rawEntDict,
            let parsedFromEnt = fromDictionary(["CFBundleIdentifier": bundleId, "Entitlements": rawEntDict]) {
             for g in parsedFromEnt.appGroups { groupSet.insert(g) }
             keychainGroups = parsedFromEnt.keychainAccessGroups
@@ -343,6 +442,21 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             if teamId == nil { teamId = parsedFromEnt.teamId }
         }
 
+        let hasRestricted2026OrPhotos = allEntKeySet.contains { key in
+            let isRestricted2026 = InstalledAppRegistryScanner.matchesRestricted2026PrivateEntitlementPrefix(key)
+            let isPhotos = key.hasPrefix(ExpandedThreatCatalog.photosEntitlementPrefix)
+                || key == ExpandedThreatCatalog.photosBourgeoisieEntitlement
+            guard isRestricted2026 || isPhotos else { return false }
+            return boolEnts[key] != false
+        }
+        let isExplicitAdHocOrLdidSigner = InstalledAppRegistryScanner.isAdHocOrLdidSigner(explicitSignerRaw)
+        let deviceCtlOwnTeamPrefixes: Set<String> = (!isAdHocFlag && !isTrollStoreOrJailbreakPath && !isExplicitAdHocOrLdidSigner)
+            ? ExpandedThreatCatalog.extractOwnTeamPrefixes(from: rawEntDict ?? [:], explicitTeamId: teamId)
+            : []
+        let hasWildcardKC = !ExpandedThreatCatalog.dangerousWildcardKeychainGroups(
+            keychainGroups,
+            allowedOwnTeamPrefixes: deviceCtlOwnTeamPrefixes
+        ).isEmpty
         let hasEscapeOrPlatformEnt = boolEnts["get-task-allow"] == true
             || boolEnts["com.apple.private.security.no-sandbox"] == true
             || boolEnts["com.apple.private.security.no-container"] == true
@@ -351,7 +465,11 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             || boolEnts["com.apple.private.security.storage.AppDataContainers"] == true
             || boolEnts["platform-application"] == true
             || !tccServices.isEmpty
-        let explicitFromAppStore = (dict["fromAppStore"] as? Bool == true) || (dict["isAppStore"] as? Bool == true)
+            || hasRestricted2026OrPhotos
+            || hasWildcardKC
+        let isTestFlightFlag = (dict["isBeta"] as? Bool == true)
+            || (dict["testFlight"] as? Bool == true)
+            || (dict["betaReportsActive"] as? Bool == true)
         let lowerBid = bundleId.lowercased()
 
         let hasAppStoreMetadata: Bool
@@ -370,9 +488,11 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             let lowerSig = explicitSigner.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             hasAppStoreMetadata = !isDefaultApp && !isInternalApp && (lowerSig == "apple iphone os application signing")
             signerIdentity = explicitSigner
+        } else if isTestFlightFlag {
+            hasAppStoreMetadata = false
+            signerIdentity = nil
         } else {
             let canInferAppStoreForComApple = !lowerBid.hasPrefix("com.apple.")
-                || explicitFromAppStore
                 || InstalledAppRegistryScanner.isCanonicalRemovableAppleStockBundleId(lowerBid)
             hasAppStoreMetadata = !isDefaultApp && !isInternalApp && canInferAppStoreForComApple
             signerIdentity = hasAppStoreMetadata ? "Apple iPhone OS Application Signing" : nil
@@ -381,12 +501,6 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
         let sortedGroups = Array(groupSet).sorted()
         if !sortedGroups.isEmpty {
             allEntKeySet.insert("com.apple.security.application-groups")
-        }
-        if (dict["isBeta"] as? Bool == true) ||
-           (dict["testFlight"] as? Bool == true) ||
-           (dict["betaReportsActive"] as? Bool == true) {
-            boolEnts["beta-reports-active"] = true
-            allEntKeySet.insert("beta-reports-active")
         }
         let bgModes = (dict["backgroundModes"] as? [Any] ?? dict["UIBackgroundModes"] as? [Any] ?? [])
             .compactMap { $0 as? String }
@@ -409,7 +523,7 @@ public struct InstalledAppRegistryRecord: Codable, Sendable, Equatable, Identifi
             stringEntitlements: strEnts,
             allEntitlementKeys: Array(allEntKeySet).sorted(),
             backgroundModes: bgModes,
-            bundlePath: resolvedBundlePath,
+            bundlePath: storedBundlePath,
             containerPath: containerPath
         )
     }
@@ -422,29 +536,36 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
     private let whitelistEngine: WhitelistEngine
 
     /// Additional major domestic / global messenger & payment apps frequently repackaged on sideload channels.
-    private static let extraSideloadImpersonationTargets: [ExpandedThreatCatalog.ImpersonatedBrand] = [
-        .init(
-            name: "WeChat (微信)",
-            bundleIdPatterns: ["com.tencent.xin", "com.tencent.wx"],
-            displayNames: ["微信", "wechat"],
-            description: "国民级社交通讯与支付应用，第三方多开/防撤回重打包版本常见聊天记录与账密窃取插件",
-            descriptionEn: "Major messaging & payment app; unofficial clone/tweak repackages frequently bundle credential or chat-history stealers"
-        ),
-        .init(
-            name: "Alipay (支付宝)",
-            bundleIdPatterns: ["com.alipay.iphoneclient"],
-            displayNames: ["支付宝", "alipay"],
-            description: "核心移动支付应用，严禁安装任何非 App Store 侧载篡改版本",
-            descriptionEn: "Critical mobile payment app; never install any non-App Store sideloaded or modified build"
-        ),
-        .init(
-            name: "WhatsApp",
-            bundleIdPatterns: ["net.whatsapp.whatsapp"],
-            displayNames: ["whatsapp"],
-            description: "端到端加密通讯软件，非官方企业签/自签包常见会话劫持木马",
-            descriptionEn: "End-to-end encrypted messenger; unofficial enterprise/sideloaded builds frequently carry session-hijacking trojans"
-        )
-    ]
+    private static var extraSideloadImpersonationTargets: [ExpandedThreatCatalog.ImpersonatedBrand] {
+        ExpandedThreatCatalog.extraSideloadImpersonationTargets
+    }
+
+    private static func matchesExtraSideloadImpersonation(bundleIds: [String], displayName: String) -> [ExpandedThreatCatalog.ImpersonatedBrand] {
+        let trimmedOrigName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerName = trimmedOrigName.lowercased()
+        let foldedLowerName = ExpandedThreatCatalog.foldConfusablesToASCII(trimmedOrigName).lowercased()
+        let nameTokens = ExpandedThreatCatalog.extractBrandTokens(from: trimmedOrigName)
+        let foldedCandBids = bundleIds.map { ExpandedThreatCatalog.foldConfusablesToASCII($0).lowercased() }
+        var matched: [ExpandedThreatCatalog.ImpersonatedBrand] = []
+        for extra in extraSideloadImpersonationTargets {
+            let matchBid = foldedCandBids.contains { lowerBid in
+                extra.bundleIdPatterns.contains { pat in
+                    lowerBid == pat || lowerBid.hasPrefix(pat + ".") || lowerBid.contains("." + pat + ".") || lowerBid.hasSuffix("." + pat)
+                }
+            }
+            let matchName = extra.displayNames.contains { pat in
+                let isASCII = pat.unicodeScalars.allSatisfy { $0.isASCII }
+                if isASCII && !pat.contains(" ") {
+                    return lowerName == pat || foldedLowerName == pat || nameTokens.contains(pat)
+                }
+                return lowerName == pat || lowerName.contains(pat) || foldedLowerName == pat || foldedLowerName.contains(pat)
+            }
+            if matchBid || matchName {
+                matched.append(extra)
+            }
+        }
+        return matched
+    }
 
     public init(whitelistEngine: WhitelistEngine = .shared) {
         self.whitelistEngine = whitelistEngine
@@ -730,7 +851,70 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         "com.apple.transporter",
         "com.apple.realitycomposer",
         "com.apple.musicmemos",
-        "com.apple.remote"
+        "com.apple.remote",
+        "com.apple.gametrampoline",
+        "com.apple.adaptivemusicapp",
+        "com.apple.icq",
+        "com.apple.posterboard",
+        "com.apple.posters.imageplaygroundposterapp",
+        "com.apple.posters.weatherposterapp",
+        "com.apple.posters.kaleidoscopeposterapp",
+        "com.apple.posters.unityposterapp",
+        "com.apple.health.sleep",
+        "com.apple.healthprivacyservice",
+        "com.apple.proximityreadersceneui",
+        "com.apple.proximityreaderuiservice",
+        "com.apple.cloudkit.sharebear",
+        "com.apple.animoji.stickersapp",
+        "com.apple.jellyfish",
+        "com.apple.mobilesms.compose",
+        "com.apple.messages.remotealerts",
+        "com.apple.imessageappsviewservice",
+        "com.apple.photos.photosuiservice",
+        "com.apple.photosviewservice",
+        "com.apple.musicuiservice",
+        "com.apple.musickit.ui",
+        "com.apple.passbooksecureuiservice",
+        "com.apple.passbookuisceneservice",
+        "com.apple.passbookuiservice",
+        "com.apple.passbookstub",
+        "com.apple.shortcutsui",
+        "com.apple.shortcutsactions",
+        "com.apple.safariviewservice",
+        "com.apple.browserkitviewservice",
+        "com.apple.businesschatviewservice",
+        "com.apple.eventviewservice",
+        "com.apple.home.homeuiservice",
+        "com.apple.home.homecontrolservice",
+        "com.apple.siri.parsec.hashtagimagesapp",
+        "com.apple.clockangel",
+        "com.apple.cameraoverlayangel",
+        "com.apple.livetranscriptionui",
+        "com.apple.accessibility.accessibilityreader",
+        "com.apple.accessibilityuiserver",
+        "com.apple.sesuiserviceapp",
+        "com.apple.subcredentialuiservice",
+        "com.apple.credentialsharinguiviewservice",
+        "com.apple.coreidv.coreidvui",
+        "com.apple.coreidv.idvsp",
+        "com.apple.npkcompanionagent",
+        "com.apple.ddactionsservice",
+        "com.apple.storekituiservice",
+        "com.apple.ios.storekituiservice",
+        "com.apple.continuitykeyboards",
+        "com.apple.continuityroutinguiservice",
+        "com.apple.ctnotifyuiservice",
+        "com.apple.setup",
+        "com.apple.purplebuddy",
+        "com.apple.diagnostics",
+        "com.apple.diagnosticsservice",
+        "com.apple.fieldtest",
+        "com.apple.remoteicloudquotaui",
+        "com.apple.askpermissionui",
+        "com.apple.familycontrolsauthenticationui",
+        "com.apple.screentimeunlock",
+        "com.apple.stickers.usergenerated.messagesextension",
+        "com.apple.usernotificationsuikit.thumbnailprovider"
     ]
 
     /// Official Apple-owned applications whose legacy bundle identifiers do not start with `com.apple.`,
@@ -802,6 +986,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     private static let knownAppleFirstPartyTeamIds: Set<String> = [
         "0000000000",
+        "APPLE",
         "59GAB85EFG",
         "243LU875E5",
         "K36BKF7T3D",
@@ -813,16 +998,53 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         "F3LWYJ7GM7",
         "87G42F7594",
         "P3L35M8B69",
-        "96VJNMX6ZP"
+        "96VJNMX6ZP",
+        "4GWDBCF5A4",
+        "4WXS7A4F54",
+        "RD13622867",
+        "RLRS9CRG76",
+        "ZL6BUSYGB3",
+        "V568VXD5P8"
     ]
 
+    private static let stagedAppleStorePrivateAllowedBundleIds: Set<String> = [
+        "com.apple.mobiletimer",
+        "com.apple.appstore",
+        "com.apple.tvremoteapp",
+        "com.apple.siri",
+        "com.apple.music",
+        "com.apple.podcasts",
+        "com.apple.ibooks",
+        "com.apple.books",
+        "com.apple.appletv",
+        "com.apple.tv"
+    ]
+
+    private static func rawPhotosPrivateEntitlementKeys(in record: InstalledAppRegistryRecord) -> [String] {
+        let candidateKeys = Set(record.allEntitlementKeys)
+            .union(record.booleanEntitlements.keys)
+            .union(record.stringEntitlements.keys)
+            .sorted()
+        return candidateKeys.filter { key in
+            guard key.hasPrefix(ExpandedThreatCatalog.photosEntitlementPrefix)
+                || key == ExpandedThreatCatalog.photosBourgeoisieEntitlement else {
+                return false
+            }
+            return record.booleanEntitlements[key] != false
+        }
+    }
+
     /// Returns `true` when an App Group identifier belongs to Apple's first-party system/stock namespaces
-    /// (including bare `com.apple.*`, Team-ID-prefixed `*.groups.com.apple.*`, and Apple-acquired stock namespaces).
+    /// (closed allowlist verified against iOS Simulator Runtime & SSV binaries, including bare `com.apple.*`,
+    /// Team-ID-prefixed `*.groups.com.apple.*`, `group.tvappservices.container`, `group.is.workflow.*`,
+    /// and verified Apple-acquired stock namespaces). Empty strings fail closed (`false`).
     internal static func isAppleOwnedAppGroup(_ rawGroup: String) -> Bool {
         let lg = rawGroup.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !lg.isEmpty else { return true }
+        guard !lg.isEmpty else { return false }
 
-        if ["group.com.apple", "systemgroup.com.apple", "apple"].contains(lg) {
+        if lg == "group.com.apple"
+            || lg == "systemgroup.com.apple"
+            || lg == "group.tvappservices.container" {
             return true
         }
 
@@ -834,9 +1056,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             "group.apple.",
             "groups.apple.",
             "systemgroup.apple.",
-            "apple.",
             "group.net.apple.",
             "group.org.apple.",
+            "group.is.workflow.",
+            "is.workflow.",
             "group.com.icloud.",
             "com.icloud.",
             "group.icloud.",
@@ -852,13 +1075,10 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             "group.com.mobileme.",
             "com.me.",
             "com.mobileme.",
-            // Apple-acquired first-party stock app group namespaces
-            "group.is.workflow.",
-            "is.workflow.",
-            "group.com.darksky.",
-            "com.darksky.",
             "group.com.shazam.",
             "com.shazam.",
+            "group.com.darksky.",
+            "com.darksky.",
             "group.com.beats.",
             "com.beats.",
             "group.com.primephonic.",
@@ -872,17 +1092,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             "group.com.filemaker.",
             "com.filemaker.",
             "group.com.claris.",
-            "com.claris.",
-            "group.maps.",
-            "group.mail.",
-            "group.home.",
-            "group.tips.",
-            "group.news.",
-            "group.tv.",
-            "group.ams.",
-            "group.sms.",
-            "group.im.",
-            "group.gm."
+            "com.claris."
         ]
         if directPrefixes.contains(where: { lg.hasPrefix($0) }) {
             return true
@@ -891,10 +1101,13 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         if let dotIdx = lg.firstIndex(of: ".") {
             let prefix = String(lg[..<dotIdx])
             let rest = String(lg[lg.index(after: dotIdx)...])
-            if knownAppleFirstPartyTeamIds.contains(prefix.uppercased()) {
-                return true
-            }
-            if ExpandedThreatCatalog.isStrictTenCharTeamId(prefix) || prefix == "0000000000" {
+            let isValidTeamPrefix = knownAppleFirstPartyTeamIds.contains(prefix.uppercased())
+                || ExpandedThreatCatalog.isStrictTenCharTeamId(prefix)
+                || prefix == "0000000000"
+            if isValidTeamPrefix {
+                if rest == "group.tvappservices.container" {
+                    return true
+                }
                 let teamApplePrefixes = [
                     "com.apple.",
                     "group.com.apple.",
@@ -903,9 +1116,44 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
                     "apple.",
                     "group.apple.",
                     "groups.apple.",
-                    "tvappservices.",
+                    "systemgroup.apple.",
+                    "group.net.apple.",
+                    "group.org.apple.",
                     "is.workflow.",
-                    "group.is.workflow."
+                    "group.is.workflow.",
+                    "group.com.icloud.",
+                    "com.icloud.",
+                    "group.icloud.",
+                    "group.tvappservices.",
+                    "tvappservices.",
+                    "group.com.siri.",
+                    "group.siri.",
+                    "com.siri.",
+                    "group.com.itunes.",
+                    "group.itunes.",
+                    "com.itunes.",
+                    "group.com.me.",
+                    "group.com.mobileme.",
+                    "com.me.",
+                    "com.mobileme.",
+                    "com.shazam.",
+                    "group.com.shazam.",
+                    "group.com.darksky.",
+                    "com.darksky.",
+                    "group.com.beats.",
+                    "com.beats.",
+                    "group.com.primephonic.",
+                    "com.primephonic.",
+                    "group.com.texture.",
+                    "com.texture.",
+                    "group.com.beddit.",
+                    "com.beddit.",
+                    "group.com.nextvr.",
+                    "com.nextvr.",
+                    "group.com.filemaker.",
+                    "com.filemaker.",
+                    "group.com.claris.",
+                    "com.claris."
                 ]
                 if teamApplePrefixes.contains(where: { rest.hasPrefix($0) }) {
                     return true
@@ -913,28 +1161,141 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             }
         }
 
-        // Structural Apple-internal non-TLD `group.<service>.*` / `systemgroup.<service>.*` namespaces
-        // (e.g. `group.tvappservices.container`, `group.healthkit.*`, `group.translation.*`), while rejecting
-        // reverse-DNS TLDs (`io`, `com`, `org`, `net`), hex identifiers (`ca628877a97ac6a2`), digits (`r10`), and hostile words.
-        if lg.hasPrefix("group.") || lg.hasPrefix("systemgroup.") {
-            let hostileMarkers = [
-                "metamask", "backdoor", "trollstore", "telegram", "whatsapp",
-                "binance", "tokenpocket", "imtoken", "bitkeep"
-            ]
-            if !hostileMarkers.contains(where: { lg.contains($0) }) {
-                let dropLen = lg.hasPrefix("group.") ? "group.".count : "systemgroup.".count
-                let afterPrefix = String(lg.dropFirst(dropLen))
-                let seg = String(afterPrefix.split(separator: ".", omittingEmptySubsequences: false).first ?? "")
-                let isLowerASCIIAlphaOnly = seg.count >= 5 && seg.utf8.allSatisfy { b in b >= 0x61 && b <= 0x7A }
-                let rejectedFirstSegments: Set<String> = [
-                    "local", "cloud", "store", "online", "world", "space", "email", "digital",
-                    "network", "agency", "center", "wallet", "crypto", "token", "finance",
-                    "global", "company", "solutions", "metamask", "telegram", "whatsapp",
-                    "wechat", "alipay", "binance", "trust", "phantom", "coinbase",
-                    "tokenpocket", "imtoken", "bitget", "bitkeep", "backdoor", "troll",
-                    "exploit", "hacker", "pwned", "trojan", "malware"
-                ]
-                if isLowerASCIIAlphaOnly && !rejectedFirstSegments.contains(seg) {
+        return false
+    }
+
+    private static let disallowedAppleRecordAppGroupMarkers: [String] = [
+        "metamask", "telegram", "telegra", "whatsapp", "wechat", "tencent.xin", "tencent.wx",
+        "alipay", "iphoneclient", "binance", "okx", "okex", "okinc", "trustwallet", "sixdays",
+        "phantom", "imtoken", "im.token", "consenlabs", "tokenpocket", "mytokenpocket",
+        "bitkeep", "bitget", "coinbase", "bybit", "ledger", "onekey", "wqguard",
+        "trollstore", "backdoor", "evil", "attacker", "malware", "trojan", "drainer",
+        "exfil", "danmaku"
+    ]
+
+    private static let internalAppleStockServiceAppGroupPrefixes: [String] = [
+        "group.gm.", "group.ams.", "group.sms.", "group.im.", "group.tv.",
+        "group.maps.", "group.mail.", "group.home.", "group.tips.", "group.news.",
+        "group.notes.", "group.reminders.", "group.health.", "group.healthkit.",
+        "group.passwords.", "group.voicememos.", "group.files.", "group.documents.",
+        "group.photos.", "group.safari.", "group.weather.", "group.stocks.",
+        "group.podcasts.", "group.books.", "group.music.", "group.fitness.",
+        "group.journal.", "group.passbook.", "group.wallet.", "group.shortcuts.",
+        "group.translate.", "group.translation.", "group.imageplayground.",
+        "group.generativeplayground.", "group.freeform.", "group.findmy.",
+        "group.facetime.", "group.contacts.", "group.calendar.", "group.clock.",
+        "group.camera.", "group.magnifier.", "group.measure.", "group.sports.",
+        "group.invites.", "group.games.", "group.preview.",
+        "group.homedevicesetup.", "group.ses.", "group.sesuiservice.",
+        "systemgroup.com.apple.", "systemgroup.apple."
+    ]
+
+    private static let rejectedStructuralAppleServiceSegments: Set<String> = [
+        "local", "cloud", "store", "online", "world", "space", "email", "digital",
+        "network", "agency", "center", "wallet", "crypto", "token", "finance",
+        "global", "company", "solutions", "custom", "customshare", "customcontainer",
+        "mycompany", "thirdparty", "example", "adversarial", "attacker", "spoof",
+        "metamask", "telegram", "whatsapp", "wechat", "alipay", "binance", "trust",
+        "phantom", "coinbase", "tokenpocket", "imtoken", "bitget", "bitkeep",
+        "backdoor", "troll", "exploit", "hacker", "pwned", "trojan", "malware"
+    ]
+
+    private static func isStructuralInternalAppleServiceGroup(_ candidate: String) -> Bool {
+        let remainder: Substring
+        if candidate.hasPrefix("group.") {
+            remainder = candidate.dropFirst(6)
+        } else if candidate.hasPrefix("systemgroup.") {
+            remainder = candidate.dropFirst(12)
+        } else {
+            return false
+        }
+        guard let dotIdx = remainder.firstIndex(of: ".") else { return false }
+        let firstSeg = remainder[..<dotIdx]
+        let afterDot = remainder[remainder.index(after: dotIdx)...]
+        guard firstSeg.count >= 5,
+              !afterDot.isEmpty,
+              !afterDot.hasPrefix("."),
+              !afterDot.hasSuffix(".") else {
+            return false
+        }
+        guard firstSeg.utf8.allSatisfy({ $0 >= 0x61 && $0 <= 0x7A }) else {
+            return false
+        }
+        return !rejectedStructuralAppleServiceSegments.contains(String(firstSeg))
+    }
+
+    private static let internalAppleStockServiceExactGroups: Set<String> = [
+        "apple", "group.gm", "group.ams", "group.sms", "group.im", "group.tv",
+        "group.notes", "group.reminders", "group.health", "group.passwords",
+        "group.voicememos", "group.files"
+    ]
+
+    /// Evaluates whether an App Group entry declared by a `com.apple.*` OS/stock record is a
+    /// legitimate Apple/internal-service container group, rejecting third-party, wallet, or
+    /// obfuscated/malformed identifiers while preventing false positives on real iOS 26/27 stock apps.
+    internal static func isPermittedAppGroupForAppleSystemRecord(_ rawGroup: String) -> Bool {
+        let trimmed = rawGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed == rawGroup else { return false }
+        let hasForbiddenScalar = trimmed.unicodeScalars.contains { scalar in
+            let v = scalar.value
+            if v == 0x3164 || v == 0xFFA0 || v == 0x2800 || v == 0x180E || v == 0x115F || v == 0x1160 {
+                return true
+            }
+            if scalar.properties.isWhitespace {
+                return true
+            }
+            let cat = scalar.properties.generalCategory
+            return cat == .control
+                || cat == .format
+                || cat == .enclosingMark
+                || cat == .spaceSeparator
+                || cat == .lineSeparator
+                || cat == .paragraphSeparator
+                || cat == .privateUse
+                || cat == .surrogate
+                || cat == .unassigned
+        }
+        guard !hasForbiddenScalar,
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.contains("..") else {
+            return false
+        }
+
+        let folded = ExpandedThreatCatalog.foldConfusablesToASCII(trimmed).lowercased()
+        guard !folded.isEmpty,
+              !disallowedAppleRecordAppGroupMarkers.contains(where: { folded.contains($0) }) else {
+            return false
+        }
+
+        if Self.isAppleOwnedAppGroup(trimmed)
+            || Self.isAppleOwnedAppGroup(folded)
+            || internalAppleStockServiceExactGroups.contains(folded) {
+            return true
+        }
+        if internalAppleStockServiceAppGroupPrefixes.contains(where: { folded.hasPrefix($0) })
+            || isStructuralInternalAppleServiceGroup(folded) {
+            return true
+        }
+
+        if let dotIdx = folded.firstIndex(of: ".") {
+            let prefix = String(folded[..<dotIdx])
+            let rest = String(folded[folded.index(after: dotIdx)...])
+            let isKnownApplePrefix = knownAppleFirstPartyTeamIds.contains(prefix.uppercased())
+            let isTeamLikePrefix = isKnownApplePrefix
+                || ExpandedThreatCatalog.isStrictTenCharTeamId(prefix)
+                || prefix == "0000000000"
+            if isTeamLikePrefix && !rest.isEmpty {
+                if isKnownApplePrefix
+                    && !rest.hasPrefix("io.")
+                    && !rest.hasPrefix("org.")
+                    && !rest.hasPrefix("net.")
+                    && !rest.hasPrefix("com.") {
+                    return true
+                }
+                if internalAppleStockServiceExactGroups.contains(rest)
+                    || internalAppleStockServiceAppGroupPrefixes.contains(where: { rest.hasPrefix($0) })
+                    || isStructuralInternalAppleServiceGroup(rest) {
                     return true
                 }
             }
@@ -952,11 +1313,17 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return false
         }
 
+        let path = Self.standardizedAbsolutePath(record.bundlePath)
+        let pathHazards = Self.inspectPathHazards(record.bundlePath)
+        let isJailbreakSubpath = pathHazards.hasAny
+        let hasLeadingSlash = record.bundlePath.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
+
         let signer = record.signerIdentity?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         let lowerBid = record.bundleId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if Self.appleOwnedNonComAppleBundleIds.contains(lowerBid) {
+            guard !isJailbreakSubpath, hasLeadingSlash else { return false }
             return signer == "apple iphone os application signing"
                 || signer == "software signing"
                 || signer == "apple code signing certification authority"
@@ -970,14 +1337,14 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             if signer == "software signing"
                 || signer == "apple iphone os application signing"
                 || signer == "apple code signing certification authority" {
-                return true
+                return hasLeadingSlash && !isJailbreakSubpath
             }
             // Any other non-empty signer (e.g. "Ad Hoc", "ldid", "Apple Development", "iPhone Distribution") is NEVER Apple OS.
             return false
         }
 
         // Reject third-party App Groups, known sideload tool names, or wallet/messenger display-name impersonation.
-        if record.appGroups.contains(where: { !Self.isAppleOwnedAppGroup($0) }) {
+        if record.appGroups.contains(where: { !Self.isPermittedAppGroupForAppleSystemRecord($0) }) {
             return false
         }
         if Self.matchKnownSideloadInfrastructure(bundleId: record.bundleId, displayName: record.displayName) != nil {
@@ -988,22 +1355,18 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             displayName: record.displayName,
             installChannel: .developerSideloaded,
             cryptid: 0
+        ).isEmpty || !Self.matchesExtraSideloadImpersonation(
+            bundleIds: [record.bundleId],
+            displayName: record.displayName
         ).isEmpty {
             return false
         }
 
-        // Real iOS SSV-sealed OS paths (`/System/`, `/Applications/`, `/private/preboot/Cryptexes/...`, etc.):
-        // `installation_proxy` omits `SignerIdentity` on stock OS daemons/apps while they legitimately hold
-        // `platform-application`, `no-container`, `no-sandbox`, `tcc.allow`, etc.
-        let path = Self.standardizedAbsolutePath(record.bundlePath)
+        // Real iOS SSV-sealed OS & Cryptex paths (`/System/`, `/Applications/`, `/private/preboot/Cryptexes/...`,
+        // `/private/preboot/<BOOT_HASH>/cryptex1/...`, etc.): `installation_proxy` omits `SignerIdentity`
+        // on stock OS daemons/apps while they legitimately hold `platform-application`, `no-container`, `no-sandbox`, `tcc.allow`, etc.
         let appType = record.applicationType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let lowerPath = path.lowercased()
-        let isJailbreakSubpath = lowerPath.contains("/var/jb/")
-            || lowerPath.contains("/jb-")
-            || lowerPath.contains("/jb/")
-            || lowerPath.contains("/dopamine")
-            || lowerPath.contains("/procursus")
-        let isSSVSystemPath = !isJailbreakSubpath && (
+        let isSSVSystemPath = !isJailbreakSubpath && hasLeadingSlash && (
             path.hasPrefix("/System/")
             || path.hasPrefix("/private/System/")
             || path.hasPrefix("/Applications/")
@@ -1016,41 +1379,192 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             || path.hasPrefix("/var/staged_system_apps/")
             || path.hasPrefix("/private/var/MobileAsset/")
             || path.hasPrefix("/var/MobileAsset/")
-            || path.hasPrefix("/Developer/Applications/")
+        )
+        let isStagedBundleContainerPath = !isJailbreakSubpath && hasLeadingSlash && (
+            path.hasPrefix("/private/var/containers/Bundle/Application/")
+            || path.hasPrefix("/var/containers/Bundle/Application/")
+            || path.hasPrefix("/private/var/mobile/Containers/Bundle/Application/")
+            || path.hasPrefix("/var/mobile/Containers/Bundle/Application/")
         )
         let isSystemAppType = (appType == "system" || appType == "internal" || appType == "hidden" || appType == "coreservices")
         let hasPlatformAppEnt = (record.booleanEntitlements["platform-application"] == true)
         let hasFullSandboxDisable = (record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true
             || record.booleanEntitlements["com.apple.private.security.container-required"] == false)
-        // Genuine Apple stock apps staged in `/private/var/containers/Bundle/Application/...` (such as
-        // `com.apple.reminders` v7.0+ on iOS 26) may legitimately declare `no-sandbox = true` paired with
-        // an explicit `group.com.apple.*` / `systemgroup.com.apple.*` App Group, while never disabling
-        // container enforcement (`container-required=false`) or claiming wildcard `*` keychain.
+
+        let rawPhotosKeys = Self.rawPhotosPrivateEntitlementKeys(in: record)
+        let raw2026Keys = rawRestricted2026EntitlementKeys(in: record)
+        let dangerousKC = ExpandedThreatCatalog.dangerousWildcardKeychainGroups(
+            record.keychainAccessGroups,
+            allowedOwnTeamPrefixes: []
+        )
+
+        // Check `application-identifier` when explicitly declared: must target Apple/first-party bundle namespace
+        // and, off SSV, match a canonical Apple stock app or the record's own bundle ID.
+        let rawAppIdEnt = record.stringEntitlements["application-identifier"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let entAppIdBidLower: String? = {
+            guard let rawAppIdEnt, !rawAppIdEnt.isEmpty else { return nil }
+            if let dotIdx = rawAppIdEnt.firstIndex(of: ".") {
+                let prefix = String(rawAppIdEnt[..<dotIdx])
+                if prefix == "0000000000"
+                    || prefix == "apple"
+                    || Self.knownAppleFirstPartyTeamIds.contains(prefix.uppercased())
+                    || ExpandedThreatCatalog.isStrictTenCharTeamId(prefix) {
+                    return String(rawAppIdEnt[rawAppIdEnt.index(after: dotIdx)...])
+                }
+            }
+            return rawAppIdEnt
+        }()
+        var hasValidComAppleAppId = false
+        var hasDotQualifiedValidComAppleAppId = false
+        if let entAppIdBidLower {
+            let isBareSingleSegmentId = !entAppIdBidLower.isEmpty
+                && !entAppIdBidLower.contains(".")
+                && !entAppIdBidLower.contains("*")
+                && entAppIdBidLower.utf8.allSatisfy { b in
+                    (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39) || b == 0x2D || b == 0x5F
+                }
+            let bareMatchesOwnAppleBundle = isBareSingleSegmentId && (
+                lowerBid == "com.apple." + entAppIdBidLower
+                || lowerBid.hasSuffix("." + entAppIdBidLower)
+            )
+            let isAppleEntBidPrefix = entAppIdBidLower.hasPrefix("com.apple.")
+                || entAppIdBidLower.hasPrefix("is.workflow.")
+                || entAppIdBidLower.hasPrefix("com.shazam.")
+                || bareMatchesOwnAppleBundle
+                || (isBareSingleSegmentId && isSSVSystemPath && isSystemAppType)
+            guard isAppleEntBidPrefix else { return false }
+            let matchesRecBid = (entAppIdBidLower == lowerBid)
+                || bareMatchesOwnAppleBundle
+                || (!isBareSingleSegmentId && (
+                    Self.canonicalRemovableAppleStockBundleIds.contains(entAppIdBidLower)
+                    || lowerBid.hasPrefix(entAppIdBidLower)
+                    || entAppIdBidLower.hasPrefix(lowerBid)
+                ))
+            if !isSSVSystemPath && !matchesRecBid {
+                return false
+            }
+            hasValidComAppleAppId = matchesRecBid || isSSVSystemPath
+            hasDotQualifiedValidComAppleAppId = !isBareSingleSegmentId && hasValidComAppleAppId
+        }
+
+        // Permit global Apple keychain wildcards (`com.apple.*`, `apple.*`, `0000000000.*`, own/known Apple Team IDs)
+        // on stock records while still catching bare `*` and third-party team wildcards (`OTHERTEAM.*`).
+        let recordTeamLower = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let hasDisallowedNoSandboxKeychainWildcard = record.keychainAccessGroups.contains { rawGrp in
+            let grp = rawGrp.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !grp.isEmpty else { return false }
+            if grp == "*" { return true }
+            guard grp.hasSuffix(".*") || grp.contains("*") else { return false }
+            guard grp.hasSuffix(".*") else { return true }
+            let foldedPrefix = ExpandedThreatCatalog.foldConfusablesToASCII(String(grp.dropLast(2))).lowercased()
+            guard !foldedPrefix.isEmpty,
+                  !foldedPrefix.contains("*"),
+                  !foldedPrefix.contains("?") else {
+                return true
+            }
+            if foldedPrefix == "com.apple"
+                || foldedPrefix.hasPrefix("com.apple.")
+                || foldedPrefix == "apple"
+                || foldedPrefix.hasPrefix("apple.")
+                || foldedPrefix == "0000000000"
+                || Self.knownAppleFirstPartyTeamIds.contains(foldedPrefix.uppercased()) {
+                return false
+            }
+            if let recordTeamLower, !recordTeamLower.isEmpty, foldedPrefix == recordTeamLower {
+                return false
+            }
+            return true
+        }
+
+        let trimmedLowerGroups = record.appGroups.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let hasValidNoSandboxStockAppGroup: Bool = {
+            guard !trimmedLowerGroups.isEmpty else { return false }
+            let stockNoSandboxPrefixes = [
+                "group.com.apple.", "systemgroup.com.apple.", "group.tvappservices.",
+                "group.is.workflow.", "group.gm.", "group.sms.", "group.im.",
+                "group.ams.", "group.icloud.", "com.apple."
+            ]
+            let hasAppleNS = trimmedLowerGroups.contains { grp in
+                stockNoSandboxPrefixes.contains(where: { grp.hasPrefix($0) }) || grp == "group.tvappservices.container"
+            }
+            guard hasAppleNS else { return false }
+            if lowerBid == "com.apple.reminders" {
+                return trimmedLowerGroups.contains("group.com.apple.reminders")
+            }
+            // Prevent spoofed non-Reminders staged stock apps (e.g. `Tips` carrying only `group.com.apple.reminders`)
+            let isOnlyRemindersGroup = trimmedLowerGroups.allSatisfy {
+                $0 == "group.com.apple.reminders" || $0.hasPrefix("group.com.apple.reminders.")
+            }
+            return !isOnlyRemindersGroup
+        }()
+
+        // Genuine staged stock app with `no-sandbox = true` (e.g. iOS 26/27 Reminders v7.0+):
+        // preserves real Apple groups/platform/Apple-keychain entitlements while still locking out
+        // `container-required=false`, `no-container`, bare `*` / foreign keychain wildcards, and missing/foreign groups.
         let isGenuineAppleNoSandboxStockApp = Self.removableAppleStockBundleIds.contains(lowerBid)
             && isSystemAppType
+            && (isSSVSystemPath || isStagedBundleContainerPath)
+            && !isJailbreakSubpath
             && record.booleanEntitlements["com.apple.private.security.container-required"] != false
-            && !record.keychainAccessGroups.contains("*")
-            && record.appGroups.contains(where: { grp in
-                let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                return lg.hasPrefix("group.com.apple.") || lg.hasPrefix("systemgroup.com.apple.")
-            })
+            && record.booleanEntitlements["com.apple.private.security.no-container"] != true
+            && !hasDisallowedNoSandboxKeychainWildcard
+            && hasValidNoSandboxStockAppGroup
 
-        // Genuine unsigned/CoreTrust-cached OS records may carry an internal Apple Team ID; reject third-party developer Team IDs.
+        // Disallowed privileges for unknown/arbitrary `com.apple.*` staged bundles (never relaxes `com.apple.evil`)
+        let hasDisallowedStagedPrivilegeForUnknownBundle =
+            record.booleanEntitlements["com.apple.private.security.no-container"] == true
+            || record.booleanEntitlements["com.apple.private.security.container-required"] == false
+            || record.booleanEntitlements["com.apple.private.security.storage.AppDataContainers"] == true
+            || (record.booleanEntitlements["com.apple.private.MobileContainerManager.allowed"] == true)
+            || !dangerousKC.isEmpty
+            || !raw2026Keys.isEmpty
+            || !rawPhotosKeys.isEmpty
+
+        let isAppleSystemUIServiceBundleId = lowerBid.hasPrefix("com.apple.") && (
+            lowerBid.hasSuffix("uiservice")
+            || lowerBid.hasSuffix("uiserviceapp")
+            || lowerBid.hasSuffix("viewservice")
+            || lowerBid.hasSuffix("viewserviceapp")
+            || lowerBid.hasSuffix("angel")
+        )
+
+        // Genuine unsigned/CoreTrust-cached OS records may carry internal Apple Team IDs (often unlisted
+        // in a static set when `installation_proxy` returns `TeamIdentifier`); reject unknown non-Apple
+        // third-party bundles and explicitly conflicting non-Apple `no-sandbox` declarations.
         if let tid = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !tid.isEmpty {
             let upperTid = tid.uppercased()
             let isKnownAppleTeam = Self.knownAppleFirstPartyTeamIds.contains(upperTid)
             if !isKnownAppleTeam {
-                let appIdMatchesComApple = record.stringEntitlements["application-identifier"]
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("\(tid.lowercased()).com.apple.") } ?? false
+                let explicitEntTeam = record.stringEntitlements["com.apple.developer.team-identifier"]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let hasUnlistedExplicitEntTeam = !explicitEntTeam.isEmpty
+                    && !Self.knownAppleFirstPartyTeamIds.contains(explicitEntTeam.uppercased())
                 let isApplePlatformTeamBound = (
                     isSSVSystemPath && isSystemAppType && (
                         hasPlatformAppEnt
-                        || appIdMatchesComApple
+                        || hasValidComAppleAppId
                         || Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid)
+                        || isAppleSystemUIServiceBundleId
                     )
                 ) || (
-                    isSystemAppType && (!hasFullSandboxDisable || isGenuineAppleNoSandboxStockApp)
-                        && Self.removableAppleStockBundleIds.contains(lowerBid)
+                    isStagedBundleContainerPath
+                        && isSystemAppType
+                        && !isJailbreakSubpath
+                        && (
+                            (
+                                Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid)
+                                && (!hasFullSandboxDisable || (isGenuineAppleNoSandboxStockApp && (!hasUnlistedExplicitEntTeam || hasDotQualifiedValidComAppleAppId)))
+                            ) || (
+                                !hasFullSandboxDisable
+                                && !hasDisallowedStagedPrivilegeForUnknownBundle
+                                && (!hasUnlistedExplicitEntTeam || hasDotQualifiedValidComAppleAppId)
+                                && (isAppleSystemUIServiceBundleId || record.hasAppStoreMetadata)
+                            )
+                        )
                 )
                 if !isApplePlatformTeamBound {
                     return false
@@ -1063,20 +1577,22 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         }
 
         // Preinstalled removable Apple stock apps staged in `/private/var/containers/Bundle/Application/<UUID>/`:
-        // Never allow full sandbox disable (`no-sandbox` / `container-required=false`) or global keychain wildcard `*`,
-        // except genuine Apple stock apps verified by `isGenuineAppleNoSandboxStockApp` above.
+        // genuine Apple stock apps may declare Apple private entitlements (`MobileGestalt`, `Photos`, `mediaexperience`,
+        // `itunesstored.private`, `MCM`, `AppDataContainers`, `com.apple.*` keychain, `no-container` on MobileSMS, etc.).
         if isSystemAppType
+            && (isSSVSystemPath || isStagedBundleContainerPath)
+            && !isJailbreakSubpath
             && !hasFullSandboxDisable
-            && !record.keychainAccessGroups.contains("*") {
+            && !hasDisallowedNoSandboxKeychainWildcard {
             if Self.removableAppleStockBundleIds.contains(lowerBid) {
                 return true
             }
-            if lowerBid == "com.apple.health"
+            if Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid)
                 && record.booleanEntitlements["com.apple.private.security.no-container"] != true {
                 return true
             }
-            if record.hasAppStoreMetadata
-                && record.booleanEntitlements["com.apple.private.security.no-container"] != true {
+            if (record.hasAppStoreMetadata || isAppleSystemUIServiceBundleId)
+                && !hasDisallowedStagedPrivilegeForUnknownBundle {
                 return true
             }
         }
@@ -1090,10 +1606,429 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             return false
         }
 
-        if appType == "system" && Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid) {
+        if appType == "system"
+            && (isSSVSystemPath || isStagedBundleContainerPath)
+            && !isJailbreakSubpath
+            && Self.canonicalRemovableAppleStockBundleIds.contains(lowerBid) {
             return true
         }
 
+        return false
+    }
+
+    struct PathHazardFlags {
+        let hasJailbreakMarker: Bool
+        let isNonCryptexPreboot: Bool
+        let isDeveloperMount: Bool
+        let hasTraversal: Bool
+        let hasControlChar: Bool
+
+        var hasAny: Bool {
+            hasJailbreakMarker || isNonCryptexPreboot || isDeveloperMount || hasTraversal || hasControlChar
+        }
+    }
+
+    static func isAdHocOrLdidSigner(_ signer: String?) -> Bool {
+        let lower = signer?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        guard !lower.isEmpty else { return false }
+        return lower == "ad hoc"
+            || lower.contains("ad hoc")
+            || lower.contains("ad-hoc")
+            || lower.contains("adhoc")
+            || lower.contains("ldid")
+            || lower.contains("trollstore")
+    }
+
+    static func containsASCIIControlCharacter(_ value: String) -> Bool {
+        value.utf8.contains { $0 <= 0x1F || $0 == 0x7F }
+    }
+
+    @inline(__always)
+    private static func hexNibble(_ byte: UInt8) -> UInt8? {
+        if byte >= 0x30 && byte <= 0x39 { return byte &- 0x30 }
+        if byte >= 0x41 && byte <= 0x46 { return byte &- 0x37 }
+        if byte >= 0x61 && byte <= 0x66 { return byte &- 0x57 }
+        return nil
+    }
+
+    private static func withUTF8Buffer<R>(_ string: String, _ body: (UnsafeBufferPointer<UInt8>) -> R) -> R {
+        if let result = string.utf8.withContiguousStorageIfAvailable(body) {
+            return result
+        }
+        let copy = Array(string.utf8)
+        return copy.withUnsafeBufferPointer(body)
+    }
+
+    private static func firstValidPercentIndex(in bytes: UnsafeBufferPointer<UInt8>) -> Int? {
+        let count = bytes.count
+        guard count >= 3 else { return nil }
+        let limit = count &- 2
+        var i = 0
+        while i < limit {
+            if bytes[i] == 0x25,
+               hexNibble(bytes[i &+ 1]) != nil,
+               hexNibble(bytes[i &+ 2]) != nil {
+                return i
+            }
+            i &+= 1
+        }
+        return nil
+    }
+
+    private static func trimOuterWhitespace(_ raw: String) -> String {
+        guard !raw.isEmpty else { return raw }
+        let utf8 = raw.utf8
+        let first = utf8[utf8.startIndex]
+        let last = utf8[utf8.index(before: utf8.endIndex)]
+        if first > 0x20 && first < 0x80 && last > 0x20 && last < 0x80 {
+            return raw
+        }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func containsDotDotPathSegment(_ value: String) -> Bool {
+        let trimmed = trimOuterWhitespace(value)
+        return withUTF8Buffer(trimmed) { bytes in
+            let count = bytes.count
+            guard count >= 2 else { return false }
+            var hasConsecutiveDots = false
+            var j = 0
+            while j < count &- 1 {
+                if bytes[j] == 0x2E && bytes[j &+ 1] == 0x2E {
+                    hasConsecutiveDots = true
+                    break
+                }
+                j &+= 1
+            }
+            guard hasConsecutiveDots else { return false }
+
+            var segStart = 0
+            var i = 0
+            while i <= count {
+                if i == count || bytes[i] == 0x2F || bytes[i] == 0x5C {
+                    if i &- segStart == 2 && bytes[segStart] == 0x2E && bytes[segStart &+ 1] == 0x2E {
+                        return true
+                    }
+                    segStart = i &+ 1
+                }
+                i &+= 1
+            }
+            return false
+        }
+    }
+
+    @inline(__always)
+    private static func lowerASCIIByte(_ b: UInt8, fold: Bool) -> UInt8 {
+        if fold && b >= 0x41 && b <= 0x5A {
+            return b &+ 0x20
+        }
+        return b
+    }
+
+    @inline(__always)
+    private static func matchesASCIIPrefix(
+        _ bytes: UnsafeBufferPointer<UInt8>,
+        at index: Int,
+        literal: StaticString,
+        foldASCII: Bool
+    ) -> Bool {
+        let len = literal.utf8CodeUnitCount
+        guard index &+ len <= bytes.count else { return false }
+        let litPtr = literal.utf8Start
+        var k = 0
+        while k < len {
+            if lowerASCIIByte(bytes[index &+ k], fold: foldASCII) != litPtr[k] {
+                return false
+            }
+            k &+= 1
+        }
+        return true
+    }
+
+    private static func hasLegitimatePrebootMount(
+        in bytes: UnsafeBufferPointer<UInt8>,
+        atPrebootSlash index: Int,
+        foldASCII: Bool
+    ) -> Bool {
+        let count = bytes.count
+        let after = index &+ 9 // right after "/preboot/"
+        let afterLen = count &- after
+        guard afterLen > 0 else { return false }
+
+        if afterLen >= 10 && matchesASCIIPrefix(bytes, at: after, literal: "cryptexes/", foldASCII: foldASCII) {
+            return true
+        }
+        if afterLen == 9 && matchesASCIIPrefix(bytes, at: after, literal: "cryptexes", foldASCII: foldASCII) {
+            return true
+        }
+        if afterLen >= 7 && matchesASCIIPrefix(bytes, at: after, literal: "active/", foldASCII: foldASCII) {
+            return true
+        }
+        if afterLen == 6 && matchesASCIIPrefix(bytes, at: after, literal: "active", foldASCII: foldASCII) {
+            return true
+        }
+
+        // Boot-manifest hash mount: `/private/preboot/<HEX_OR_UUID >= 16>/...`
+        var segEnd = after
+        while segEnd < count && bytes[segEnd] != 0x2F {
+            let b = lowerASCIIByte(bytes[segEnd], fold: foldASCII)
+            let isHexOrDash = (b >= 0x30 && b <= 0x39) || (b >= 0x61 && b <= 0x66) || b == 0x2D
+            if !isHexOrDash {
+                return false
+            }
+            segEnd &+= 1
+        }
+        return segEnd &- after >= 16 && (segEnd == count || bytes[segEnd] == 0x2F)
+    }
+
+    private static func inspectDirectUTF8Hazards(
+        in bytes: UnsafeBufferPointer<UInt8>,
+        foldASCII: Bool
+    ) -> PathHazardFlags {
+        let count = bytes.count
+        var hasJailbreak = false
+        var sawPreboot = false
+        var sawLegitimatePrebootMount = false
+        var isDeveloperMount = false
+
+        if count >= 10 && matchesASCIIPrefix(bytes, at: 0, literal: "/developer", foldASCII: foldASCII) {
+            if count == 10 || bytes[10] == 0x2F {
+                isDeveloperMount = true
+            }
+        }
+
+        var i = 0
+        while i < count {
+            if bytes[i] == 0x2F {
+                let rem = count &- i
+                if !hasJailbreak {
+                    if rem >= 3 && matchesASCIIPrefix(bytes, at: i, literal: "/jb", foldASCII: foldASCII) {
+                        if rem == 3 || bytes[i &+ 3] == 0x2F || bytes[i &+ 3] == 0x2D {
+                            hasJailbreak = true
+                        }
+                    } else if rem >= 7 && matchesASCIIPrefix(bytes, at: i, literal: "/var/jb", foldASCII: foldASCII) {
+                        if rem == 7 || bytes[i &+ 7] == 0x2F {
+                            hasJailbreak = true
+                        }
+                    } else if rem >= 9 && matchesASCIIPrefix(bytes, at: i, literal: "/dopamine", foldASCII: foldASCII) {
+                        hasJailbreak = true
+                    } else if rem >= 10 && matchesASCIIPrefix(bytes, at: i, literal: "/procursus", foldASCII: foldASCII) {
+                        hasJailbreak = true
+                    }
+                }
+                if !sawLegitimatePrebootMount && rem >= 9 && matchesASCIIPrefix(bytes, at: i, literal: "/preboot/", foldASCII: foldASCII) {
+                    sawPreboot = true
+                    if hasLegitimatePrebootMount(in: bytes, atPrebootSlash: i, foldASCII: foldASCII) {
+                        sawLegitimatePrebootMount = true
+                    }
+                }
+                if hasJailbreak && sawLegitimatePrebootMount && isDeveloperMount {
+                    break
+                }
+            }
+            i &+= 1
+        }
+
+        return PathHazardFlags(
+            hasJailbreakMarker: hasJailbreak,
+            isNonCryptexPreboot: sawPreboot && !sawLegitimatePrebootMount,
+            isDeveloperMount: isDeveloperMount,
+            hasTraversal: false,
+            hasControlChar: false
+        )
+    }
+
+    private static func inspectDirectCandidatePathHazards(_ candidate: String) -> PathHazardFlags {
+        let isAllASCII = candidate.utf8.allSatisfy { $0 < 0x80 }
+        if isAllASCII {
+            return withUTF8Buffer(candidate) { inspectDirectUTF8Hazards(in: $0, foldASCII: true) }
+        }
+        return inspectDirectLowerPathHazards(candidate.lowercased())
+    }
+
+    private static func mayDifferUnderCollapse(_ trimmed: String) -> Bool {
+        withUTF8Buffer(trimmed) { bytes in
+            let count = bytes.count
+            guard count > 0 else { return true }
+            if bytes[0] != 0x2F { return true }
+            var i = 0
+            while i < count {
+                if bytes[i] == 0x2F {
+                    if i &+ 1 < count {
+                        let next = bytes[i &+ 1]
+                        if next == 0x2F || next == 0x2E {
+                            return true
+                        }
+                    } else if count > 1 {
+                        return true
+                    }
+                }
+                i &+= 1
+            }
+            return false
+        }
+    }
+
+    private static func percentDecodeValidSequences(_ raw: String) -> String {
+        guard raw.utf8.contains(0x25) else { return raw }
+        return withUTF8Buffer(raw) { bytes in
+            guard let firstPct = firstValidPercentIndex(in: bytes) else {
+                return raw
+            }
+            let count = bytes.count
+            var out: [UInt8] = []
+            out.reserveCapacity(count)
+            if firstPct > 0 {
+                out.append(contentsOf: bytes[0..<firstPct])
+            }
+            var i = firstPct
+            while i < count {
+                if bytes[i] == 0x25, i &+ 2 < count,
+                   let hi = hexNibble(bytes[i &+ 1]),
+                   let lo = hexNibble(bytes[i &+ 2]) {
+                    out.append((hi << 4) | lo)
+                    i &+= 3
+                } else {
+                    out.append(bytes[i])
+                    i &+= 1
+                }
+            }
+            return String(decoding: out, as: UTF8.self)
+        }
+    }
+
+    /// Iteratively percent-decodes `raw` up to `maxPasses` times until reaching a fixed point.
+    /// Reports `didConverge == false` when decoding continues to mutate past `maxPasses` (fail-closed obfuscation signal).
+    static func percentDecodedPathVariants(_ raw: String, maxPasses: Int = 6) -> (variants: [String], didConverge: Bool) {
+        var variants: [String] = [raw]
+        variants.reserveCapacity(maxPasses + 1)
+        var current = raw
+        var didConverge = false
+        for _ in 0..<maxPasses {
+            let decoded = percentDecodeValidSequences(current)
+            if decoded == current {
+                didConverge = true
+                break
+            }
+            variants.append(decoded)
+            current = decoded
+        }
+        if !didConverge {
+            didConverge = !withUTF8Buffer(current) { firstValidPercentIndex(in: $0) != nil }
+        }
+        return (variants: variants, didConverge: didConverge)
+    }
+
+    static func inspectDirectLowerPathHazards(_ lowerPath: String) -> PathHazardFlags {
+        withUTF8Buffer(lowerPath) { inspectDirectUTF8Hazards(in: $0, foldASCII: false) }
+    }
+
+    static func inspectPathHazards(_ raw: String) -> PathHazardFlags {
+        var hasJailbreak = false
+        var isNonCryptexPreboot = false
+        var isDeveloperMount = false
+        let (variants, didConverge) = percentDecodedPathVariants(raw)
+        var hasTraversal = !didConverge
+        var hasControlChar = false
+
+        for variant in variants {
+            if !hasControlChar && containsASCIIControlCharacter(variant) {
+                hasControlChar = true
+            }
+            if !hasTraversal && containsDotDotPathSegment(variant) {
+                hasTraversal = true
+            }
+            if hasControlChar && hasTraversal {
+                break
+            }
+        }
+
+        // When decoding fails to converge within `maxPasses`, `hasTraversal` is already `true`;
+        // inspect only `raw` and the final decoded variant for direct path markers to avoid
+        // repeating 60 KB normalizations across intermediate passes.
+        let markerVariants: [String]
+        if didConverge || variants.count <= 2 {
+            markerVariants = variants
+        } else {
+            markerVariants = [variants[0], variants[variants.count - 1]]
+        }
+
+        var seen: Set<String> = []
+        for variant in markerVariants {
+            if hasJailbreak && isNonCryptexPreboot && isDeveloperMount {
+                break
+            }
+            let hasBackslash = variant.utf8.contains(0x5C)
+            let slashForms: [String] = hasBackslash
+                ? [variant, variant.replacingOccurrences(of: "\\", with: "/")]
+                : [variant]
+            for form in slashForms {
+                let trimmed = trimOuterWhitespace(form)
+                let needsCollapse = mayDifferUnderCollapse(trimmed)
+                let needsStandardize = (trimmed != form) || containsDotDotPathSegment(trimmed)
+
+                @inline(__always)
+                func checkCandidate(_ candidate: String) {
+                    if markerVariants.count > 1 || needsCollapse || needsStandardize || hasBackslash {
+                        guard seen.insert(candidate).inserted else { return }
+                    }
+                    let direct = inspectDirectCandidatePathHazards(candidate)
+                    if direct.hasJailbreakMarker { hasJailbreak = true }
+                    if direct.isNonCryptexPreboot { isNonCryptexPreboot = true }
+                    if direct.isDeveloperMount { isDeveloperMount = true }
+                }
+
+                checkCandidate(trimmed)
+                if needsCollapse {
+                    let collapsed = collapsedDotSlashPath(trimmed)
+                    if collapsed != trimmed {
+                        checkCandidate(collapsed)
+                    }
+                }
+                if needsStandardize {
+                    let standardized = standardizedAbsolutePath(form)
+                    if standardized != trimmed {
+                        checkCandidate(standardized)
+                    }
+                }
+            }
+        }
+        return PathHazardFlags(
+            hasJailbreakMarker: hasJailbreak,
+            isNonCryptexPreboot: isNonCryptexPreboot,
+            isDeveloperMount: isDeveloperMount,
+            hasTraversal: hasTraversal,
+            hasControlChar: hasControlChar
+        )
+    }
+
+    /// Lexically collapses empty (`//`) and current-directory (`/./`) segments WITHOUT resolving `..`,
+    /// preserving intermediate path-prefix markers (e.g., `/./Developer/../../...`, `///Developer/...`).
+    static func collapsedDotSlashPath(_ raw: String) -> String {
+        let trimmed = trimOuterWhitespace(raw)
+        guard !trimmed.isEmpty else { return "/" }
+        var comps: [Substring] = []
+        for slice in trimmed.utf8.split(separator: 0x2F, omittingEmptySubsequences: true) {
+            if slice.count == 1 && slice[slice.startIndex] == 0x2E {
+                continue
+            }
+            comps.append(trimmed[slice.startIndex..<slice.endIndex])
+        }
+        return "/" + comps.joined(separator: "/")
+    }
+
+    /// Returns `true` if `raw` (or any bounded iterative percent-decoding of `raw`) contains a `..` traversal segment,
+    /// contains NUL/ASCII control characters (`0x00...0x1F`, `0x7F`), or fails to converge within `maxPasses`.
+    static func hasDotDotSegment(_ raw: String) -> Bool {
+        let (variants, didConverge) = percentDecodedPathVariants(raw)
+        if !didConverge {
+            return true
+        }
+        for variant in variants {
+            if containsASCIIControlCharacter(variant) || containsDotDotPathSegment(variant) {
+                return true
+            }
+        }
         return false
     }
 
@@ -1101,12 +2036,19 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
     /// (unlike `NSString.standardizingPath`, whose `/private` handling depends on the host).
     static func standardizedAbsolutePath(_ raw: String) -> String {
         var stack: [Substring] = []
-        for comp in raw.split(separator: "/", omittingEmptySubsequences: true) {
-            switch comp {
-            case ".": continue
-            case "..": if !stack.isEmpty { stack.removeLast() }
-            default: stack.append(comp)
+        for slice in raw.utf8.split(separator: 0x2F, omittingEmptySubsequences: true) {
+            if slice.count == 1 && slice[slice.startIndex] == 0x2E {
+                continue
             }
+            if slice.count == 2 {
+                let first = slice[slice.startIndex]
+                let second = slice[slice.index(after: slice.startIndex)]
+                if first == 0x2E && second == 0x2E {
+                    if !stack.isEmpty { stack.removeLast() }
+                    continue
+                }
+            }
+            stack.append(raw[slice.startIndex..<slice.endIndex])
         }
         return "/" + stack.joined(separator: "/")
     }
@@ -1181,10 +2123,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     private func allowedOwnKeychainPrefixes(for record: InstalledAppRegistryRecord) -> Set<String> {
         let signerLower = record.signerIdentity?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let isAdHocOrUnsigned = signerLower == "ad hoc"
-            || signerLower.contains("ad-hoc")
-            || signerLower.contains("ldid")
-            || signerLower.contains("trollstore")
+        let isAdHocOrUnsigned = Self.isAdHocOrLdidSigner(record.signerIdentity)
         let hasProvisionedOrStoreIdentity = !isAdHocOrUnsigned && (
             record.profileValidated
             || signerLower == "apple iphone os application signing"
@@ -1205,9 +2144,12 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     private func hasAnyDangerousRegistryEntitlement(
         _ record: InstalledAppRegistryRecord,
-        assumingUnverifiedIdentity: Bool = false
+        assumingUnverifiedIdentity: Bool = false,
+        isTrustedAppleRecord: Bool? = nil
     ) -> Bool {
-        let isTrustedApple = assumingUnverifiedIdentity ? false : isAppleSystemOrFirstPartyApp(record)
+        let isTrustedApple = assumingUnverifiedIdentity
+            ? false
+            : (isTrustedAppleRecord ?? isAppleSystemOrFirstPartyApp(record))
         if record.booleanEntitlements["com.apple.private.security.no-container"] == true ||
            record.booleanEntitlements["com.apple.private.security.no-sandbox"] == true ||
            record.booleanEntitlements["com.apple.private.security.container-required"] == false ||
@@ -1237,7 +2179,14 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
     }
 
     public func classifyChannel(for record: InstalledAppRegistryRecord) -> (channel: InstallChannel, isFairPlayEncrypted: Bool) {
-        if isAppleSystemOrFirstPartyApp(record) {
+        classifyChannel(for: record, isTrustedAppleRecord: isAppleSystemOrFirstPartyApp(record))
+    }
+
+    private func classifyChannel(
+        for record: InstalledAppRegistryRecord,
+        isTrustedAppleRecord: Bool
+    ) -> (channel: InstallChannel, isFairPlayEncrypted: Bool) {
+        if isTrustedAppleRecord {
             return (.appStore, true)
         }
 
@@ -1248,33 +2197,29 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         let signerLower = record.signerIdentity?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
-        let hasDangerousPrivateEscape = hasAnyDangerousRegistryEntitlement(record)
 
         // 1. Check explicit developer / ad-hoc signers FIRST so leftover `iTunesMetadata.plist` (`ApplicationDSID > 0`)
         //    on a repackaged wallet/messenger can never spoof `.appStore`.
         if signerLower.contains("apple development") || signerLower.contains("iphone developer") {
             return (.developerSideloaded, false)
         }
-        if signerLower == "ad hoc" || signerLower.contains("ad-hoc") || signerLower.contains("ldid") || signerLower.contains("trollstore") {
+        if Self.isAdHocOrLdidSigner(record.signerIdentity) {
             return (.developerSideloaded, false)
         }
 
         // 2. TestFlight Beta builds:
         //    Official Apple TestFlight cloud-re-signed binaries carry `SignerIdentity == "TestFlight Beta Distribution"`
-        //    (or `"Apple TestFlight Beta Distribution"`, or `"Apple iPhone OS Application Signing"` with `ProfileValidated == true`),
-        //    or `beta-reports-active == true` paired with a validated Apple/iOS/iPhone Distribution signature
-        //    (never trusting arbitrary `"testflight"` substrings on third-party org names like `"iPhone Distribution: TestFlight Spoof"`,
-        //    nor ad-hoc/unsigned `beta-reports-active`).
+        //    (or `"Apple TestFlight Beta Distribution"`, or `"Apple iPhone OS Application Signing"` with `ProfileValidated == true`).
+        //    Third-party `"Apple Distribution:"` / `"iPhone Distribution:"` / `"iOS Distribution:"` signers MUST NOT classify as `.testFlight`.
+        let hasDangerousPrivateEscape = hasAnyDangerousRegistryEntitlement(
+            record,
+            isTrustedAppleRecord: false
+        )
         if !hasDangerousPrivateEscape {
             let isOfficialAppleTestFlightSigner = (signerLower == "testflight beta distribution")
                 || (signerLower == "apple testflight beta distribution")
-                || (!signerLower.contains(":") && signerLower.hasPrefix("apple ") && signerLower.contains("testflight"))
                 || (record.profileValidated && signerLower == "apple iphone os application signing")
-            let isEligibleDistributionBetaSigner = signerLower.hasPrefix("apple distribution:")
-                || signerLower.hasPrefix("iphone distribution:")
-                || signerLower.hasPrefix("ios distribution:")
-            if isOfficialAppleTestFlightSigner ||
-               (record.booleanEntitlements["beta-reports-active"] == true && record.profileValidated && isEligibleDistributionBetaSigner) {
+            if isOfficialAppleTestFlightSigner {
                 return (.testFlight, true)
             }
         }
@@ -1296,25 +2241,26 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
     /// Evaluates whether an installed app record belongs to the non-App-Store / sideloaded / anomalous inspection scope.
     public func isSideloadedOrAnomalous(_ record: InstalledAppRegistryRecord) -> Bool {
-        if isAppleSystemOrFirstPartyApp(record) {
+        isSideloadedOrAnomalous(record, isTrustedAppleRecord: isAppleSystemOrFirstPartyApp(record))
+    }
+
+    private func isSideloadedOrAnomalous(
+        _ record: InstalledAppRegistryRecord,
+        isTrustedAppleRecord: Bool
+    ) -> Bool {
+        if isTrustedAppleRecord {
             return false
         }
-        let (channel, _) = classifyChannel(for: record)
+        let (channel, _) = classifyChannel(for: record, isTrustedAppleRecord: false)
         if channel.isSideloadedOrEnterprise {
             return true
         }
         // Even if marked App Store, inspect if carrying dangerous private sandbox-escape, TCC, Photos, keychain wildcard, or 2026 bypass entitlements
-        if hasAnyDangerousRegistryEntitlement(record) {
+        if hasAnyDangerousRegistryEntitlement(record, isTrustedAppleRecord: false) {
             return true
         }
         return false
     }
-
-    private static let protectedVictimAppGroupTokens: [String] = [
-        "metamask", "trustwallet", "phantom", "imtoken", "tokenpocket", "bitkeep",
-        "bitget", "okx", "binance", "coinbase", "bybit", "ledger", "onekey",
-        "telegram", "whatsapp", "alipay", "tencent.xin", "wechat"
-    ]
 
     /// Checks whether `record` represents the currently executing WQGuard host app on iOS whose
     /// `com.apple.security.application-groups` or enterprise `application-identifier` was rewritten
@@ -1335,12 +2281,9 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             || (cleanRecBid.caseInsensitiveCompare("com.wqguard.app") == .orderedSame
                 && record.displayName.trimmingCharacters(in: .whitespacesAndNewlines) == "WQGuard")
         guard isMatchingHostBundleId, provisionalRisk == .caution else { return nil }
-        let hasDisallowedGroup = record.appGroups.contains { grp in
-            let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if lg.hasPrefix("group.com.apple.") || lg.hasPrefix("systemgroup.com.apple.") {
-                return true
-            }
-            return Self.protectedVictimAppGroupTokens.contains { lg.contains($0) }
+        let hasDisallowedGroup = record.appGroups.contains {
+            !PatternMatcher.isStrictIdentifierASCII($0)
+                || ExpandedThreatCatalog.isProtectedVictimOrAppleSystemAppGroup($0)
         }
         guard !hasDisallowedGroup else { return nil }
         guard let wqTool = whitelistEngine.tool(named: "WQGuard"), wqTool.isEnabled else { return nil }
@@ -1368,17 +2311,24 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             if isAppleSystemOrFirstPartyApp(rec) {
                 continue
             }
-            if !includeAppStoreApps && !isSideloadedOrAnomalous(rec) {
+            if !includeAppStoreApps && !isSideloadedOrAnomalous(rec, isTrustedAppleRecord: false) {
                 continue
             }
-            findings.append(evaluateRecord(rec))
+            findings.append(evaluateRecord(rec, isTrustedAppleRecord: false))
         }
         return findings
     }
 
     /// Performs full registry-level security evaluation on a single installed application record.
     public func evaluateRecord(_ record: InstalledAppRegistryRecord) -> ScanFinding {
-        let (channel, isFairPlay) = classifyChannel(for: record)
+        evaluateRecord(record, isTrustedAppleRecord: isAppleSystemOrFirstPartyApp(record))
+    }
+
+    private func evaluateRecord(
+        _ record: InstalledAppRegistryRecord,
+        isTrustedAppleRecord: Bool
+    ) -> ScanFinding {
+        let (channel, isFairPlay) = classifyChannel(for: record, isTrustedAppleRecord: isTrustedAppleRecord)
         let cryptid: UInt32 = isFairPlay ? 1 : 0
         var indicators: [ThreatIndicator] = []
         var matchedSignatures: Set<String> = []
@@ -1418,8 +2368,6 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
                 matchedSignatures.insert(rule.key)
             }
         }
-
-        let isTrustedAppleRecord = isAppleSystemOrFirstPartyApp(record)
 
         if record.booleanEntitlements["platform-application"] == true && !isTrustedAppleRecord {
             indicators.append(ThreatIndicator(
@@ -1475,7 +2423,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
             matchedSignatures.insert(p.signature)
         }
 
-        if !isAppleSystemOrFirstPartyApp(record) {
+        if !isTrustedAppleRecord {
             let audioMxdInds = ExpandedThreatCatalog.evaluateAudioMxdBypass(
                 linkedDylibs: [],
                 symbols: [],
@@ -1539,8 +2487,7 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
         let gating = EntitlementGating.evaluate(hasAppGroups: !record.appGroups.isEmpty, appGroups: record.appGroups)
         if !gating.appGroups.isEmpty && channel.isSideloadedOrEnterprise {
             let appleGroupAbuse = gating.appGroups.filter { grp in
-                let lowerG = grp.lowercased()
-                return (lowerG.hasPrefix("group.com.apple.") || lowerG.hasPrefix("systemgroup.com.apple.")) && !isTrustedAppleRecord
+                !isTrustedAppleRecord && Self.isAppleOwnedAppGroup(grp)
             }
             if !appleGroupAbuse.isEmpty {
                 let gStr = appleGroupAbuse.joined(separator: ", ")
@@ -1695,19 +2642,16 @@ public final class InstalledAppRegistryScanner: @unchecked Sendable {
 
         let isRegistryWhitelistEligible = !hasConflictingRegistryBundleId && !hasConflictingRegistryTeamId
         let signerLowerForTeam = record.signerIdentity?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let isAdHocOrUnsignedRegistrySigner = signerLowerForTeam == "ad hoc"
-            || signerLowerForTeam.contains("ad-hoc")
-            || signerLowerForTeam.contains("ldid")
-            || signerLowerForTeam.contains("trollstore")
+        let isAdHocOrUnsignedRegistrySigner = Self.isAdHocOrLdidSigner(record.signerIdentity)
         let isRegistryTeamVerified: Bool
         if let recTeam = record.teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !recTeam.isEmpty {
             isRegistryTeamVerified = !hasConflictingRegistryTeamId
                 && !isAdHocOrUnsignedRegistrySigner
                 && (record.profileValidated
-                    || record.hasAppStoreMetadata
                     || signerLowerForTeam == "apple iphone os application signing"
                     || signerLowerForTeam == "testflight beta distribution"
-                    || signerLowerForTeam == "apple testflight beta distribution")
+                    || signerLowerForTeam == "apple testflight beta distribution"
+                    || signerLowerForTeam == "software signing")
         } else {
             isRegistryTeamVerified = true
         }

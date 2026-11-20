@@ -88,14 +88,14 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
         // 2. Metadata Table
         let timestampISO = ISO8601DateFormatter().string(from: session.timestamp)
         let resolvedSysVer = session.systemVersion ?? currentSystemVersionString()
-        let durationStr = session.scanDuration.map { String(format: "%.2fs", $0) } ?? "N/A"
+        let durationStr = session.scanDuration.flatMap { ($0.isFinite && $0 >= 0) ? String(format: "%.2fs", $0) : nil } ?? "N/A"
 
         md += "| Parameter / 属性 | Value / 详细取值 |\n"
         md += "| :--- | :--- |\n"
         md += "| **Scan Timestamp / 扫描时间** | `\(timestampISO)` |\n"
         md += "| **Session ID / 审计会话 ID** | `\(session.id.uuidString)` |\n"
         md += "| **System Version / 操作系统版本** | \(escapeMarkdownCell(markdownInline(resolvedSysVer))) |\n"
-        md += "| **Engine Version / 扫描引擎版本** | WQGuardCore v\(session.engineVersion) |\n"
+        md += "| **Engine Version / 扫描引擎版本** | WQGuardCore v\(escapeMarkdownCell(markdownInline(session.engineVersion))) |\n"
         md += "| **Scan Duration / 扫描耗时** | \(durationStr) |\n"
         md += "| **Total Scanned / 扫描应用总数** | \(session.totalApps) |\n\n"
 
@@ -187,12 +187,12 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
 
         let timestampISO = ISO8601DateFormatter().string(from: session.timestamp)
         let resolvedSysVer = session.systemVersion ?? currentSystemVersionString()
-        let durationStr = session.scanDuration.map { String(format: "%.2fs", $0) } ?? "N/A"
+        let durationStr = session.scanDuration.flatMap { ($0.isFinite && $0 >= 0) ? String(format: "%.2fs", $0) : nil } ?? "N/A"
 
         text += String(format: "%-22@: %@\n", "Scan Timestamp", timestampISO)
         text += String(format: "%-22@: %@\n", "Session ID", session.id.uuidString)
         text += String(format: "%-22@: %@\n", "System Version", plain(resolvedSysVer))
-        text += String(format: "%-22@: WQGuardCore v%@\n", "Engine Version", session.engineVersion)
+        text += String(format: "%-22@: WQGuardCore v%@\n", "Engine Version", plain(session.engineVersion))
         text += String(format: "%-22@: %@\n", "Scan Duration", durationStr)
         text += "\(divider)\n"
 
@@ -530,27 +530,48 @@ public final class ReportGenerator: ReportGeneratorProtocol, Sendable {
     /// DEL, C1 control, bidi override/isolate, zero-width format/variation-selector char, interlinear annotation control,
     /// and Unicode Tag character is rendered as a visible escape (e.g. `\x1B`, `\u202E`, `\U000E0041`), so no
     /// raw control sequence (ANSI/OSC/BEL/BS) or invisible prompt/bidi smuggling reaches the user's terminal.
+    @inline(__always)
+    private static func appendHexEscape(
+        prefix: Unicode.Scalar,
+        value: UInt32,
+        digits: Int,
+        to out: inout String.UnicodeScalarView
+    ) {
+        out.append("\\")
+        out.append(prefix)
+        var shift = (digits - 1) * 4
+        while shift >= 0 {
+            let nibble = (value >> shift) & 0xF
+            let ascii = nibble < 10 ? (0x30 + nibble) : (0x41 + (nibble - 10))
+            if let scalar = Unicode.Scalar(ascii) {
+                out.append(scalar)
+            }
+            shift -= 4
+        }
+    }
+
     func plain(_ text: String) -> String {
         guard text.utf8.contains(where: Self.plainTriggerByte) else { return text }
         var out = String.UnicodeScalarView()
+        out.reserveCapacity(text.unicodeScalars.count)
         for scalar in text.unicodeScalars {
             let v = scalar.value
             switch v {
             case 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029:
                 out.append(" ")
             case 0x00..<0x20, 0x7F, 0x80...0x9F:
-                out.append(contentsOf: String(format: "\\x%02X", v).unicodeScalars)
+                Self.appendHexEscape(prefix: "x", value: v, digits: 2, to: &out)
             case 0x00AD, 0x0600...0x0605, 0x061C, 0x06DD, 0x070F, 0x0890...0x0891, 0x08E2, 0x180E, 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x206F, 0xFE00...0xFE0F, 0xFEFF, 0xFFF9...0xFFFB:
-                out.append(contentsOf: String(format: "\\u%04X", v).unicodeScalars)
+                Self.appendHexEscape(prefix: "u", value: v, digits: 4, to: &out)
             case 0xE0000...0xE007F, 0xE0100...0xE01EF:
-                out.append(contentsOf: String(format: "\\U%08X", v).unicodeScalars)
+                Self.appendHexEscape(prefix: "U", value: v, digits: 8, to: &out)
             default:
                 let cat = scalar.properties.generalCategory
                 if cat == .format || cat == .control {
                     if v <= 0xFFFF {
-                        out.append(contentsOf: String(format: "\\u%04X", v).unicodeScalars)
+                        Self.appendHexEscape(prefix: "u", value: v, digits: 4, to: &out)
                     } else {
-                        out.append(contentsOf: String(format: "\\U%08X", v).unicodeScalars)
+                        Self.appendHexEscape(prefix: "U", value: v, digits: 8, to: &out)
                     }
                 } else {
                     out.append(scalar)

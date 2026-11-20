@@ -347,11 +347,15 @@ public struct MachODylib: Sendable, Equatable {
     }
 }
 
-public struct MachOSymtab: Sendable, Equatable {
+public struct MachOSymtab: Sendable, Equatable, Hashable {
     public let symoff: UInt32
     public let nsyms: UInt32
     public let stroff: UInt32
     public let strsize: UInt32
+
+    private static let maxSymbolsPerSymtab = 250_000
+    private static let maxSymbolStringScanBytes = 512
+    private static let maxTotalSymtabStringScanBytes = 16 * 1024 * 1024
 
     public init(symoff: UInt32, nsyms: UInt32, stroff: UInt32, strsize: UInt32) {
         self.symoff = symoff
@@ -361,28 +365,74 @@ public struct MachOSymtab: Sendable, Equatable {
     }
 
     public func parseSymbols(from data: Data, is64Bit: Bool, isSwapped: Bool) -> [String] {
-        let reader = BinaryReader(data: data)
+        var budget = Self.maxTotalSymtabStringScanBytes
+        return parseSymbolsBounded(
+            from: data,
+            is64Bit: is64Bit,
+            isSwapped: isSwapped,
+            remainingStringScanBudget: &budget
+        )
+    }
+
+    internal func parseSymbolsBounded(
+        from data: Data,
+        is64Bit: Bool,
+        isSwapped: Bool,
+        remainingStringScanBudget: inout Int,
+        maxResults: Int = maxSymbolsPerSymtab
+    ) -> [String] {
+        guard nsyms > 0, strsize > 0, remainingStringScanBudget > 0, maxResults > 0 else { return [] }
         let entrySize = is64Bit ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size
         let totalSymBytes = UInt64(nsyms) * UInt64(entrySize)
         guard UInt64(symoff) + totalSymBytes <= UInt64(data.count),
-              UInt64(stroff) + UInt64(strsize) <= UInt64(data.count) else {
+              UInt64(stroff) + UInt64(strsize) <= UInt64(data.count),
+              let symoffInt = Int(exactly: symoff),
+              let stroffInt = Int(exactly: stroff),
+              let strsizeInt = Int(exactly: strsize),
+              let nsymsInt = Int(exactly: nsyms) else {
             return []
         }
 
+        let cappedSyms = min(nsymsInt, Self.maxSymbolsPerSymtab)
         var results: [String] = []
-        results.reserveCapacity(Int(min(nsyms, 8192)))
+        results.reserveCapacity(min(cappedSyms, min(maxResults, 8192)))
+        var seenStrx: Set<UInt32> = []
 
-        for i in 0..<Int(nsyms) {
-            let entryOffset = Int(symoff) + i * entrySize
-            guard let strx = reader.readUInt32(at: entryOffset, swapped: isSwapped) else { continue }
-            guard strx > 0, strx < strsize else { continue }
-            let strOffset = Int(stroff) + Int(strx)
-            let maxLen = Int(strsize) - Int(strx)
-            if let name = reader.readNullTerminatedString(at: strOffset, maxScanLength: maxLen), !name.isEmpty {
-                results.append(name)
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return []
             }
+            let totalBytes = raw.count
+            for i in 0..<cappedSyms {
+                if remainingStringScanBudget <= 0 || results.count >= maxResults { break }
+                let entryOffset = symoffInt + i * entrySize
+                guard entryOffset + entrySize <= totalBytes else { break }
+                let rawStrx = UInt32(base[entryOffset])
+                    | (UInt32(base[entryOffset + 1]) << 8)
+                    | (UInt32(base[entryOffset + 2]) << 16)
+                    | (UInt32(base[entryOffset + 3]) << 24)
+                let strx = isSwapped ? rawStrx.byteSwapped : rawStrx
+                guard strx > 0, strx < strsize,
+                      seenStrx.insert(strx).inserted,
+                      let strxInt = Int(exactly: strx) else { continue }
+                let strOffset = stroffInt + strxInt
+                guard strOffset < totalBytes else { continue }
+                let maxLen = min(strsizeInt - strxInt, min(Self.maxSymbolStringScanBytes, totalBytes - strOffset))
+                guard maxLen > 0 else { continue }
+                var strLen = 0
+                while strLen < maxLen && base[strOffset + strLen] != 0 {
+                    strLen += 1
+                }
+                remainingStringScanBudget -= min(maxLen, strLen + 1)
+                if strLen > 0 {
+                    let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: strOffset), count: strLen), as: UTF8.self)
+                    if !s.isEmpty {
+                        results.append(s)
+                    }
+                }
+            }
+            return results
         }
-        return results
     }
 }
 
@@ -442,6 +492,57 @@ public struct MachOFile: Sendable {
     public let codeSignatures: [MachOCodeSignature]
     public let dynamicImportSymbols: [String]
     public let entryPointFileOffsets: [Int]
+    private let symbolCache = SymbolCache()
+
+    private final class SymbolCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cachedOrdered: [String]?
+        private var cachedSet: Set<String>?
+
+        func resolve(
+            symtabs: [MachOSymtab],
+            sliceData: Data,
+            is64Bit: Bool,
+            isSwapped: Bool,
+            dynamicImportSymbols: [String]
+        ) -> (ordered: [String], set: Set<String>) {
+            lock.lock()
+            defer { lock.unlock() }
+            if let cachedOrdered, let cachedSet {
+                return (cachedOrdered, cachedSet)
+            }
+            let maxMergedSymbols = 250_000
+            var remainingStringScanBudget = 16 * 1024 * 1024
+            var result: [String] = []
+            var seen: Set<String> = []
+            for st in symtabs {
+                if remainingStringScanBudget <= 0 || result.count >= maxMergedSymbols { break }
+                for sym in st.parseSymbolsBounded(
+                    from: sliceData,
+                    is64Bit: is64Bit,
+                    isSwapped: isSwapped,
+                    remainingStringScanBudget: &remainingStringScanBudget,
+                    maxResults: maxMergedSymbols - result.count
+                ) {
+                    if seen.insert(sym).inserted {
+                        result.append(sym)
+                        if result.count >= maxMergedSymbols { break }
+                    }
+                }
+            }
+            if result.count < maxMergedSymbols {
+                for sym in dynamicImportSymbols {
+                    if seen.insert(sym).inserted {
+                        result.append(sym)
+                        if result.count >= maxMergedSymbols { break }
+                    }
+                }
+            }
+            self.cachedOrdered = result
+            self.cachedSet = seen
+            return (result, seen)
+        }
+    }
 
     public init(
         magic: UInt32,
@@ -527,31 +628,39 @@ public struct MachOFile: Sendable {
     }
 
     public var symbols: [String] {
-        var result: [String] = []
-        var seen: Set<String> = []
-        for st in symtabs {
-            for sym in st.parseSymbols(from: sliceData, is64Bit: is64Bit, isSwapped: isSwapped) where seen.insert(sym).inserted {
-                result.append(sym)
-            }
-        }
-        for sym in dynamicImportSymbols where seen.insert(sym).inserted {
-            result.append(sym)
-        }
-        return result
+        symbolCache.resolve(
+            symtabs: symtabs,
+            sliceData: sliceData,
+            is64Bit: is64Bit,
+            isSwapped: isSwapped,
+            dynamicImportSymbols: dynamicImportSymbols
+        ).ordered
     }
 
     public func containsSymbol(_ symbolName: String) -> Bool {
-        let allSyms = symbols
-        if allSyms.contains(symbolName) {
+        let allSet = symbolCache.resolve(
+            symtabs: symtabs,
+            sliceData: sliceData,
+            is64Bit: is64Bit,
+            isSwapped: isSwapped,
+            dynamicImportSymbols: dynamicImportSymbols
+        ).set
+        if allSet.contains(symbolName) {
             return true
         }
         let stripped = symbolName.hasPrefix("_") ? String(symbolName.dropFirst()) : symbolName
         let prefixed = "_" + stripped
-        return allSyms.contains(stripped) || allSyms.contains(prefixed)
+        return allSet.contains(stripped) || allSet.contains(prefixed)
     }
 
     public func findSymbols(matching names: [String]) -> [String] {
-        let allSet = Set(symbols)
+        let allSet = symbolCache.resolve(
+            symtabs: symtabs,
+            sliceData: sliceData,
+            is64Bit: is64Bit,
+            isSwapped: isSwapped,
+            dynamicImportSymbols: dynamicImportSymbols
+        ).set
         var matched: [String] = []
         for name in names {
             if allSet.contains(name) {
@@ -586,6 +695,14 @@ public struct MachOFile: Sendable {
         return blobs
     }
 
+    private static let fairPlay4KBEntropyTerms: [Double] = (0...4096).map { c in
+        c == 0 ? 0.0 : -(Double(c) / 4096.0) * log2(Double(c) / 4096.0)
+    }
+
+    private static let fairPlay512BEntropyTerms: [Double] = (0...512).map { c in
+        c == 0 ? 0.0 : -(Double(c) / 512.0) * log2(Double(c) / 512.0)
+    }
+
     /// Detects `LC_ENCRYPTION_INFO` (`cryptid != 0`) paired with an ad-hoc or non-App-Store code signature
     /// whose `[cryptoff, cryptoff + cryptsize)` bytes contain unencrypted plaintext rather than FairPlay AES ciphertext.
     internal var hasForgedPlaintextFairPlayRange: Bool {
@@ -595,13 +712,11 @@ public struct MachOFile: Sendable {
         }
         let blobs = allCodeSignatureData
         let sigDisqualified: Bool
-        if hasMalformedCSCmd {
+        if hasMalformedCSCmd || codeSignatures.isEmpty || blobs.isEmpty {
             sigDisqualified = true
-        } else if blobs.isEmpty {
-            sigDisqualified = CSBlobParser.shared.inspectCodeSignatureTrust(from: codeSignatureData, sliceData: sliceData).isDisqualifiedFromAppStore
         } else {
             sigDisqualified = blobs.contains {
-                CSBlobParser.shared.inspectCodeSignatureTrust(from: $0, sliceData: sliceData).isDisqualifiedFromAppStore
+                CSBlobParser.shared.inspectCodeSignatureTrust(from: $0, sliceData: sliceData) != .appleAppStoreVerified
             }
         }
         guard sigDisqualified, let er = encryptionInfo?.encryptedRange else {
@@ -615,68 +730,946 @@ public struct MachOFile: Sendable {
             return true
         }
 
+        let isArm64 = (cpuType == CPU_TYPE_ARM64 || cpuType == CPU_TYPE_ARM64_32)
+        let swapped = isSwapped
+
         return sliceData.withUnsafeBytes { raw -> Bool in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
+            var counts = [Int](repeating: 0, count: 256)
 
-            func windowEntropy(start: Int, length: Int) -> Double {
-                var counts = [Int](repeating: 0, count: 256)
-                for i in start..<(start + length) {
-                    counts[Int(base[i])] += 1
-                }
-                let invN = 1.0 / Double(length)
-                var ent = 0.0
-                for c in counts where c > 0 {
-                    let p = Double(c) * invN
-                    ent -= p * log2(p)
-                }
-                return ent
-            }
+            return counts.withUnsafeMutableBufferPointer { cBuf -> Bool in
+                guard let cPtr = cBuf.baseAddress else { return false }
+                return Self.fairPlay4KBEntropyTerms.withUnsafeBufferPointer { terms4KBuf -> Bool in
+                    return Self.fairPlay512BEntropyTerms.withUnsafeBufferPointer { terms512Buf -> Bool in
+                        guard let terms4KPtr = terms4KBuf.baseAddress,
+                              let terms512Ptr = terms512Buf.baseAddress else { return false }
 
-            if totalLen < 4096 {
-                let threshold = totalLen < 1024 ? 7.35 : 7.6
-                return windowEntropy(start: lo, length: totalLen) < threshold
-            }
+                        @inline(__always)
+                        func fairPlayEntropyThreshold(forLength len: Int) -> Double {
+                            if len < 384 { return 6.4 }
+                            if len < 512 { return 6.8 }
+                            if len < 1024 { return 7.0 }
+                            if len < 2048 { return 7.35 }
+                            return 7.6
+                        }
 
-            let winSize = 4096
-            let maxStart = hi - winSize
-            var candidateStarts: [Int] = []
-            let totalWindows = totalLen / winSize
-            let maxStrided = 256
-            let step = max(1, totalWindows / maxStrided)
-            var idx = 0
-            while idx < totalWindows && candidateStarts.count < maxStrided {
-                candidateStarts.append(lo + idx * winSize)
-                idx += step
-            }
-            if candidateStarts.last != maxStart {
-                candidateStarts.append(maxStart)
-            }
-            for ep in entryPointFileOffsets where ep >= lo && ep < hi {
-                candidateStarts.append(min(max(lo, ep & ~(winSize - 1)), maxStart))
-            }
-            for seg in segments {
-                for sect in seg.sections where sect.size > 0 {
-                    let sName = sect.sectionName
-                    if sName == "__text" || sName == "__cstring" || sName == "__objc_methname" {
-                        if let sOff = Int(exactly: sect.offset), sOff < hi {
-                            let clamped = min(max(lo, sOff), maxStart)
-                            if clamped + winSize <= hi {
-                                candidateStarts.append(clamped)
+                        @inline(__always)
+                        func windowEntropy(start: Int, length: Int) -> Double {
+                            memset(cPtr, 0, 256 * MemoryLayout<Int>.size)
+                            let end = start + length
+                            var i = start
+                            while i &+ 4 <= end {
+                                cPtr[Int(base[i])] &+= 1
+                                cPtr[Int(base[i &+ 1])] &+= 1
+                                cPtr[Int(base[i &+ 2])] &+= 1
+                                cPtr[Int(base[i &+ 3])] &+= 1
+                                i &+= 4
+                            }
+                            while i < end {
+                                cPtr[Int(base[i])] &+= 1
+                                i &+= 1
+                            }
+                            var ent = 0.0
+                            if length == 4096 {
+                                for b in 0..<256 {
+                                    let c = cPtr[b]
+                                    if c > 0 { ent += terms4KPtr[c] }
+                                }
+                            } else if length == 512 {
+                                for b in 0..<256 {
+                                    let c = cPtr[b]
+                                    if c > 0 { ent += terms512Ptr[c] }
+                                }
+                            } else {
+                                let invN = 1.0 / Double(length)
+                                for b in 0..<256 {
+                                    let c = cPtr[b]
+                                    if c > 0 {
+                                        let p = Double(c) * invN
+                                        ent -= p * log2(p)
+                                    }
+                                }
+                            }
+                            return ent
+                        }
+
+                        @inline(__always)
+                        func hasASCIIRunAt(_ pos: Int, _ end: Int, _ prefix: StaticString) -> Bool {
+                            let pLen = prefix.utf8CodeUnitCount
+                            guard pos + pLen <= end else { return false }
+                            return prefix.withUTF8Buffer { pBuf in
+                                for k in 0..<pLen where base[pos + k] != pBuf[k] {
+                                    return false
+                                }
+                                return true
+                            }
+                        }
+
+                        @inline(__always)
+                        func hasCaseInsensitiveASCIIRunAt(_ pos: Int, _ end: Int, _ lowerPrefix: StaticString) -> Bool {
+                            let pLen = lowerPrefix.utf8CodeUnitCount
+                            guard pos + pLen <= end else { return false }
+                            return lowerPrefix.withUTF8Buffer { pBuf in
+                                for k in 0..<pLen {
+                                    let b = base[pos + k]
+                                    let lower = (b >= 0x41 && b <= 0x5A) ? (b + 32) : b
+                                    if lower != pBuf[k] { return false }
+                                }
+                                return true
+                            }
+                        }
+
+                        func looksLikePlaintextPlistSpan(start: Int, length: Int) -> Bool {
+                            guard length >= 8 else { return false }
+                            let end = start + length
+                            if length >= 7, hasASCIIRunAt(start, end, "bplist0") {
+                                return true
+                            }
+                            // UTF-16LE / UTF-16BE XML check
+                            if start + 4 <= end {
+                                let b0 = base[start], b1 = base[start + 1], b2 = base[start + 2], b3 = base[start + 3]
+                                if (b0 == 0xFF && b1 == 0xFE) || (b0 == 0xFE && b1 == 0xFF)
+                                    || (b0 == 0x3C && b1 == 0x00 && (b2 == 0x3F || b2 == 0x70 || b2 == 0x21) && b3 == 0x00)
+                                    || (b0 == 0x00 && b1 == 0x3C && b2 == 0x00 && (b3 == 0x3F || b3 == 0x70 || b3 == 0x21)) {
+                                    return true
+                                }
+                            }
+                            var pos = start
+                            while pos < end {
+                                let b = base[pos]
+                                if b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D || b == 0x00
+                                    || b == 0xEF || b == 0xBB || b == 0xBF || b == 0xFE || b == 0xFF {
+                                    pos += 1
+                                    continue
+                                }
+                                break
+                            }
+                            guard pos < end else { return false }
+                            if base[pos] == 0x3C {
+                                if hasASCIIRunAt(pos, end, "<?xml")
+                                    || hasASCIIRunAt(pos, end, "<plist")
+                                    || hasCaseInsensitiveASCIIRunAt(pos, end, "<!doctype")
+                                    || hasASCIIRunAt(pos, end, "<!--") {
+                                    return true
+                                }
+                                if pos + 3 < end && base[pos + 1] == 0x00 && (base[pos + 2] == 0x3F || base[pos + 2] == 0x70 || base[pos + 2] == 0x21) && base[pos + 3] == 0x00 {
+                                    return true
+                                }
+                                if pos > start && base[pos - 1] == 0x00 && pos + 2 < end && base[pos + 1] == 0x00 && (base[pos + 2] == 0x3F || base[pos + 2] == 0x70 || base[pos + 2] == 0x21) {
+                                    return true
+                                }
+                                return false
+                            }
+                            if base[pos] == 0x7B {
+                                let sampleLen = min(end - pos, 64)
+                                guard sampleLen >= 8 else { return false }
+                                var printable = 0
+                                for i in 0..<sampleLen {
+                                    let b = base[pos + i]
+                                    if (b >= 0x20 && b <= 0x7E) || b == 0x09 || b == 0x0A || b == 0x0D {
+                                        printable += 1
+                                    }
+                                }
+                                return Double(printable) / Double(sampleLen) >= 0.85
+                            }
+                            return false
+                        }
+
+                        let exactSelBuckets = Self.sensitiveSelectorBuckets
+                        let fpExtraBuckets = Self.fairPlayExtraCStringBuckets
+                        let minSubLen = Self.minSubNeedleLen
+                        let headerSize = is64Bit ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+                        let commandsEnd = min(sliceData.count, headerSize + Int(sizeofcmds))
+
+                        return Self.exactSelectorPairLenMaskTable.withUnsafeBufferPointer { exactPairBuf in
+                            Self.fairPlayExtraPairLenMaskTable.withUnsafeBufferPointer { fpExtraPairBuf in
+                                Self.substringAutomatonDFATable.withUnsafeBufferPointer { dfaBuf in
+                                    guard let exactPairPtr = exactPairBuf.baseAddress,
+                                          let fpExtraPairPtr = fpExtraPairBuf.baseAddress,
+                                          let dfaPtr = dfaBuf.baseAddress else { return false }
+
+                                    @inline(__always)
+                                    func matchesSensitiveOrDangerousCString(strStart: Int, len: Int) -> Bool {
+                                        guard len >= 5 && len <= 512 else { return false }
+                                        let b0 = Int(base[strStart])
+                                        let b1 = Int(base[strStart &+ 1])
+                                        let firstPair = (b0 << 8) | b1
+                                        let lenBit = len < 63 ? (UInt64(1) << len) : (UInt64(1) << 62)
+
+                                        if (exactPairPtr[firstPair] & lenBit) != 0 {
+                                            for needle in exactSelBuckets[b0] where needle.count == len && needle[1] == UInt8(b1) {
+                                                var idx = 2
+                                                while idx < len && base[strStart &+ idx] == needle[idx] {
+                                                    idx &+= 1
+                                                }
+                                                if idx == len { return true }
+                                            }
+                                        }
+                                        if (fpExtraPairPtr[firstPair] & lenBit) != 0 {
+                                            for needle in fpExtraBuckets[b0] where needle.count == len && needle[1] == UInt8(b1) {
+                                                var idx = 2
+                                                while idx < len && base[strStart &+ idx] == needle[idx] {
+                                                    idx &+= 1
+                                                }
+                                                if idx == len { return true }
+                                            }
+                                        }
+                                        if len >= minSubLen {
+                                            var state = 0
+                                            var p = strStart
+                                            let pEnd = strStart &+ len
+                                            while p < pEnd {
+                                                let nx = Int(dfaPtr[(state << 8) | Int(base[p])])
+                                                if (nx & 0x8000) != 0 {
+                                                    return true
+                                                }
+                                                state = nx
+                                                p &+= 1
+                                            }
+                                        }
+                                        return false
+                                    }
+
+                                    func hasPlaintextCStringSpan(start: Int, length: Int) -> Bool {
+                                        let end = start + length
+                                        var printableOrNul = 0
+                                        var printableCount = 0
+                                        var consecutiveASCII = 0
+                                        var startedAtNulOrStart = true
+                                        let minRunSingle = length <= 1_048_576 ? 14 : 16
+                                        var i = start
+                                        while i < end {
+                                            let b = base[i]
+                                            if b >= 0x20 && b <= 0x7E {
+                                                if length < 256 {
+                                                    printableOrNul &+= 1
+                                                    printableCount &+= 1
+                                                }
+                                                consecutiveASCII &+= 1
+                                            } else if b == 0x00 {
+                                                if length < 256 {
+                                                    printableOrNul &+= 1
+                                                }
+                                                if consecutiveASCII >= minRunSingle
+                                                    || (startedAtNulOrStart && consecutiveASCII >= 14)
+                                                    || (length <= 1_048_576 && startedAtNulOrStart && consecutiveASCII >= 12) {
+                                                    return true
+                                                }
+                                                if (startedAtNulOrStart && consecutiveASCII >= 5) || (!startedAtNulOrStart && consecutiveASCII >= 8) {
+                                                    if matchesSensitiveOrDangerousCString(strStart: i &- consecutiveASCII, len: consecutiveASCII) {
+                                                        return true
+                                                    }
+                                                }
+                                                consecutiveASCII = 0
+                                                startedAtNulOrStart = true
+                                            } else {
+                                                consecutiveASCII = 0
+                                                startedAtNulOrStart = false
+                                            }
+                                            i &+= 1
+                                        }
+                                        if (startedAtNulOrStart && consecutiveASCII >= 6) || (!startedAtNulOrStart && consecutiveASCII >= 8) {
+                                            if matchesSensitiveOrDangerousCString(strStart: end &- consecutiveASCII, len: consecutiveASCII) {
+                                                return true
+                                            }
+                                        }
+                                        if length < 256 && length >= 4 && printableCount >= 2 {
+                                            if Double(printableOrNul) / Double(length) >= 0.85 {
+                                                return true
+                                            }
+                                        }
+                                        if length >= 256 {
+                                            let entLen = min(length, 4096)
+                                            if windowEntropy(start: start, length: entLen) < fairPlayEntropyThreshold(forLength: entLen) {
+                                                return true
+                                            }
+                                            var off = 0
+                                            while off + 256 <= length {
+                                                if windowEntropy(start: start + off, length: 256) < 6.3 {
+                                                    return true
+                                                }
+                                                off += 256
+                                            }
+                                        }
+                                        return false
+                                    }
+
+                                    @inline(__always)
+                                    func arm64SyscallContextScore(_ w: UInt32) -> Int {
+                                        if w == 0xD65F_03C0 || w == 0xD65F_0FFF || w == 0xD65F_0BFF
+                                            || w == 0xD503_237F || w == 0xD503_233F || w == 0xD503_201F
+                                            || (w & 0xFFFF_FF3F) == 0xD503_241F {
+                                            return 20
+                                        }
+                                        let brMask = w & 0xFFFF_FC1F
+                                        if brMask == 0xD65F_0000 || brMask == 0xD61F_0000 || brMask == 0xD63F_0000 {
+                                            return 20
+                                        }
+                                        let fpLrMask = w & 0xFFC0_7FFF
+                                        if fpLrMask == 0xA980_7BFD || fpLrMask == 0xA900_7BFD
+                                            || fpLrMask == 0xA8C0_7BFD || fpLrMask == 0xA940_7BFD {
+                                            return 20
+                                        }
+                                        let spMask = w & 0xFF80_03FF
+                                        if spMask == 0xD100_03FF || spMask == 0x9100_03FF || spMask == 0x9100_03FD {
+                                            return 20
+                                        }
+                                        let movRegMask = w & 0xFFE0_FFE0
+                                        if (movRegMask == 0xAA00_03E0 || movRegMask == 0x2A00_03E0) && (w & 0x1F) != 31 {
+                                            return 20
+                                        }
+                                        if (w & 0xFFE0_001F) == 0xD280_0010 || (w & 0xFFE0_001F) == 0x5280_0010
+                                            || (w & 0xFFE0_001F) == 0x9280_0010 || (w & 0xFFE0_001F) == 0x1280_0010 {
+                                            return 16 // movz/movn x16/w16, #imm16 (hw == 0)
+                                        }
+                                        let mov16Mask = w & 0xFF80_001F
+                                        if mov16Mask == 0xD280_0010 || mov16Mask == 0x5280_0010
+                                            || mov16Mask == 0x9280_0010 || mov16Mask == 0x1280_0010
+                                            || mov16Mask == 0xF280_0010 || mov16Mask == 0x7280_0010 {
+                                            return 8
+                                        }
+                                        let mov8Mask = w & 0xFFE0_001F
+                                        if mov8Mask == 0xD280_0008 || mov8Mask == 0x5280_0008 {
+                                            return 14
+                                        }
+                                        if (w & 0xFF00_0010) == 0x5400_0000 && (w & 0x0F) != 0x0F {
+                                            let imm19 = (Int32(bitPattern: (w >> 5) & 0x7_FFFF) << 13) >> 13
+                                            if abs(imm19) < 0x4000 { return 9 }
+                                            if abs(imm19) < 0x10000 { return 5 }
+                                            return 0 // b.cond
+                                        }
+                                        if (w & 0x3B80_0000) == 0x3900_0000 || (w & 0xFFC0_0000) == 0xB980_0000 {
+                                            let imm12 = (w >> 10) & 0xFFF
+                                            if imm12 < 0x100 { return 7 }
+                                            if imm12 < 0x400 { return 4 }
+                                            return 0 // ldr/str/ldrsw unsigned immediate
+                                        }
+                                        if (w & 0x3B20_0400) == 0x3800_0400 && (w & 0x00C0_0000) != 0x00C0_0000 {
+                                            let imm9 = (Int32(bitPattern: (w >> 12) & 0x1FF) << 23) >> 23
+                                            return abs(imm9) <= 64 ? 8 : 4 // ldr/str pre/post-index
+                                        }
+                                        if (w & 0x3B20_0C00) == 0x3820_0800 && (w & 0x00C0_0000) != 0x00C0_0000 {
+                                            let opt = (w >> 13) & 0x7
+                                            if opt == 2 || opt == 3 || opt == 6 || opt == 7 {
+                                                return 8 // ldr/str register-offset
+                                            }
+                                            return 0
+                                        }
+                                        if (w & 0x3F00_0000) == 0x1800_0000 && (w & 0xC000_0000) != 0xC000_0000 {
+                                            let imm19 = (Int32(bitPattern: (w >> 5) & 0x7_FFFF) << 13) >> 13
+                                            return abs(imm19) < 0x4000 ? 6 : 0 // ldr literal
+                                        }
+                                        if (w & 0x3E00_0000) == 0x2800_0000 && (w & 0x0180_0000) != 0 && (w & 0xC000_0000) != 0xC000_0000 {
+                                            let isLoad = (w & 0x0040_0000) != 0
+                                            let rt = w & 0x1F
+                                            let rt2 = (w >> 10) & 0x1F
+                                            if isLoad && (rt == rt2 || rt == 31 || rt2 == 31) {
+                                                return 0
+                                            }
+                                            let imm7 = (Int32(bitPattern: (w >> 15) & 0x7F) << 25) >> 25
+                                            return abs(imm7) <= 32 ? 6 : 3 // ldp/stp
+                                        }
+                                        if (w & 0x7E00_0000) == 0x3400_0000 {
+                                            let imm19 = (Int32(bitPattern: (w >> 5) & 0x7_FFFF) << 13) >> 13
+                                            if abs(imm19) < 0x4000 { return 6 }
+                                            if abs(imm19) < 0x10000 { return 3 }
+                                            return 0 // cbz/cbnz
+                                        }
+                                        if (w & 0x7E00_0000) == 0x3600_0000 {
+                                            let imm14 = (Int32(bitPattern: (w >> 5) & 0x3FFF) << 18) >> 18
+                                            return abs(imm14) < 0x1000 ? 6 : 0 // tbz/tbnz
+                                        }
+                                        if (w & 0x1F80_0000) == 0x1280_0000
+                                            && (w & 0x6000_0000) != 0x2000_0000
+                                            && ((w & 0x8000_0000) != 0 || (w & 0x0040_0000) == 0)
+                                            && (w & 0x1F) != 31 {
+                                            let hw = (w >> 21) & 0x3
+                                            return hw == 0 ? 6 : 3 // movz/movn/movk
+                                        }
+                                        if (w & 0x1F80_0000) == 0x1100_0000 {
+                                            let sh = (w >> 22) & 1
+                                            let imm12 = (w >> 10) & 0xFFF
+                                            if sh == 0 && imm12 < 0x400 { return 6 }
+                                            if sh == 0 { return 4 }
+                                            return 2 // add/sub/cmp immediate
+                                        }
+                                        if (w & 0x7C00_0000) == 0x1400_0000 {
+                                            let imm26 = (Int32(bitPattern: w & 0x03FF_FFFF) << 6) >> 6
+                                            if abs(imm26) < 0x4_0000 { return 6 }
+                                            if abs(imm26) < 0x20_0000 { return 3 }
+                                            return 0 // b/bl
+                                        }
+                                        if (w & 0x1F00_0000) == 0x1000_0000 {
+                                            let rawImm = (((w >> 5) & 0x7_FFFF) << 2) | ((w >> 29) & 0x3)
+                                            let imm21 = (Int32(bitPattern: rawImm) << 11) >> 11
+                                            if (w & 0x8000_0000) != 0 {
+                                                return abs(imm21) < 0x4000 ? 5 : 0 // adrp
+                                            } else {
+                                                return abs(imm21) < 0x10000 ? 5 : 0 // adr
+                                            }
+                                        }
+                                        // add/sub/cmp shifted register
+                                        if (w & 0x1F20_0000) == 0x0B00_0000 && (w & 0x00C0_0000) != 0x00C0_0000 {
+                                            let sf = (w >> 31) & 1
+                                            let shift = (w >> 22) & 0x3
+                                            let imm6 = (w >> 10) & 0x3F
+                                            if sf == 1 || imm6 < 32 {
+                                                if shift == 0 && imm6 == 0 { return 5 }
+                                                if imm6 < 32 { return 3 }
+                                            }
+                                            return 0
+                                        }
+                                        // add/sub/cmp extended register
+                                        if (w & 0x1FE0_0000) == 0x0B20_0000 && (w & 0x0000_1C00) <= 0x0000_1000 {
+                                            return 4
+                                        }
+                                        // and/orr/eor/tst shifted register
+                                        if (w & 0x1F00_0000) == 0x0A00_0000 {
+                                            let sf = (w >> 31) & 1
+                                            let shift = (w >> 22) & 0x3
+                                            let imm6 = (w >> 10) & 0x3F
+                                            if sf == 1 || imm6 < 32 {
+                                                if shift == 0 && imm6 == 0 { return 5 }
+                                                if imm6 < 32 { return 3 }
+                                            }
+                                            return 0
+                                        }
+                                        // and/orr/eor/tst bitmask immediate
+                                        if (w & 0x1F80_0000) == 0x1200_0000 && ((w & 0x8000_0000) != 0 || (w & 0x0040_0000) == 0) {
+                                            return 3
+                                        }
+                                        // sbfm/bfm/ubfm bitfield
+                                        if (w & 0x1F80_0000) == 0x1300_0000
+                                            && (w & 0x6000_0000) != 0x6000_0000
+                                            && (((w >> 31) & 1) == ((w >> 22) & 1)) {
+                                            return 4
+                                        }
+                                        // csel/csinc/csinv/csneg
+                                        if (w & 0x3FE0_0800) == 0x1A80_0000 {
+                                            return 5
+                                        }
+                                        // mul/madd/msub/smaddl/umaddl/smulh/umulh
+                                        if (w & 0x7FE0_0000) == 0x1B00_0000
+                                            || (w & 0xFF60_0000) == 0x9B20_0000
+                                            || (w & 0xFF7F_FC00) == 0x9B40_7C00 {
+                                            return 5
+                                        }
+                                        return 0
+                                    }
+
+                                    func hasPlaintextCodeSpan(start: Int, length: Int) -> Bool {
+                                        if length < 256 {
+                                            if isArm64 && length >= 4 {
+                                                let endLimit = start + length - 3
+                                                var p = start
+                                                while p < endLimit {
+                                                    let rawWord = UnsafeRawPointer(base.advanced(by: p)).loadUnaligned(as: UInt32.self)
+                                                    let insn = swapped ? rawWord.byteSwapped : rawWord
+                                                    if insn == 0xD400_1001 || insn == 0xD65F_03C0 || insn == 0xD503_201F || insn == 0xD503_237F {
+                                                        return true
+                                                    }
+                                                    p &+= 1
+                                                }
+                                            }
+                                            if length >= 64 && windowEntropy(start: start, length: length) < 4.5 {
+                                                return true
+                                            }
+                                            if length >= 32 {
+                                                var zeroCount = 0
+                                                for i in start..<(start + length) where base[i] == 0 {
+                                                    zeroCount += 1
+                                                }
+                                                if Double(zeroCount) / Double(length) >= 0.25 {
+                                                    return true
+                                                }
+                                            }
+                                            return false
+                                        }
+                                        if isArm64 {
+                                            let end = start + length
+                                            var svcOffsets: [Int] = []
+                                            svcOffsets.reserveCapacity(4)
+                                            let targetB0: UInt8 = swapped ? 0xD4 : 0x01
+                                            let targetB1: UInt8 = swapped ? 0x00 : 0x10
+                                            let targetB2: UInt8 = swapped ? 0x10 : 0x00
+                                            let targetB3: UInt8 = swapped ? 0x01 : 0xD4
+                                            let searchLimit = end - 3
+                                            var p = start
+                                            while p < searchLimit {
+                                                guard let hitRaw = memchr(base.advanced(by: p), Int32(targetB0), searchLimit - p) else {
+                                                    break
+                                                }
+                                                let hit = base.distance(to: hitRaw.assumingMemoryBound(to: UInt8.self))
+                                                if base[hit &+ 1] == targetB1 && base[hit &+ 2] == targetB2 && base[hit &+ 3] == targetB3 {
+                                                    svcOffsets.append(hit)
+                                                    if svcOffsets.count >= 4 {
+                                                        return true
+                                                    }
+                                                }
+                                                p = hit &+ 1
+                                            }
+                                            var uniqueContextScores: [Int: Int] = [:]
+                                            var qualifiedClusterRuns = 0
+                                            for svcOff in svcOffsets {
+                                                var runScore = 0
+                                                var validInsnCount = 0
+                                                var hasAdrpLdrPair = false
+                                                var backWords: [UInt32] = []
+                                                let minBackOff = max(start, svcOff - 32)
+                                                var backGaps = 0
+                                                var pendingBackGapPenalty = 0
+                                                var preBackGapScore: Int? = nil
+                                                var q = svcOff - 4
+                                                while q >= minBackOff {
+                                                    let rw = UnsafeRawPointer(base.advanced(by: q)).loadUnaligned(as: UInt32.self)
+                                                    let w = swapped ? rw.byteSwapped : rw
+                                                    if w == 0xD400_1001 {
+                                                        q -= 4
+                                                        continue
+                                                    }
+                                                    let sc = arm64SyscallContextScore(w)
+                                                    if sc == 0 {
+                                                        backGaps += 1
+                                                        if backGaps > 1 { break }
+                                                        if preBackGapScore == nil { preBackGapScore = runScore }
+                                                        pendingBackGapPenalty += 4
+                                                        q -= 4
+                                                        continue
+                                                    }
+                                                    if pendingBackGapPenalty > 0 {
+                                                        runScore -= pendingBackGapPenalty
+                                                        pendingBackGapPenalty = 0
+                                                    }
+                                                    backWords.append(w)
+                                                    validInsnCount += 1
+                                                    let effective = (q == svcOff - 4 && sc >= 14) ? 20 : sc
+                                                    runScore += effective
+                                                    uniqueContextScores[q] = max(uniqueContextScores[q] ?? 0, effective)
+                                                    q -= 4
+                                                }
+                                                if let preBackGapScore {
+                                                    runScore = max(preBackGapScore, runScore)
+                                                }
+                                                let orderedBack = backWords.reversed()
+                                                var prevAdrpRd: UInt32? = nil
+                                                for w in orderedBack {
+                                                    if (w & 0x9F00_0000) == 0x9000_0000 {
+                                                        let rawImm = (((w >> 5) & 0x7_FFFF) << 2) | ((w >> 29) & 0x3)
+                                                        let imm21 = (Int32(bitPattern: rawImm) << 11) >> 11
+                                                        if abs(imm21) < 0x4000 {
+                                                            prevAdrpRd = w & 0x1F
+                                                            continue
+                                                        }
+                                                    }
+                                                    if let rd = prevAdrpRd,
+                                                       (w & 0x3B80_0000) == 0x3900_0000,
+                                                       ((w >> 5) & 0x1F) == rd,
+                                                       ((w >> 10) & 0xFFF) < 0x100 {
+                                                        hasAdrpLdrPair = true
+                                                    }
+                                                    prevAdrpRd = nil
+                                                }
+                                                let maxFwdOff = min(searchLimit - 1, svcOff + 32)
+                                                var fwdGaps = 0
+                                                var pendingFwdGapPenalty = 0
+                                                var preFwdGapScore: Int? = nil
+                                                q = svcOff + 4
+                                                while q <= maxFwdOff {
+                                                    let rw = UnsafeRawPointer(base.advanced(by: q)).loadUnaligned(as: UInt32.self)
+                                                    let w = swapped ? rw.byteSwapped : rw
+                                                    if w == 0xD400_1001 {
+                                                        q += 4
+                                                        continue
+                                                    }
+                                                    let sc = arm64SyscallContextScore(w)
+                                                    if sc == 0 {
+                                                        fwdGaps += 1
+                                                        if fwdGaps > 1 { break }
+                                                        if preFwdGapScore == nil { preFwdGapScore = runScore }
+                                                        pendingFwdGapPenalty += 4
+                                                        q += 4
+                                                        continue
+                                                    }
+                                                    if pendingFwdGapPenalty > 0 {
+                                                        runScore -= pendingFwdGapPenalty
+                                                        pendingFwdGapPenalty = 0
+                                                    }
+                                                    validInsnCount += 1
+                                                    runScore += sc
+                                                    uniqueContextScores[q] = max(uniqueContextScores[q] ?? 0, sc)
+                                                    q += 4
+                                                }
+                                                if let preFwdGapScore {
+                                                    runScore = max(preFwdGapScore, runScore)
+                                                }
+                                                if (validInsnCount >= 3 && runScore >= 17)
+                                                    || (validInsnCount >= 2 && runScore >= 24)
+                                                    || (hasAdrpLdrPair && validInsnCount >= 2 && runScore >= 12) {
+                                                    return true
+                                                }
+                                                if validInsnCount >= 2 && runScore >= 12 {
+                                                    qualifiedClusterRuns += 1
+                                                }
+                                                if length >= 64 {
+                                                    let entStart = min(max(start, svcOff - 32), end - 64)
+                                                    if windowEntropy(start: entStart, length: 64) < 4.8 {
+                                                        return true
+                                                    }
+                                                }
+                                            }
+                                            if svcOffsets.count >= 2 && qualifiedClusterRuns >= 2 && uniqueContextScores.count >= 3 {
+                                                let totalUniqueScore = uniqueContextScores.values.reduce(0, +)
+                                                if totalUniqueScore >= 24 {
+                                                    return true
+                                                }
+                                            }
+                                            for ep in entryPointFileOffsets where ep >= start && ep + 64 <= end {
+                                                if windowEntropy(start: ep, length: 64) < 4.8 {
+                                                    return true
+                                                }
+                                                let epEnd = min(end - 3, ep + 61)
+                                                var q = ep
+                                                while q < epEnd {
+                                                    let rw = UnsafeRawPointer(base.advanced(by: q)).loadUnaligned(as: UInt32.self)
+                                                    let w = swapped ? rw.byteSwapped : rw
+                                                    if w == 0xD400_1001 || w == 0xD65F_03C0 || w == 0xD65F_0FFF {
+                                                        return true
+                                                    }
+                                                    q &+= 4
+                                                }
+                                            }
+                                        }
+                                        let entLen = min(length, 4096)
+                                        if windowEntropy(start: start, length: entLen) < fairPlayEntropyThreshold(forLength: entLen) {
+                                            return true
+                                        }
+                                        let subLimit = min(length, 1_048_576)
+                                        var off = 0
+                                        while off + 256 <= subLimit {
+                                            if windowEntropy(start: start + off, length: 256) < 6.3 {
+                                                return true
+                                            }
+                                            off += 256
+                                        }
+                                        return false
+                                    }
+
+                                    // Step A: Inspect each covered critical section's bounded byte span [sLo, sHi)
+                                    // AND uncovered executable segment gaps [gapStart, gapEnd) intersecting [lo, hi)
+                                    for seg in segments {
+                                        for sect in seg.sections where sect.size > 0 {
+                                            guard let sOff = Int(exactly: sect.offset),
+                                                  let sSize = Int(exactly: sect.size),
+                                                  sOff >= 0, sSize > 0, sOff < sliceData.count else {
+                                                continue
+                                            }
+                                            let sEnd = min(sliceData.count, sOff + min(sSize, sliceData.count - sOff))
+                                            let sLo = max(lo, sOff)
+                                            let sHi = min(hi, sEnd)
+                                            let sLen = sHi - sLo
+                                            guard sLen > 0 else { continue }
+
+                                            let sName = sect.sectionName
+                                            let containsEntryPoint = entryPointFileOffsets.contains { $0 >= sOff && $0 < sEnd }
+                                            if sName == "__info_plist" {
+                                                if looksLikePlaintextPlistSpan(start: sLo, length: sLen) {
+                                                    return true
+                                                }
+                                                if sLen >= 256 {
+                                                    let entLen = min(sLen, 4096)
+                                                    if windowEntropy(start: sLo, length: entLen) < fairPlayEntropyThreshold(forLength: entLen) {
+                                                        return true
+                                                    }
+                                                }
+                                            } else if sName == "__objc_methname" || sName == "__cstring" || sName == "__objc_classname" || sName == "__objc_methtype" {
+                                                if hasPlaintextCStringSpan(start: sLo, length: sLen) {
+                                                    return true
+                                                }
+                                            } else if containsEntryPoint || Self.shouldScanSectionForDirectSyscalls(sect, in: seg, sliceSize: sliceData.count) {
+                                                if hasPlaintextCodeSpan(start: sLo, length: sLen) {
+                                                    return true
+                                                }
+                                            }
+                                        }
+
+                                        let segStartCandidate = seg.fileOffset < UInt64(sliceData.count) ? Int(seg.fileOffset) : sliceData.count
+                                        let (rawSegEnd, segOv) = seg.fileOffset.addingReportingOverflow(seg.fileSize)
+                                        let clampedEnd64 = segOv ? UInt64(sliceData.count) : min(rawSegEnd, UInt64(sliceData.count))
+                                        let segEndCandidate = Int(clampedEnd64)
+                                        let hasEntryPointInSegment = segEndCandidate > segStartCandidate && entryPointFileOffsets.contains {
+                                            $0 >= segStartCandidate && $0 < segEndCandidate
+                                        }
+                                        let isExecutableOrEntrySegment = ((seg.initialProtection & 0x04) != 0)
+                                            || (((seg.maxProtection & 0x04) != 0) && hasEntryPointInSegment)
+
+                                        if isExecutableOrEntrySegment && seg.fileSize > 0 && seg.fileOffset < UInt64(sliceData.count) {
+                                            let segStart = segStartCandidate
+                                            let segEnd = segEndCandidate
+                                            guard segEnd - segStart >= 4, segEnd > lo, segStart < hi else { continue }
+
+                                            var covered: [(Int, Int)] = []
+                                            if segStart < commandsEnd {
+                                                covered.append((segStart, min(segEnd, commandsEnd)))
+                                            }
+                                            for sect in seg.sections {
+                                                let rawType = sect.flags & UInt32(SECTION_TYPE)
+                                                let isZF = (rawType == UInt32(S_ZEROFILL) || rawType == UInt32(S_GB_ZEROFILL))
+                                                if isZF && !Self.isZerofillInsideSegmentFilesize(sect, in: seg, sliceSize: sliceData.count) {
+                                                    continue
+                                                }
+                                                guard sect.size > 0, UInt64(sect.offset) < UInt64(segEnd) else { continue }
+                                                let (rawCEnd, cOv) = UInt64(sect.offset).addingReportingOverflow(sect.size)
+                                                let isMetadataSection = !Self.shouldScanSectionForDirectSyscalls(sect, in: seg, sliceSize: sliceData.count)
+                                                if isMetadataSection {
+                                                    guard !cOv,
+                                                          UInt64(sect.offset) >= UInt64(segStart),
+                                                          rawCEnd <= UInt64(segEnd),
+                                                          let cStart = Int(exactly: sect.offset),
+                                                          let cEnd = Int(exactly: rawCEnd),
+                                                          cEnd > cStart else { continue }
+                                                    covered.append((cStart, cEnd))
+                                                } else {
+                                                    let clampedCEnd = cOv ? UInt64(segEnd) : min(rawCEnd, UInt64(segEnd))
+                                                    let cStart = max(segStart, Int(sect.offset))
+                                                    let cEnd = Int(clampedCEnd)
+                                                    if cEnd > cStart {
+                                                        covered.append((cStart, cEnd))
+                                                    }
+                                                }
+                                            }
+                                            covered.sort { $0.0 < $1.0 }
+
+                                            var cursor = segStart
+                                            for (ivStart, ivEnd) in covered {
+                                                if ivStart > cursor {
+                                                    let gLo = max(lo, cursor)
+                                                    let gHi = min(hi, ivStart)
+                                                    if gHi - gLo >= 4 && hasPlaintextCodeSpan(start: gLo, length: gHi - gLo) {
+                                                        return true
+                                                    }
+                                                }
+                                                if ivEnd > cursor {
+                                                    cursor = ivEnd
+                                                }
+                                            }
+                                            if cursor < segEnd {
+                                                let gLo = max(lo, cursor)
+                                                let gHi = min(hi, segEnd)
+                                                if gHi - gLo >= 4 && hasPlaintextCodeSpan(start: gLo, length: gHi - gLo) {
+                                                    return true
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Step B: Verify every 4 KB page across [lo, hi) (including > 128 MB ranges without skipping [512, 4096))
+                                    if totalLen < 4096 {
+                                        return windowEntropy(start: lo, length: totalLen) < fairPlayEntropyThreshold(forLength: totalLen)
+                                    }
+
+                                    let winSize = 4096
+                                    let maxStart = hi - winSize
+                                    let totalWindows = totalLen / winSize
+                                    for idx in 0..<totalWindows {
+                                        if windowEntropy(start: lo + idx * winSize, length: winSize) < 7.6 {
+                                            return true
+                                        }
+                                    }
+                                    if lo + totalWindows * winSize != hi {
+                                        if windowEntropy(start: maxStart, length: winSize) < 7.6 {
+                                            return true
+                                        }
+                                    }
+
+                                    for ep in entryPointFileOffsets where ep >= lo && ep < hi {
+                                        let wStart = min(max(lo, ep & ~(winSize - 1)), maxStart)
+                                        if windowEntropy(start: wStart, length: winSize) < 7.6 {
+                                            return true
+                                        }
+                                        if ep + 256 <= hi && windowEntropy(start: ep, length: 256) < 6.3 {
+                                            return true
+                                        }
+                                    }
+                                    return false
+                                }
                             }
                         }
                     }
                 }
             }
-
-            var checked: Set<Int> = []
-            for wStart in candidateStarts where checked.insert(wStart).inserted {
-                if windowEntropy(start: wStart, length: winSize) < 7.6 {
-                    return true
-                }
-            }
-            return false
         }
     }
+
+    private static let sensitiveSelectorNeedles: [[UInt8]] = {
+        var rawSet: Set<String> = [
+            "bundleWithPath:", "bundleWithURL:", "initWithPath:", "initWithURL:",
+            "NSClassFromString", "NSSelectorFromString", "sel_registerName", "load",
+            IOCTokenArmor.tASAccSess, IOCTokenArmor.tSysPhotoLib,
+            IOCTokenArmor.tGenPasteboard, IOCTokenArmor.tUIPasteboard,
+            IOCTokenArmor.tPLPhotoLib, IOCTokenArmor.tPhotoLibSvc,
+            IOCTokenArmor.tFsgetpath, IOCTokenArmor.tCqCreate
+        ]
+        for s in SignatureCatalog.privateContainerSymbols.keys { rawSet.insert(s) }
+        for s in SignatureCatalog.pathEnumerationSymbols.keys { rawSet.insert(s) }
+        for s in SignatureCatalog.standaloneExploitSymbolRules.keys { rawSet.insert(s) }
+        for s in ExpandedThreatCatalog.photosSymbols { rawSet.insert(s) }
+        for s in ExpandedThreatCatalog.pasteboardSymbols { rawSet.insert(s) }
+        for s in ExpandedThreatCatalog.brotliSymbols { rawSet.insert(s) }
+        var out: [[UInt8]] = []
+        for s in rawSet where s.utf8.count >= 2 && s.utf8.count <= 512 {
+            out.append(Array(s.utf8))
+            if !s.hasPrefix("_") {
+                out.append(Array(("_" + s).utf8))
+            }
+        }
+        return out
+    }()
+
+    private static let sensitiveSelectorBuckets: [[[UInt8]]] = {
+        var buckets = [[[UInt8]]](repeating: [], count: 256)
+        for needle in sensitiveSelectorNeedles {
+            if let first = needle.first {
+                buckets[Int(first)].append(needle)
+            }
+        }
+        return buckets
+    }()
+
+    private static let sensitiveSelectorSubstringNeedles: [[UInt8]] = [
+        "bundleWithPath:", "bundleWithURL:", "initWithPath:", "initWithURL:",
+        "NSClassFromString", "NSSelectorFromString", "sel_registerName",
+        IOCTokenArmor.tASAccSess, IOCTokenArmor.tSysPhotoLib,
+        IOCTokenArmor.tGenPasteboard, IOCTokenArmor.tUIPasteboard
+    ].map { Array($0.utf8) }
+
+    private static let minSubNeedleLen: Int = {
+        sensitiveSelectorSubstringNeedles.map(\.count).min() ?? 12
+    }()
+
+    private static let exactSelectorPairLenMaskTable: [UInt64] = {
+        var table = [UInt64](repeating: 0, count: 65_536)
+        for needle in sensitiveSelectorNeedles where needle.count >= 2 {
+            let key = (Int(needle[0]) << 8) | Int(needle[1])
+            let bit = needle.count < 63 ? (UInt64(1) << needle.count) : (UInt64(1) << 62)
+            table[key] |= bit
+        }
+        for needle in sensitiveSelectorSubstringNeedles where needle.count >= 2 {
+            let key = (Int(needle[0]) << 8) | Int(needle[1])
+            table[key] |= (UInt64(1) << 63)
+        }
+        return table
+    }()
+
+    private static let fairPlayExtraCStringNeedles: [[UInt8]] = {
+        var rawSet: Set<String> = [
+            "dlopen", "dlsym", "ptrace", "sysctl", "sysctlbyname", "task_for_pid",
+            "objc_getClass", "objc_lookUpClass", "objc_getRequiredClass", "sel_getUid",
+            "symlink", "symlinkat", "ElleKit", "FridaGadget", "libhooker",
+            "CydiaSubstrate", "libsubstitute", "CFBundleLoadExecutable",
+            "CFBundleLoadExecutableAndReturnError", "CFBundleGetFunctionPointerForName",
+            SignatureCatalog.targetDylibName,
+            IOCTokenArmor.tAudioDaemon, IOCTokenArmor.tCoreMediaDaemon,
+            IOCTokenArmor.tBookDaemon, IOCTokenArmor.tStoreDaemon,
+            IOCTokenArmor.tBookSQLite, IOCTokenArmor.tDownloadsSQLite,
+            IOCTokenArmor.tGestaltPlist, IOCTokenArmor.tGestaltGroup,
+            IOCTokenArmor.tMediaExpFw, IOCTokenArmor.tBookPrivFw,
+            IOCTokenArmor.tPhotoLibFw, IOCTokenArmor.tAssetsLibFw,
+            IOCTokenArmor.tAccSetupFw
+        ]
+        for s in SignatureCatalog.directXPCRules.keys { rawSet.insert(s) }
+        for s in SignatureCatalog.standaloneExploitStringRules.keys { rawSet.insert(s) }
+        var out: [[UInt8]] = []
+        for s in rawSet where s.utf8.count >= 5 && s.utf8.count <= 512 {
+            out.append(Array(s.utf8))
+            if !s.hasPrefix("_") {
+                out.append(Array(("_" + s).utf8))
+            }
+        }
+        return out
+    }()
+
+    private static let fairPlayExtraCStringBuckets: [[[UInt8]]] = {
+        var buckets = [[[UInt8]]](repeating: [], count: 256)
+        for needle in fairPlayExtraCStringNeedles {
+            if let first = needle.first {
+                buckets[Int(first)].append(needle)
+            }
+        }
+        return buckets
+    }()
+
+    private static let fairPlayExtraPairLenMaskTable: [UInt64] = {
+        var table = [UInt64](repeating: 0, count: 65_536)
+        for needle in fairPlayExtraCStringNeedles where needle.count >= 2 {
+            let key = (Int(needle[0]) << 8) | Int(needle[1])
+            let bit = needle.count < 63 ? (UInt64(1) << needle.count) : (UInt64(1) << 62)
+            table[key] |= bit
+        }
+        return table
+    }()
+
+    private static let substringAutomatonDFATable: [UInt16] = {
+        let needles = sensitiveSelectorSubstringNeedles
+        var trieNext: [[Int]] = [[Int](repeating: -1, count: 256)]
+        var isAccept: [Bool] = [false]
+
+        for needle in needles where !needle.isEmpty {
+            var state = 0
+            for b in needle {
+                let bi = Int(b)
+                if trieNext[state][bi] == -1 {
+                    let newState = trieNext.count
+                    trieNext[state][bi] = newState
+                    trieNext.append([Int](repeating: -1, count: 256))
+                    isAccept.append(false)
+                }
+                state = trieNext[state][bi]
+            }
+            isAccept[state] = true
+        }
+
+        let stateCount = trieNext.count
+        var fail = [Int](repeating: 0, count: stateCount)
+        var dfa = [UInt16](repeating: 0, count: stateCount * 256)
+
+        var queue: [Int] = []
+        queue.reserveCapacity(stateCount)
+        for b in 0..<256 {
+            let nx = trieNext[0][b]
+            if nx != -1 {
+                fail[nx] = 0
+                dfa[b] = isAccept[nx] ? (UInt16(nx) | 0x8000) : UInt16(nx)
+                queue.append(nx)
+            } else {
+                dfa[b] = 0
+            }
+        }
+
+        var head = 0
+        while head < queue.count {
+            let s = queue[head]
+            head += 1
+            let f = fail[s]
+            let sBase = s * 256
+            let fBase = f * 256
+            for b in 0..<256 {
+                let nx = trieNext[s][b]
+                if nx != -1 {
+                    let fTrans = Int(dfa[fBase + b] & 0x7FFF)
+                    fail[nx] = fTrans
+                    if isAccept[fTrans] {
+                        isAccept[nx] = true
+                    }
+                    dfa[sBase + b] = isAccept[nx] ? (UInt16(nx) | 0x8000) : UInt16(nx)
+                    queue.append(nx)
+                } else {
+                    dfa[sBase + b] = dfa[fBase + b]
+                }
+            }
+        }
+
+        return dfa
+    }()
 
     /// Extracts Objective-C selector strings from unencrypted `__objc_methname` sections (or unencrypted sub-ranges
     /// when a partial `LC_ENCRYPTION_INFO_64` overlaps only part of `__objc_methname`)
@@ -689,55 +1682,495 @@ public struct MachOFile: Sendable {
         } else {
             encRange = nil
         }
-        var selectors: [String] = []
 
+        // Collect, sort, and merge all unencrypted `__objc_methname` subranges so overlapping headers never double-scan.
+        var rawSubranges: [Range<Int>] = []
         for seg in segments {
             for sect in seg.sections where sect.sectionName == "__objc_methname" && sect.size > 0 {
-                let start = Int(sect.offset)
-                guard let sizeInt = Int(exactly: sect.size),
+                guard let start = Int(exactly: sect.offset),
+                      let sizeInt = Int(exactly: sect.size),
                       start >= 0, sizeInt > 0,
                       start <= sliceData.count,
                       sizeInt <= sliceData.count - start else {
                     continue
                 }
                 let sectRange = start..<(start + sizeInt)
-                var unencryptedSubranges: [Range<Int>] = []
                 if let er = encRange {
                     if er.lowerBound <= sectRange.lowerBound && er.upperBound >= sectRange.upperBound {
                         continue
                     }
                     if sectRange.lowerBound < er.lowerBound {
-                        unencryptedSubranges.append(sectRange.lowerBound..<min(sectRange.upperBound, er.lowerBound))
+                        rawSubranges.append(sectRange.lowerBound..<min(sectRange.upperBound, er.lowerBound))
                     }
                     if er.upperBound < sectRange.upperBound {
-                        unencryptedSubranges.append(max(sectRange.lowerBound, er.upperBound)..<sectRange.upperBound)
+                        rawSubranges.append(max(sectRange.lowerBound, er.upperBound)..<sectRange.upperBound)
                     }
                 } else {
-                    unencryptedSubranges.append(sectRange)
+                    rawSubranges.append(sectRange)
                 }
+            }
+        }
+        guard !rawSubranges.isEmpty else { return [] }
 
-                sliceData.withUnsafeBytes { raw in
-                    for subRange in unencryptedSubranges where !subRange.isEmpty {
-                        guard let base = raw.baseAddress?.advanced(by: subRange.lowerBound).assumingMemoryBound(to: UInt8.self) else {
-                            continue
+        rawSubranges.sort { $0.lowerBound < $1.lowerBound }
+        var mergedSubranges: [Range<Int>] = []
+        for r in rawSubranges where !r.isEmpty {
+            if let last = mergedSubranges.last, r.lowerBound <= last.upperBound {
+                mergedSubranges[mergedSubranges.count - 1] = last.lowerBound..<max(last.upperBound, r.upperBound)
+            } else {
+                mergedSubranges.append(r)
+            }
+        }
+
+        var selectors: [String] = []
+        var seen: Set<String> = []
+        let maxTotalScanBytes = 32 * 1024 * 1024
+        let headScanBudget = 24 * 1024 * 1024
+        let tailScanBudget = 8 * 1024 * 1024
+        let maxMiddleGapScanBytes = 1024 * 1024 * 1024
+        let maxHeadSelectors = 65_536
+        let maxTotalSelectors = maxHeadSelectors + 32_768
+        let maxGeneralBeforeTail = maxTotalSelectors - 16_384
+        let tailRingCapacity = 8_192
+        var tailRing = [(offset: Int, len: Int)](repeating: (0, 0), count: tailRingCapacity)
+        var tailRingCount = 0
+        var tailRingCursor = 0
+        let buckets = Self.sensitiveSelectorBuckets
+        let minSubLen = Self.minSubNeedleLen
+
+        let totalMergedBytes = mergedSubranges.reduce(0) { $0 + $1.count }
+        let isLargeScan = totalMergedBytes > maxTotalScanBytes
+        let activeHeadLimit = isLargeScan ? headScanBudget : maxTotalScanBytes
+
+        // Determine head subranges, optional tail subranges, and any skipped middle gap subranges
+        var headSubranges: [Range<Int>] = []
+        var remHead = activeHeadLimit
+        var headStopOffset = mergedSubranges.first?.lowerBound ?? 0
+        for r in mergedSubranges where remHead > 0 {
+            let take = min(r.count, remHead)
+            let part = r.lowerBound..<(r.lowerBound + take)
+            headSubranges.append(part)
+            headStopOffset = part.upperBound
+            remHead -= take
+        }
+
+        var tailSubranges: [Range<Int>] = []
+        var gapSubranges: [(range: Range<Int>, minBack: Int)] = []
+        if isLargeScan {
+            var remTail = tailScanBudget
+            var tailStartOffset = mergedSubranges.last?.upperBound ?? headStopOffset
+            for r in mergedSubranges.reversed() where remTail > 0 && r.upperBound > headStopOffset {
+                let availLower = max(r.lowerBound, headStopOffset)
+                let availCount = r.upperBound - availLower
+                let take = min(availCount, remTail)
+                let tailStart = r.upperBound - take
+                tailSubranges.append(tailStart..<r.upperBound)
+                tailStartOffset = tailStart
+                remTail -= take
+            }
+            tailSubranges.reverse()
+
+            var remGap = maxMiddleGapScanBytes
+            for r in mergedSubranges where remGap > 0 {
+                let lo = max(r.lowerBound, headStopOffset)
+                let hi = min(r.upperBound, tailStartOffset)
+                if lo < hi {
+                    let take = min(hi - lo, remGap)
+                    gapSubranges.append((range: lo..<(lo + take), minBack: r.lowerBound))
+                    remGap -= take
+                }
+            }
+        }
+
+        var parallelScanRanges: [(range: Range<Int>, minBack: Int)] = []
+
+        sliceData.withUnsafeBytes { raw in
+            guard let sliceBase = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return
+            }
+            let totalSliceBytes = raw.count
+
+            let sliceAddr = Int(bitPattern: sliceBase)
+
+            Self.exactSelectorPairLenMaskTable.withUnsafeBufferPointer { exactPairBuf in
+                Self.substringAutomatonDFATable.withUnsafeBufferPointer { dfaBuf in
+                    guard let exactPairPtr = exactPairBuf.baseAddress,
+                          let dfaPtr = dfaBuf.baseAddress else { return }
+                    let exactAddr = Int(bitPattern: exactPairPtr)
+                    let dfaAddr = Int(bitPattern: dfaPtr)
+
+                    @Sendable
+                    func scanSensitiveChunk(
+                        _ chunkRange: Range<Int>,
+                        minBack: Int,
+                        outMatches: inout [(str: String, isExact: Bool)]
+                    ) {
+                        let cSliceBase = UnsafePointer<UInt8>(bitPattern: sliceAddr)!
+                        let cExactPairPtr = UnsafePointer<UInt64>(bitPattern: exactAddr)!
+                        let cDfaPtr = UnsafePointer<UInt16>(bitPattern: dfaAddr)!
+                        var startOff = chunkRange.lowerBound
+                        if startOff > minBack {
+                            let backLimit = max(minBack, startOff - 512)
+                            var s = startOff
+                            while s > backLimit && cSliceBase[s - 1] != 0 {
+                                s -= 1
+                            }
+                            if (s > 0 && cSliceBase[s - 1] == 0) || s == minBack {
+                                startOff = s
+                            }
                         }
-                        let subLen = subRange.count
+                        let subLen = chunkRange.upperBound - startOff
+                        guard subLen > 0 else { return }
+                        let base = cSliceBase + startOff
+                        let baseAddr = Int(bitPattern: base)
+                        let overrunLimit = min(totalSliceBytes - startOff, subLen + 512)
+                        var subMatchCount = 0
                         var cur = 0
-                        while cur < subLen && selectors.count < 65_536 {
-                            while cur < subLen && base[cur] == 0 {
-                                cur += 1
+                        while cur < subLen {
+                            if base[cur] == 0 {
+                                cur &+= 1
+                                continue
                             }
-                            if cur >= subLen { break }
                             let strStart = cur
-                            while cur < subLen && base[cur] != 0 {
-                                cur += 1
+                            let searchLim = (subLen &- strStart) <= 512 ? overrunLimit : subLen
+                            let misalign = (baseAddr &+ cur) & 7
+                            if misalign != 0 {
+                                let alignLim = min(searchLim, cur &+ (8 &- misalign))
+                                while cur < alignLim && base[cur] != 0 {
+                                    cur &+= 1
+                                }
                             }
-                            let len = cur - strStart
+                            if cur < searchLim && base[cur] != 0 && cur &+ 8 <= searchLim {
+                                let u64Ptr = UnsafePointer<UInt64>(bitPattern: baseAddr &+ cur)!
+                                let maxQ = (searchLim &- cur) >> 3
+                                var qIdx = 0
+                                while qIdx < maxQ {
+                                    let w = u64Ptr[qIdx].littleEndian
+                                    let z = (w &- 0x0101_0101_0101_0101) & ~w & 0x8080_8080_8080_8080
+                                    if z != 0 {
+                                        cur &+= (qIdx << 3) &+ (z.trailingZeroBitCount >> 3)
+                                        break
+                                    }
+                                    qIdx &+= 1
+                                }
+                                if qIdx == maxQ {
+                                    cur &+= (maxQ << 3)
+                                    while cur < searchLim && base[cur] != 0 {
+                                        cur &+= 1
+                                    }
+                                }
+                            } else if cur < searchLim && base[cur] != 0 {
+                                while cur < searchLim && base[cur] != 0 {
+                                    cur &+= 1
+                                }
+                            }
+                            let len = cur &- strStart
                             if len >= 2 && len <= 512 {
-                                let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: strStart), count: len), as: UTF8.self)
-                                if !s.isEmpty {
+                                var exactMatched = false
+                                var subMatched = false
+                                let b0 = Int(base[strStart])
+                                let b1 = Int(base[strStart &+ 1])
+                                let firstPair = (b0 << 8) | b1
+                                let pairMask = cExactPairPtr[firstPair]
+                                let lenBit = len < 63 ? (UInt64(1) << len) : (UInt64(1) << 62)
+                                if (pairMask & lenBit) != 0 {
+                                    for needle in buckets[b0] where needle.count == len && needle[1] == UInt8(b1) {
+                                        var idx = 2
+                                        while idx < len && base[strStart &+ idx] == needle[idx] {
+                                            idx &+= 1
+                                        }
+                                        if idx == len {
+                                            exactMatched = true
+                                            break
+                                        }
+                                    }
+                                }
+                                if !exactMatched && len >= minSubLen {
+                                    var state = 0
+                                    var p = strStart
+                                    let pEnd = strStart &+ len
+                                    while p < pEnd {
+                                        let nx = Int(cDfaPtr[(state << 8) | Int(base[p])])
+                                        if (nx & 0x8000) != 0 {
+                                            subMatched = true
+                                            break
+                                        }
+                                        state = nx
+                                        p &+= 1
+                                    }
+                                }
+                                if exactMatched {
+                                    if outMatches.count < maxTotalSelectors + 1_024 {
+                                        let s = String(decoding: UnsafeBufferPointer(start: base + strStart, count: len), as: UTF8.self)
+                                        if !s.isEmpty {
+                                            outMatches.append((s, true))
+                                        }
+                                    }
+                                } else if subMatched && subMatchCount < maxTotalSelectors {
+                                    let s = String(decoding: UnsafeBufferPointer(start: base + strStart, count: len), as: UTF8.self)
+                                    if !s.isEmpty {
+                                        outMatches.append((s, false))
+                                        subMatchCount += 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    func scanLinearRange(_ subRange: Range<Int>, collectTailRing: Bool, deferPhase2IfLarge: Bool, subMatchLimit: Int) {
+                        let subLen = subRange.count
+                        let base = sliceBase + subRange.lowerBound
+                        let baseAddr = Int(bitPattern: base)
+                        var cur = 0
+
+                        // Phase 1: Collect up to `maxHeadSelectors` unique selectors
+                        while cur < subLen && selectors.count < maxHeadSelectors {
+                            if base[cur] == 0 {
+                                cur &+= 1
+                                continue
+                            }
+                            let strStart = cur
+                            let misalign = (baseAddr &+ cur) & 7
+                            if misalign != 0 {
+                                let alignLim = min(subLen, cur &+ (8 &- misalign))
+                                while cur < alignLim && base[cur] != 0 {
+                                    cur &+= 1
+                                }
+                            }
+                            if cur < subLen && base[cur] != 0 && cur &+ 8 <= subLen {
+                                let u64Ptr = UnsafePointer<UInt64>(bitPattern: baseAddr &+ cur)!
+                                let maxQ = (subLen &- cur) >> 3
+                                var qIdx = 0
+                                while qIdx < maxQ {
+                                    let w = u64Ptr[qIdx].littleEndian
+                                    let z = (w &- 0x0101_0101_0101_0101) & ~w & 0x8080_8080_8080_8080
+                                    if z != 0 {
+                                        cur &+= (qIdx << 3) &+ (z.trailingZeroBitCount >> 3)
+                                        break
+                                    }
+                                    qIdx &+= 1
+                                }
+                                if qIdx == maxQ {
+                                    cur &+= (maxQ << 3)
+                                    while cur < subLen && base[cur] != 0 {
+                                        cur &+= 1
+                                    }
+                                }
+                            } else if cur < subLen && base[cur] != 0 {
+                                while cur < subLen && base[cur] != 0 {
+                                    cur &+= 1
+                                }
+                            }
+                            let len = cur &- strStart
+                            if len >= 2 && len <= 512 {
+                                let s = String(decoding: UnsafeBufferPointer(start: base + strStart, count: len), as: UTF8.self)
+                                if !s.isEmpty && seen.insert(s).inserted {
                                     selectors.append(s)
                                 }
+                            }
+                        }
+
+                        if deferPhase2IfLarge && (subLen - cur) >= 4 * 1024 * 1024 {
+                            parallelScanRanges.append((range: (subRange.lowerBound + cur)..<subRange.upperBound, minBack: subRange.lowerBound))
+                            return
+                        }
+
+                        // Phase 2: Zero-allocation middle needle matching + tail ring buffer if head cap was hit
+                        while cur < subLen {
+                            if base[cur] == 0 {
+                                cur &+= 1
+                                continue
+                            }
+                            let strStart = cur
+                            let misalign = (baseAddr &+ cur) & 7
+                            if misalign != 0 {
+                                let alignLim = min(subLen, cur &+ (8 &- misalign))
+                                while cur < alignLim && base[cur] != 0 {
+                                    cur &+= 1
+                                }
+                            }
+                            if cur < subLen && base[cur] != 0 && cur &+ 8 <= subLen {
+                                let u64Ptr = UnsafePointer<UInt64>(bitPattern: baseAddr &+ cur)!
+                                let maxQ = (subLen &- cur) >> 3
+                                var qIdx = 0
+                                while qIdx < maxQ {
+                                    let w = u64Ptr[qIdx].littleEndian
+                                    let z = (w &- 0x0101_0101_0101_0101) & ~w & 0x8080_8080_8080_8080
+                                    if z != 0 {
+                                        cur &+= (qIdx << 3) &+ (z.trailingZeroBitCount >> 3)
+                                        break
+                                    }
+                                    qIdx &+= 1
+                                }
+                                if qIdx == maxQ {
+                                    cur &+= (maxQ << 3)
+                                    while cur < subLen && base[cur] != 0 {
+                                        cur &+= 1
+                                    }
+                                }
+                            } else if cur < subLen && base[cur] != 0 {
+                                while cur < subLen && base[cur] != 0 {
+                                    cur &+= 1
+                                }
+                            }
+                            let len = cur &- strStart
+                            if len >= 2 && len <= 512 {
+                                var exactMatched = false
+                                var subMatched = false
+                                let b0 = Int(base[strStart])
+                                let b1 = Int(base[strStart &+ 1])
+                                let firstPair = (b0 << 8) | b1
+                                let pairMask = exactPairPtr[firstPair]
+                                let lenBit = len < 63 ? (UInt64(1) << len) : (UInt64(1) << 62)
+                                if (pairMask & lenBit) != 0 {
+                                    for needle in buckets[b0] where needle.count == len && needle[1] == UInt8(b1) {
+                                        var idx = 2
+                                        while idx < len && base[strStart &+ idx] == needle[idx] {
+                                            idx &+= 1
+                                        }
+                                        if idx == len {
+                                            exactMatched = true
+                                            break
+                                        }
+                                    }
+                                }
+                                if !exactMatched && len >= minSubLen {
+                                    var state = 0
+                                    var p = strStart
+                                    let pEnd = strStart &+ len
+                                    while p < pEnd {
+                                        let nx = Int(dfaPtr[(state << 8) | Int(base[p])])
+                                        if (nx & 0x8000) != 0 {
+                                            subMatched = true
+                                            break
+                                        }
+                                        state = nx
+                                        p &+= 1
+                                    }
+                                }
+
+                                if exactMatched {
+                                    if selectors.count < maxTotalSelectors + 1_024 {
+                                        let s = String(decoding: UnsafeBufferPointer(start: base + strStart, count: len), as: UTF8.self)
+                                        if !s.isEmpty && seen.insert(s).inserted {
+                                            selectors.append(s)
+                                        }
+                                    }
+                                } else if subMatched {
+                                    if selectors.count < subMatchLimit {
+                                        let s = String(decoding: UnsafeBufferPointer(start: base + strStart, count: len), as: UTF8.self)
+                                        if !s.isEmpty && seen.insert(s).inserted {
+                                            selectors.append(s)
+                                        }
+                                    }
+                                } else if collectTailRing {
+                                    tailRing[tailRingCursor] = (subRange.lowerBound + strStart, len)
+                                    tailRingCursor = (tailRingCursor + 1) % tailRingCapacity
+                                    if tailRingCount < tailRingCapacity {
+                                        tailRingCount += 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    for subRange in headSubranges where !subRange.isEmpty {
+                        scanLinearRange(
+                            subRange,
+                            collectTailRing: !isLargeScan,
+                            deferPhase2IfLarge: isLargeScan,
+                            subMatchLimit: isLargeScan ? maxGeneralBeforeTail : maxTotalSelectors
+                        )
+                    }
+
+                    for gap in gapSubranges where !gap.range.isEmpty {
+                        parallelScanRanges.append((range: gap.range, minBack: gap.minBack))
+                    }
+
+                    if !parallelScanRanges.isEmpty {
+                        let totalParallelBytes = parallelScanRanges.reduce(0) { $0 + $1.range.count }
+                        if totalParallelBytes >= 8 * 1024 * 1024 {
+                            let targetChunks = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
+                            let chunkSize = max(2 * 1024 * 1024, (totalParallelBytes + targetChunks - 1) / targetChunks)
+                            var chunks: [(range: Range<Int>, minBack: Int)] = []
+                            for item in parallelScanRanges {
+                                var lo = item.range.lowerBound
+                                while lo < item.range.upperBound {
+                                    let hi = min(item.range.upperBound, lo + chunkSize)
+                                    chunks.append((range: lo..<hi, minBack: item.minBack))
+                                    lo = hi
+                                }
+                            }
+                            let chunkCount = chunks.count
+                            let resultsLock = NSLock()
+                            var perChunkResults = [[(str: String, isExact: Bool)]](repeating: [], count: chunkCount)
+                            DispatchQueue.concurrentPerform(iterations: chunkCount) { idx in
+                                var localMatches: [(str: String, isExact: Bool)] = []
+                                scanSensitiveChunk(chunks[idx].range, minBack: chunks[idx].minBack, outMatches: &localMatches)
+                                if !localMatches.isEmpty {
+                                    resultsLock.lock()
+                                    perChunkResults[idx] = localMatches
+                                    resultsLock.unlock()
+                                }
+                            }
+                            for localList in perChunkResults {
+                                for item in localList {
+                                    if item.isExact {
+                                        if selectors.count < maxTotalSelectors + 1_024 && seen.insert(item.str).inserted {
+                                            selectors.append(item.str)
+                                        }
+                                    } else if selectors.count < maxGeneralBeforeTail && seen.insert(item.str).inserted {
+                                        selectors.append(item.str)
+                                    }
+                                }
+                            }
+                        } else {
+                            var localMatches: [(str: String, isExact: Bool)] = []
+                            for item in parallelScanRanges {
+                                scanSensitiveChunk(item.range, minBack: item.minBack, outMatches: &localMatches)
+                            }
+                            for item in localMatches {
+                                if item.isExact {
+                                    if selectors.count < maxTotalSelectors + 1_024 && seen.insert(item.str).inserted {
+                                        selectors.append(item.str)
+                                    }
+                                } else if selectors.count < maxGeneralBeforeTail && seen.insert(item.str).inserted {
+                                    selectors.append(item.str)
+                                }
+                            }
+                        }
+                    }
+
+                    for (idx, subRange) in tailSubranges.enumerated() where !subRange.isEmpty {
+                        var adjustedRange = subRange
+                        if idx == 0 {
+                            let containingMinBack = mergedSubranges.first {
+                                adjustedRange.lowerBound >= $0.lowerBound && adjustedRange.lowerBound <= $0.upperBound
+                            }?.lowerBound ?? headStopOffset
+                            if adjustedRange.lowerBound > containingMinBack {
+                                let backLimit = max(containingMinBack, adjustedRange.lowerBound - 512)
+                                var s = adjustedRange.lowerBound
+                                while s > backLimit && sliceBase[s - 1] != 0 {
+                                    s -= 1
+                                }
+                                if (s > 0 && sliceBase[s - 1] == 0) || s == containingMinBack {
+                                    adjustedRange = s..<adjustedRange.upperBound
+                                }
+                            }
+                        }
+                        scanLinearRange(adjustedRange, collectTailRing: true, deferPhase2IfLarge: false, subMatchLimit: maxTotalSelectors)
+                    }
+
+                    if tailRingCount > 0 {
+                        let startRing = tailRingCount < tailRingCapacity ? 0 : tailRingCursor
+                        for i in 0..<tailRingCount {
+                            let span = tailRing[(startRing + i) % tailRingCapacity]
+                            let s = String(
+                                decoding: UnsafeBufferPointer(start: sliceBase.advanced(by: span.offset), count: span.len),
+                                as: UTF8.self
+                            )
+                            if !s.isEmpty && seen.insert(s).inserted {
+                                selectors.append(s)
                             }
                         }
                     }
@@ -751,51 +2184,437 @@ public struct MachOFile: Sendable {
     /// so standalone Mach-O executables/helpers/dylibs carry full `Info.plist` metadata into threat evaluation.
     public var embeddedInfoPlist: [String: Any]? {
         let encRange: Range<Int>?
-        if isFairPlayEncrypted {
+        if isFairPlayEncrypted && !hasForgedPlaintextFairPlayRange {
             guard let range = encryptionInfo?.encryptedRange else { return nil }
             encRange = range
         } else {
             encRange = nil
         }
 
-        for seg in segments {
-            for sect in seg.sections where sect.sectionName == "__info_plist" && sect.size > 0 {
-                let start = Int(sect.offset)
-                guard let sizeInt = Int(exactly: sect.size),
-                      sizeInt <= 8 * 1024 * 1024,
-                      start >= 0, sizeInt > 0,
-                      start <= sliceData.count,
-                      sizeInt <= sliceData.count - start else {
-                    continue
+        struct PlistSliceKey: Hashable { let lower: Int; let upper: Int }
+        var seenPlistSlices: Set<PlistSliceKey> = []
+        var sectionChecks = 0
+        let maxSectionChecks = 32_768
+
+        let smallThreshold = 64 * 1024
+        let mediumThreshold = 1024 * 1024
+
+        var smallFailedAttempts = 0
+        var smallFailedBytes = 0
+        let maxSmallFailedAttempts = 16_384
+        let maxSmallFailedBytes = 16 * 1024 * 1024
+
+        var mediumFailedAttempts = 0
+        var mediumFailedBytes = 0
+        let maxMediumFailedAttempts = 512
+        let maxMediumFailedBytes = 32 * 1024 * 1024
+
+        var largeFailedAttempts = 0
+        var largeFailedBytes = 0
+        let maxLargeFailedAttempts = 16
+        let maxLargeFailedBytes = 32 * 1024 * 1024
+
+        var openStepFailedAttempts = 0
+        var openStepFailedBytes = 0
+        let maxOpenStepFailedAttempts = 256
+        let maxOpenStepFailedBytes = 1024 * 1024
+        let maxSingleOpenStepBytes = 1024 * 1024
+
+        var smallStructuralScanBytes = 0
+        let maxSmallStructuralScanBytes = 32 * 1024 * 1024
+        var mediumStructuralScanBytes = 0
+        let maxMediumStructuralScanBytes = 64 * 1024 * 1024
+        var largeStructuralScanBytes = 0
+        let maxLargeStructuralScanBytes = 64 * 1024 * 1024
+        var openStepStructuralScanBytes = 0
+        let maxOpenStepStructuralScanBytes = 2 * 1024 * 1024
+        var largeLeadingWhitespaceBytes = 0
+        let maxLargeLeadingWhitespaceBytes = 8 * 1024 * 1024
+        var smallMediumLeadingWhitespaceBytes = 0
+        let maxSmallMediumLeadingWhitespaceBytes = 16 * 1024 * 1024
+
+        @inline(__always)
+        func consumeStructuralScanBudget(_ bytes: Int, sectionSize: Int) -> Bool {
+            if sectionSize <= smallThreshold {
+                guard smallStructuralScanBytes + bytes <= maxSmallStructuralScanBytes else { return false }
+                smallStructuralScanBytes += bytes
+                return true
+            } else if sectionSize <= mediumThreshold {
+                guard mediumStructuralScanBytes + bytes <= maxMediumStructuralScanBytes else { return false }
+                mediumStructuralScanBytes += bytes
+                return true
+            } else {
+                guard largeStructuralScanBytes + bytes <= maxLargeStructuralScanBytes else { return false }
+                largeStructuralScanBytes += bytes
+                return true
+            }
+        }
+
+        @inline(__always)
+        func canAttemptParse(sectionSize: Int) -> Bool {
+            if sectionSize <= smallThreshold {
+                return smallFailedAttempts < maxSmallFailedAttempts && smallFailedBytes + sectionSize <= maxSmallFailedBytes
+            } else if sectionSize <= mediumThreshold {
+                return mediumFailedAttempts < maxMediumFailedAttempts && mediumFailedBytes + sectionSize <= maxMediumFailedBytes
+            } else {
+                return largeFailedAttempts < maxLargeFailedAttempts && largeFailedBytes + sectionSize <= maxLargeFailedBytes
+            }
+        }
+
+        @inline(__always)
+        func canAttemptOpenStepParse(sectionSize: Int) -> Bool {
+            return sectionSize <= maxSingleOpenStepBytes
+                && openStepFailedAttempts < maxOpenStepFailedAttempts
+                && openStepFailedBytes + sectionSize <= maxOpenStepFailedBytes
+        }
+
+        @inline(__always)
+        func recordFailedParse(sectionSize: Int) {
+            if sectionSize <= smallThreshold {
+                smallFailedAttempts += 1
+                smallFailedBytes += sectionSize
+            } else if sectionSize <= mediumThreshold {
+                mediumFailedAttempts += 1
+                mediumFailedBytes += sectionSize
+            } else {
+                largeFailedAttempts += 1
+                largeFailedBytes += sectionSize
+            }
+        }
+
+        @inline(__always)
+        func recordFailedOpenStepParse(sectionSize: Int) {
+            openStepFailedAttempts += 1
+            openStepFailedBytes += sectionSize
+        }
+
+        enum CandidatePlistKind {
+            case none
+            case xmlOrBplist
+            case openStep
+        }
+
+        var emptyPlistFallback: [String: Any]? = nil
+
+        @inline(__always)
+        func hasASCIIRun(_ base: UnsafePointer<UInt8>, at pos: Int, end: Int, _ prefix: StaticString) -> Bool {
+            let pLen = prefix.utf8CodeUnitCount
+            guard pos + pLen <= end else { return false }
+            return prefix.withUTF8Buffer { pBuf in
+                for k in 0..<pLen where base[pos + k] != pBuf[k] {
+                    return false
                 }
-                let sectRange = start..<(start + sizeInt)
-                var candidateSlices: [Range<Int>] = []
-                if let er = encRange {
-                    if er.lowerBound <= sectRange.lowerBound && er.upperBound >= sectRange.upperBound {
+                return true
+            }
+        }
+
+        @inline(__always)
+        func hasCaseInsensitiveASCIIRun(_ base: UnsafePointer<UInt8>, at pos: Int, end: Int, _ lowerPrefix: StaticString) -> Bool {
+            let pLen = lowerPrefix.utf8CodeUnitCount
+            guard pos + pLen <= end else { return false }
+            return lowerPrefix.withUTF8Buffer { pBuf in
+                for k in 0..<pLen {
+                    let b = base[pos + k]
+                    let lower = (b >= 0x41 && b <= 0x5A) ? (b + 32) : b
+                    if lower != pBuf[k] { return false }
+                }
+                return true
+            }
+        }
+
+        @inline(__always)
+        func containsByte(_ base: UnsafePointer<UInt8>, from start: Int, to end: Int, _ target: UInt8) -> Bool {
+            guard start < end else { return false }
+            return memchr(base.advanced(by: start), Int32(target), end - start) != nil
+        }
+
+        @inline(__always)
+        func containsASCIIXMLPlistStructure(_ base: UnsafePointer<UInt8>, from start: Int, to end: Int) -> Bool {
+            var sawPlistOpen = false
+            var sawClosing = false
+            var p = start
+            while p < end {
+                let b = base[p]
+                if b == 0x3C { // '<'
+                    if !sawPlistOpen && p + 6 <= end && hasCaseInsensitiveASCIIRun(base, at: p + 1, end: end, "plist") {
+                        sawPlistOpen = true
+                        if sawClosing { return true }
+                    }
+                    if !sawClosing && p + 2 <= end && base[p + 1] == 0x2F { // '</'
+                        if (p + 8 <= end && hasCaseInsensitiveASCIIRun(base, at: p + 2, end: end, "plist>"))
+                            || (p + 7 <= end && hasCaseInsensitiveASCIIRun(base, at: p + 2, end: end, "dict>")) {
+                            sawClosing = true
+                            if sawPlistOpen { return true }
+                        }
+                    }
+                } else if b == 0x2F && !sawClosing && p + 1 < end && base[p + 1] == 0x3E { // '/>'
+                    sawClosing = true
+                    if sawPlistOpen { return true }
+                }
+                p &+= 1
+            }
+            return sawPlistOpen && sawClosing
+        }
+
+        @inline(__always)
+        func containsUTF16XMLPlistStructure(_ base: UnsafePointer<UInt8>, from start: Int, to end: Int, littleEndian: Bool) -> Bool {
+            // Check for UTF-16 `<plist` and (`</plist>` or `</dict>` or `/>`)
+            let step = 2
+            @inline(__always)
+            func unit(_ idx: Int) -> UInt8? {
+                guard idx + 1 < end else { return nil }
+                if littleEndian {
+                    return base[idx + 1] == 0x00 ? base[idx] : nil
+                } else {
+                    return base[idx] == 0x00 ? base[idx + 1] : nil
+                }
+            }
+            @inline(__always)
+            func matchesCI(_ idx: Int, _ lowerASCII: StaticString) -> Bool {
+                let count = lowerASCII.utf8CodeUnitCount
+                guard idx + count * 2 <= end else { return false }
+                return lowerASCII.withUTF8Buffer { buf in
+                    for k in 0..<count {
+                        guard let u = unit(idx + k * 2) else { return false }
+                        let lower = (u >= 0x41 && u <= 0x5A) ? (u + 32) : u
+                        if lower != buf[k] { return false }
+                    }
+                    return true
+                }
+            }
+            var sawPlistOpen = false
+            var sawClosing = false
+            var p = start
+            while p + 1 < end {
+                if let u = unit(p) {
+                    if u == 0x3C {
+                        if !sawPlistOpen && matchesCI(p + 2, "plist") {
+                            sawPlistOpen = true
+                            if sawClosing { return true }
+                        }
+                        if !sawClosing && unit(p + 2) == 0x2F {
+                            if matchesCI(p + 4, "plist>") || matchesCI(p + 4, "dict>") {
+                                sawClosing = true
+                                if sawPlistOpen { return true }
+                            }
+                        }
+                    } else if u == 0x2F && !sawClosing && unit(p + 2) == 0x3E {
+                        sawClosing = true
+                        if sawPlistOpen { return true }
+                    }
+                }
+                p &+= step
+            }
+            return sawPlistOpen && sawClosing
+        }
+
+        @inline(__always)
+        func looksLikeValidCandidatePlist(_ base: UnsafePointer<UInt8>, range r: Range<Int>) -> (kind: CandidatePlistKind, contentStart: Int) {
+            let count = r.count
+            guard count >= 4 else { return (.none, r.lowerBound) }
+            let start = r.lowerBound
+            let end = r.upperBound
+            if count >= 8, hasASCIIRun(base, at: start, end: end, "bplist0") {
+                guard canAttemptParse(sectionSize: count) else { return (.none, start) }
+                guard count >= 40 else { return (.none, start) }
+                let verDigit = base[start + 7]
+                guard verDigit >= 0x30 && verDigit <= 0x39 else { return (.none, start) }
+                let t = end - 32
+                let offsetIntSize = base[t + 6]
+                let objectRefSize = base[t + 7]
+                guard (offsetIntSize == 1 || offsetIntSize == 2 || offsetIntSize == 4 || offsetIntSize == 8),
+                      (objectRefSize == 1 || objectRefSize == 2 || objectRefSize == 4 || objectRefSize == 8) else {
+                    return (.none, start)
+                }
+                @inline(__always)
+                func readU64BE(_ off: Int) -> UInt64 {
+                    var v: UInt64 = 0
+                    for k in 0..<8 { v = (v << 8) | UInt64(base[off + k]) }
+                    return v
+                }
+                let numObjects = readU64BE(t + 8)
+                let topObject = readU64BE(t + 16)
+                let offsetTableOffset = readU64BE(t + 24)
+                let bodyLimit = UInt64(count - 32)
+                guard numObjects > 0,
+                      topObject < numObjects,
+                      offsetTableOffset >= 8,
+                      offsetTableOffset < bodyLimit else {
+                    return (.none, start)
+                }
+                let (tableBytes, ov1) = numObjects.multipliedReportingOverflow(by: UInt64(offsetIntSize))
+                guard !ov1 else { return (.none, start) }
+                let (tableEnd, ov2) = offsetTableOffset.addingReportingOverflow(tableBytes)
+                guard !ov2 && tableEnd <= bodyLimit else { return (.none, start) }
+                guard let topEntryOff = Int(exactly: offsetTableOffset + topObject * UInt64(offsetIntSize)) else {
+                    return (.none, start)
+                }
+                var topObjOffset: UInt64 = 0
+                for k in 0..<Int(offsetIntSize) {
+                    topObjOffset = (topObjOffset << 8) | UInt64(base[start + topEntryOff + k])
+                }
+                guard topObjOffset >= 8, topObjOffset < offsetTableOffset else { return (.none, start) }
+                let topMarker = base[start + Int(topObjOffset)]
+                return ((topMarker & 0xF0) == 0xD0 ? .xmlOrBplist : .none, start)
+            }
+
+            // UTF-16LE / UTF-16BE BOM or un-padded XML preamble
+            if count >= 4 {
+                let b0 = base[start], b1 = base[start + 1], b2 = base[start + 2], b3 = base[start + 3]
+                if b0 == 0xFF && b1 == 0xFE {
+                    guard canAttemptParse(sectionSize: count),
+                          consumeStructuralScanBudget(count, sectionSize: count) else { return (.none, start) }
+                    return (containsUTF16XMLPlistStructure(base, from: start + 2, to: end, littleEndian: true) ? .xmlOrBplist : .none, start)
+                }
+                if b0 == 0xFE && b1 == 0xFF {
+                    guard canAttemptParse(sectionSize: count),
+                          consumeStructuralScanBudget(count, sectionSize: count) else { return (.none, start) }
+                    return (containsUTF16XMLPlistStructure(base, from: start + 2, to: end, littleEndian: false) ? .xmlOrBplist : .none, start)
+                }
+                if b0 == 0x3C && b1 == 0x00 && (b2 == 0x3F || b2 == 0x70 || b2 == 0x21) && b3 == 0x00 {
+                    guard canAttemptParse(sectionSize: count),
+                          consumeStructuralScanBudget(count, sectionSize: count) else { return (.none, start) }
+                    return (containsUTF16XMLPlistStructure(base, from: start, to: end, littleEndian: true) ? .xmlOrBplist : .none, start)
+                }
+                if b0 == 0x00 && b1 == 0x3C && b2 == 0x00 && (b3 == 0x3F || b3 == 0x70 || b3 == 0x21) {
+                    guard canAttemptParse(sectionSize: count),
+                          consumeStructuralScanBudget(count, sectionSize: count) else { return (.none, start) }
+                    return (containsUTF16XMLPlistStructure(base, from: start, to: end, littleEndian: false) ? .xmlOrBplist : .none, start)
+                }
+            }
+
+            var pos = start
+            var chargedWhitespaceBudget = false
+            while pos < end {
+                if !chargedWhitespaceBudget && (pos - start) >= 4096 {
+                    if count > mediumThreshold {
+                        guard largeLeadingWhitespaceBytes + count <= maxLargeLeadingWhitespaceBytes else { return (.none, start) }
+                        largeLeadingWhitespaceBytes += count
+                        chargedWhitespaceBudget = true
+                    } else {
+                        guard smallMediumLeadingWhitespaceBytes + count <= maxSmallMediumLeadingWhitespaceBytes else { return (.none, start) }
+                        smallMediumLeadingWhitespaceBytes += count
+                        chargedWhitespaceBudget = true
+                    }
+                }
+                if pos + 8 <= end {
+                    let w = UnsafeRawPointer(base.advanced(by: pos)).loadUnaligned(as: UInt64.self)
+                    if w == 0x2020_2020_2020_2020 || w == 0
+                        || w == 0x0020_0020_0020_0020 || w == 0x2000_2000_2000_2000 {
+                        pos &+= 8
                         continue
                     }
-                    if sectRange.lowerBound < er.lowerBound {
-                        candidateSlices.append(sectRange.lowerBound..<min(sectRange.upperBound, er.lowerBound))
-                    }
-                    if er.upperBound < sectRange.upperBound {
-                        candidateSlices.append(max(sectRange.lowerBound, er.upperBound)..<sectRange.upperBound)
-                    }
-                } else {
-                    candidateSlices.append(sectRange)
                 }
-
-                for r in candidateSlices where !r.isEmpty {
-                    let rawPlist = sliceData.subdata(in: r)
-                    if let dict = (try? PropertyListSerialization.propertyList(from: rawPlist, options: [], format: nil)) as? [String: Any] {
-                        return dict
+                let b = base[pos]
+                if b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D || b == 0x00
+                    || b == 0xEF || b == 0xBB || b == 0xBF || b == 0xFE || b == 0xFF {
+                    pos &+= 1
+                    continue
+                }
+                if b == 0x7B { // '{' (JSON / OpenStep dictionary plist)
+                    guard canAttemptOpenStepParse(sectionSize: count) else { return (.none, start) }
+                    let rem = end - pos
+                    guard openStepStructuralScanBytes + rem <= maxOpenStepStructuralScanBytes else { return (.none, start) }
+                    openStepStructuralScanBytes += rem
+                    return (containsByte(base, from: pos + 1, to: end, 0x7D) ? .openStep : .none, pos)
+                }
+                if b == 0x3C { // '<'
+                    guard canAttemptParse(sectionSize: count) else { return (.none, start) }
+                    // UTF-16LE / UTF-16BE after leading whitespace:
+                    // UTF-16BE `00 3C 00 3F 00 78` shares bytes `3C 00 3F 00 78` with UTF-16LE shifted by 1 byte,
+                    // so disambiguate using 2-byte code-unit alignment relative to `start`.
+                    let canBeLE = pos + 3 < end && base[pos + 1] == 0x00 && (base[pos + 2] == 0x3F || base[pos + 2] == 0x70 || base[pos + 2] == 0x21) && base[pos + 3] == 0x00
+                    let canBeBE = pos > start && base[pos - 1] == 0x00 && pos + 2 < end && base[pos + 1] == 0x00 && (base[pos + 2] == 0x3F || base[pos + 2] == 0x70 || base[pos + 2] == 0x21)
+                    if canBeBE && (((pos - 1 - start) & 1) == 0 || !canBeLE) {
+                        let rem = end - (pos - 1)
+                        guard consumeStructuralScanBudget(rem, sectionSize: count) else { return (.none, start) }
+                        return (containsUTF16XMLPlistStructure(base, from: pos - 1, to: end, littleEndian: false) ? .xmlOrBplist : .none, pos - 1)
                     }
-                    if let dict = try? CSBlobParser.shared.parseXMLPlist(rawPlist), !dict.isEmpty {
-                        return dict
+                    if canBeLE {
+                        let rem = end - pos
+                        guard consumeStructuralScanBudget(rem, sectionSize: count) else { return (.none, start) }
+                        return (containsUTF16XMLPlistStructure(base, from: pos, to: end, littleEndian: true) ? .xmlOrBplist : .none, pos)
+                    }
+                    let isXMLStart = hasASCIIRun(base, at: pos, end: end, "<?xml")
+                        || hasASCIIRun(base, at: pos, end: end, "<plist")
+                        || hasCaseInsensitiveASCIIRun(base, at: pos, end: end, "<!doctype")
+                        || hasASCIIRun(base, at: pos, end: end, "<!--")
+                    guard isXMLStart else { return (.none, start) }
+                    let rem = end - pos
+                    guard consumeStructuralScanBudget(rem, sectionSize: count) else { return (.none, start) }
+                    return (containsASCIIXMLPlistStructure(base, from: pos, to: end) ? .xmlOrBplist : .none, pos)
+                }
+                return (.none, start)
+            }
+            return (.none, start)
+        }
+
+        return sliceData.withUnsafeBytes { raw -> [String: Any]? in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
+            let sliceCount = raw.count
+
+            for seg in segments {
+                for sect in seg.sections where sect.sectionName == "__info_plist" && sect.size > 0 {
+                    sectionChecks += 1
+                    if sectionChecks > maxSectionChecks {
+                        return emptyPlistFallback
+                    }
+                    if smallFailedAttempts >= maxSmallFailedAttempts
+                        && mediumFailedAttempts >= maxMediumFailedAttempts
+                        && largeFailedAttempts >= maxLargeFailedAttempts
+                        && openStepFailedAttempts >= maxOpenStepFailedAttempts {
+                        return emptyPlistFallback
+                    }
+                    guard let start = Int(exactly: sect.offset),
+                          let sizeInt = Int(exactly: sect.size),
+                          sizeInt <= 8 * 1024 * 1024,
+                          start >= 0, sizeInt > 0,
+                          start <= sliceCount,
+                          sizeInt <= sliceCount - start else {
+                        continue
+                    }
+                    let sectRange = start..<(start + sizeInt)
+                    var candidateSlices: [Range<Int>] = []
+                    if let er = encRange {
+                        if er.lowerBound <= sectRange.lowerBound && er.upperBound >= sectRange.upperBound {
+                            continue
+                        }
+                        if sectRange.lowerBound < er.lowerBound {
+                            candidateSlices.append(sectRange.lowerBound..<min(sectRange.upperBound, er.lowerBound))
+                        }
+                        if er.upperBound < sectRange.upperBound {
+                            candidateSlices.append(max(sectRange.lowerBound, er.upperBound)..<sectRange.upperBound)
+                        }
+                    } else {
+                        candidateSlices.append(sectRange)
+                    }
+
+                    for r in candidateSlices where !r.isEmpty {
+                        guard seenPlistSlices.insert(PlistSliceKey(lower: r.lowerBound, upper: r.upperBound)).inserted else {
+                            continue
+                        }
+                        guard r.lowerBound >= 0, r.upperBound <= sliceCount else { continue }
+                        let (candidateKind, contentStart) = looksLikeValidCandidatePlist(base, range: r)
+                        guard candidateKind != .none, contentStart >= r.lowerBound, contentStart < r.upperBound else { continue }
+
+                        let rawPlist = Data(bytes: base.advanced(by: contentStart), count: r.upperBound - contentStart)
+                        if let dict = try? CSBlobParser.shared.parseXMLPlist(rawPlist) {
+                            if !dict.isEmpty {
+                                return dict
+                            }
+                            if emptyPlistFallback == nil {
+                                emptyPlistFallback = dict
+                            }
+                        } else if candidateKind == .openStep {
+                            recordFailedOpenStepParse(sectionSize: r.count)
+                        } else {
+                            recordFailedParse(sectionSize: r.count)
+                        }
                     }
                 }
             }
+            return emptyPlistFallback
         }
-        return nil
     }
 
     private static let excludedCustomRXSectionPrefixes: [String] = [
@@ -872,36 +2691,80 @@ public struct MachOFile: Sendable {
         var totalCount = 0
         var sampleSites: [DirectSyscallSite] = []
         var recordedOffsets: Set<Int> = []
+        var scannedByPhase = [[(Int, Int)]](repeating: [], count: 4)
         let headerSize = is64Bit ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
         let commandsEnd = min(sliceData.count, headerSize + Int(sizeofcmds))
 
         func scanWordRange(start: Int, sizeInt: Int, segName: String, sectName: String, baseVA: UInt64) {
             guard sizeInt >= 4 else { return }
-            for relOff in stride(from: 0, through: sizeInt - 4, by: 4) {
-                let wordOffset = start + relOff
-                if let er = encRange {
-                    let wordRange = wordOffset..<(wordOffset + 4)
-                    if wordRange.overlaps(er) {
+            let alignedLen = sizeInt & ~3
+            guard alignedLen >= 4 else { return }
+            let end = start + alignedLen
+            let phase = start & 3
+
+            var fragments: [(Int, Int)] = [(start, end)]
+            for (exStart, exEnd) in scannedByPhase[phase] {
+                var nextFragments: [(Int, Int)] = []
+                nextFragments.reserveCapacity(fragments.count)
+                for (fStart, fEnd) in fragments {
+                    if exEnd <= fStart || exStart >= fEnd {
+                        nextFragments.append((fStart, fEnd))
+                    } else {
+                        if fStart < exStart {
+                            nextFragments.append((fStart, exStart))
+                        }
+                        if exEnd < fEnd {
+                            nextFragments.append((exEnd, fEnd))
+                        }
+                    }
+                }
+                fragments = nextFragments
+                if fragments.isEmpty { return }
+            }
+
+            for (fragStart, fragEnd) in fragments {
+                scannedByPhase[phase].append((fragStart, fragEnd))
+                let fragLen = fragEnd - fragStart
+                let fragBaseVA = baseVA &+ UInt64(fragStart - start)
+                for relOff in stride(from: 0, through: fragLen - 4, by: 4) {
+                    let wordOffset = fragStart + relOff
+                    if let er = encRange {
+                        let wordRange = wordOffset..<(wordOffset + 4)
+                        if wordRange.overlaps(er) {
+                            continue
+                        }
+                    }
+
+                    guard let insn = reader.readUInt32(at: wordOffset, swapped: isSwapped) else {
                         continue
                     }
-                }
 
-                guard let insn = reader.readUInt32(at: wordOffset, swapped: isSwapped) else {
-                    continue
-                }
-
-                if insn == 0xD400_1001, recordedOffsets.insert(wordOffset).inserted {
-                    totalCount += 1
-                    if sampleSites.count < sampleLimit {
-                        sampleSites.append(DirectSyscallSite(
-                            segmentName: segName,
-                            sectionName: sectName,
-                            fileOffset: wordOffset,
-                            virtualAddress: baseVA &+ UInt64(relOff),
-                            immediate: 0x0080
-                        ))
+                    if insn == 0xD400_1001, recordedOffsets.insert(wordOffset).inserted {
+                        totalCount += 1
+                        if sampleSites.count < sampleLimit {
+                            sampleSites.append(DirectSyscallSite(
+                                segmentName: segName,
+                                sectionName: sectName,
+                                fileOffset: wordOffset,
+                                virtualAddress: fragBaseVA &+ UInt64(relOff),
+                                immediate: 0x0080
+                            ))
+                        }
                     }
                 }
+            }
+
+            if scannedByPhase[phase].count > 32 {
+                scannedByPhase[phase].sort { $0.0 < $1.0 }
+                var merged: [(Int, Int)] = []
+                for iv in scannedByPhase[phase] {
+                    if let last = merged.last, iv.0 <= last.1 {
+                        merged[merged.count - 1].1 = max(last.1, iv.1)
+                    } else {
+                        merged.append(iv)
+                    }
+                }
+                scannedByPhase[phase] = merged
             }
         }
 
@@ -970,11 +2833,23 @@ public struct MachOFile: Sendable {
                     }
                     guard sect.size > 0, UInt64(sect.offset) < UInt64(segEnd) else { continue }
                     let (rawCEnd, cOv) = UInt64(sect.offset).addingReportingOverflow(sect.size)
-                    let clampedCEnd = cOv ? UInt64(segEnd) : min(rawCEnd, UInt64(segEnd))
-                    let cStart = max(segStart, Int(sect.offset))
-                    let cEnd = Int(clampedCEnd)
-                    if cEnd > cStart {
+                    let isMetadataSection = !Self.shouldScanSectionForDirectSyscalls(sect, in: seg, sliceSize: sliceData.count)
+                    if isMetadataSection {
+                        // Reject out-of-bounds fake metadata section headers so they cannot blind gap scanning
+                        guard !cOv,
+                              UInt64(sect.offset) >= UInt64(segStart),
+                              rawCEnd <= UInt64(segEnd),
+                              let cStart = Int(exactly: sect.offset),
+                              let cEnd = Int(exactly: rawCEnd),
+                              cEnd > cStart else { continue }
                         covered.append((cStart, cEnd))
+                    } else {
+                        let clampedCEnd = cOv ? UInt64(segEnd) : min(rawCEnd, UInt64(segEnd))
+                        let cStart = max(segStart, Int(sect.offset))
+                        let cEnd = Int(clampedCEnd)
+                        if cEnd > cStart {
+                            covered.append((cStart, cEnd))
+                        }
                     }
                 }
                 covered.sort { $0.0 < $1.0 }
@@ -1095,7 +2970,34 @@ public final class MachOParser: Sendable {
 
             var parsedFiles: [MachOFile] = []
             var firstError: Error?
+            struct SliceDedupKey: Hashable {
+                let cpuType: cpu_type_t
+                let cpuSubtype: cpu_subtype_t
+                let offset: UInt64
+                let size: UInt64
+            }
+            struct ByteSpanKey: Hashable {
+                let offset: UInt64
+                let size: UInt64
+            }
+            var seenSliceKeys: Set<SliceDedupKey> = []
+            var spanReuseCounts: [ByteSpanKey: Int] = [:]
+            var offsetReuseCounts: [UInt64: Int] = [:]
+            var totalDecodedSliceBytes: UInt64 = 0
+            let maxParsedSlices = 16
+            let maxTotalDecodedBytes = UInt64(min(256 * 1024 * 1024, max(data.count * 4, 16 * 1024 * 1024)))
             for slice in slices {
+                if parsedFiles.count >= maxParsedSlices { break }
+                let dedupKey = SliceDedupKey(
+                    cpuType: slice.cpuType,
+                    cpuSubtype: slice.cpuSubtype,
+                    offset: slice.offset,
+                    size: slice.size
+                )
+                guard seenSliceKeys.insert(dedupKey).inserted else { continue }
+                let spanKey = ByteSpanKey(offset: slice.offset, size: slice.size)
+                let reuseCount = spanReuseCounts[spanKey, default: 0]
+                if reuseCount >= 4 || offsetReuseCounts[slice.offset, default: 0] >= 4 { continue }
                 guard slice.offset <= UInt64(data.count),
                       slice.size <= UInt64(data.count) - slice.offset else {
                     if firstError == nil {
@@ -1103,14 +3005,69 @@ public final class MachOParser: Sendable {
                     }
                     continue
                 }
-                let sliceSubdata = data.subdata(in: Int(slice.offset)..<Int(slice.offset + slice.size))
-                do {
-                    let file = try parseThinSlice(sliceData: sliceSubdata, containerSlices: slices)
-                    guard file.cpuType == slice.cpuType else {
-                        throw MachOParserError.corruptedFatHeader(
-                            reason: "FAT slice cpuType (\(slice.cpuType)) disagrees with thin Mach-O header cpuType (\(file.cpuType))"
+                guard let startInt = Int(exactly: slice.offset),
+                      let endInt = Int(exactly: slice.offset + slice.size) else {
+                    continue
+                }
+                if slice.size < 28 {
+                    if firstError == nil {
+                        firstError = MachOParserError.truncatedHeader(expected: 28, actual: Int(slice.size))
+                    }
+                    continue
+                }
+                guard let sliceMagic = reader.readUInt32(at: startInt) else {
+                    if firstError == nil {
+                        firstError = MachOParserError.truncatedHeader(expected: 28, actual: Int(slice.size))
+                    }
+                    continue
+                }
+                let sliceIs64: Bool
+                let sliceSwapped: Bool
+                switch sliceMagic {
+                case MH_MAGIC_64:
+                    sliceIs64 = true
+                    sliceSwapped = false
+                case MH_CIGAM_64:
+                    sliceIs64 = true
+                    sliceSwapped = true
+                case MH_MAGIC:
+                    sliceIs64 = false
+                    sliceSwapped = false
+                case MH_CIGAM:
+                    sliceIs64 = false
+                    sliceSwapped = true
+                default:
+                    if firstError == nil {
+                        firstError = MachOParserError.invalidMagic(sliceMagic)
+                    }
+                    continue
+                }
+                let sliceHeaderSize = sliceIs64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+                guard Int(slice.size) >= sliceHeaderSize,
+                      let thinCpuType = reader.readInt32(at: startInt + 4, swapped: sliceSwapped) else {
+                    if firstError == nil {
+                        firstError = MachOParserError.truncatedHeader(expected: sliceHeaderSize, actual: Int(slice.size))
+                    }
+                    continue
+                }
+                guard thinCpuType == slice.cpuType else {
+                    if firstError == nil {
+                        firstError = MachOParserError.corruptedFatHeader(
+                            reason: "FAT slice cpuType (\(slice.cpuType)) disagrees with thin Mach-O header cpuType (\(thinCpuType))"
                         )
                     }
+                    continue
+                }
+                let (nextTotal, totalOv) = totalDecodedSliceBytes.addingReportingOverflow(slice.size)
+                if totalOv || (totalDecodedSliceBytes > 0 && nextTotal > maxTotalDecodedBytes) {
+                    break
+                }
+                spanReuseCounts[spanKey] = reuseCount + 1
+                offsetReuseCounts[slice.offset, default: 0] += 1
+                totalDecodedSliceBytes = nextTotal
+                let sliceSubdata = data.subdata(in: startInt..<endInt)
+                do {
+                    let file = try parseThinSlice(sliceData: sliceSubdata, containerSlices: slices)
                     parsedFiles.append(file)
                 } catch {
                     if firstError == nil { firstError = error }
@@ -1410,10 +3367,19 @@ public final class MachOParser: Sendable {
         var encryptionInfos: [MachOEncryptionInfo] = []
         var linkedDylibs: [MachODylib] = []
         var symtabs: [MachOSymtab] = []
+        var seenSymtabs: Set<MachOSymtab> = []
+        var totalSymtabEntries: UInt64 = 0
         var codeSignatures: [MachOCodeSignature] = []
         var dynamicImportSymbols: [String] = []
         var dynamicSymSet: Set<String> = []
+        struct DyldBindKey: Hashable { let offset: Int; let size: Int; let isLazy: Bool }
         var deferredDyldBinds: [(offset: Int, size: Int, isLazy: Bool)] = []
+        var seenDyldBinds: Set<DyldBindKey> = []
+        struct ChainedFixupKey: Hashable { let offset: UInt32; let size: UInt32 }
+        var seenChainedFixups: Set<ChainedFixupKey> = []
+        var chainedFixupsCommandCount = 0
+        var remainingChainedZlibBytes = 32 * 1024 * 1024
+        var remainingChainedImportsBudget = 262_144
         var lcMainEntryOffsets: [UInt64] = []
         var unixThreadEntryVAs: [UInt64] = []
 
@@ -1633,7 +3599,11 @@ public final class MachOParser: Sendable {
                     throw MachOParserError.stringTableOutOfBounds(offset: stroff, size: strsize, total: reader.count)
                 }
 
-                symtabs.append(MachOSymtab(symoff: symoff, nsyms: nsyms, stroff: stroff, strsize: strsize))
+                let st = MachOSymtab(symoff: symoff, nsyms: nsyms, stroff: stroff, strsize: strsize)
+                if seenSymtabs.insert(st).inserted, symtabs.count < 8, totalSymtabEntries < 500_000 {
+                    symtabs.append(st)
+                    totalSymtabEntries = totalSymtabEntries &+ UInt64(nsyms)
+                }
 
             case UInt32(LC_CODE_SIGNATURE):
                 guard cmdsize >= MemoryLayout<linkedit_data_command>.size else {
@@ -1653,8 +3623,23 @@ public final class MachOParser: Sendable {
                    let dataoff = reader.readUInt32(at: cmdStart + 8, swapped: isSwapped),
                    let datasize = reader.readUInt32(at: cmdStart + 12, swapped: isSwapped),
                    datasize >= 28,
-                   UInt64(dataoff) + UInt64(datasize) <= UInt64(reader.count) {
-                    let syms = Self.parseChainedFixupImports(reader: reader, dataoff: Int(dataoff), datasize: Int(datasize), isSwapped: isSwapped)
+                   UInt64(dataoff) + UInt64(datasize) <= UInt64(reader.count),
+                   let dataoffInt = Int(exactly: dataoff),
+                   let datasizeInt = Int(exactly: datasize),
+                   seenChainedFixups.insert(ChainedFixupKey(offset: dataoff, size: datasize)).inserted,
+                   chainedFixupsCommandCount < 8,
+                   remainingChainedImportsBudget > 0 {
+                    chainedFixupsCommandCount += 1
+                    let (syms, zlibBytesUsed, entriesConsumed) = Self.parseChainedFixupImports(
+                        reader: reader,
+                        dataoff: dataoffInt,
+                        datasize: datasizeInt,
+                        isSwapped: isSwapped,
+                        maxImportsBudget: remainingChainedImportsBudget,
+                        maxZlibOutputBytes: min(16 * 1024 * 1024, remainingChainedZlibBytes)
+                    )
+                    remainingChainedZlibBytes = max(0, remainingChainedZlibBytes - zlibBytesUsed)
+                    remainingChainedImportsBudget = max(0, remainingChainedImportsBudget - entriesConsumed)
                     for s in syms where dynamicSymSet.insert(s).inserted {
                         dynamicImportSymbols.append(s)
                     }
@@ -1668,7 +3653,12 @@ public final class MachOParser: Sendable {
                         (reader.readUInt32(at: cmdStart + 32, swapped: isSwapped) ?? 0, reader.readUInt32(at: cmdStart + 36, swapped: isSwapped) ?? 0, true)   // lazy_bind (random-access)
                     ]
                     for (off, sz, isLazy) in bindRanges where sz > 0 && UInt64(off) + UInt64(sz) <= UInt64(reader.count) {
-                        deferredDyldBinds.append((offset: Int(off), size: Int(sz), isLazy: isLazy))
+                        if let offInt = Int(exactly: off),
+                           let szInt = Int(exactly: sz),
+                           seenDyldBinds.insert(DyldBindKey(offset: offInt, size: szInt, isLazy: isLazy)).inserted,
+                           deferredDyldBinds.count < 24 {
+                            deferredDyldBinds.append((offset: offInt, size: szInt, isLazy: isLazy))
+                        }
                     }
                 }
 
@@ -1806,20 +3796,24 @@ public final class MachOParser: Sendable {
         reader: BinaryReader,
         dataoff: Int,
         datasize: Int,
-        isSwapped: Bool
-    ) -> [String] {
-        guard datasize >= 28, reader.inRange(offset: dataoff, length: datasize) else { return [] }
+        isSwapped: Bool,
+        maxImportsBudget: Int = 262_144,
+        maxZlibOutputBytes: Int = 16 * 1024 * 1024
+    ) -> (symbols: [String], zlibOutputBytesUsed: Int, entriesConsumed: Int) {
+        guard datasize >= 28, reader.inRange(offset: dataoff, length: datasize) else { return ([], 0, 0) }
         guard let importsOffset = reader.readUInt32(at: dataoff + 8, swapped: isSwapped),
               let symbolsOffset = reader.readUInt32(at: dataoff + 12, swapped: isSwapped),
               let importsCount = reader.readUInt32(at: dataoff + 16, swapped: isSwapped),
               let importsFormat = reader.readUInt32(at: dataoff + 20, swapped: isSwapped),
               let symbolsFormat = reader.readUInt32(at: dataoff + 24, swapped: isSwapped) else {
-            return []
+            return ([], 0, 0)
         }
 
         guard UInt64(importsOffset) < UInt64(datasize),
-              UInt64(symbolsOffset) < UInt64(datasize) else {
-            return []
+              UInt64(symbolsOffset) < UInt64(datasize),
+              let importsOffsetInt = Int(exactly: importsOffset),
+              let symbolsOffsetInt = Int(exactly: symbolsOffset) else {
+            return ([], 0, 0)
         }
 
         let entryStride: Int
@@ -1827,39 +3821,42 @@ public final class MachOParser: Sendable {
         case 1: entryStride = 4   // DYLD_CHAINED_IMPORT
         case 2: entryStride = 8   // DYLD_CHAINED_IMPORT_ADDEND
         case 3: entryStride = 16  // DYLD_CHAINED_IMPORT_ADDEND64
-        default: return []
+        default: return ([], 0, 0)
         }
 
-        let cappedCount = Int(min(importsCount, 262_144))
-        guard cappedCount > 0 else { return [] }
+        let cappedCount = min(Int(importsCount), maxImportsBudget)
+        guard cappedCount > 0 else { return ([], 0, 0) }
         let importsEndBound: Int
-        if symbolsOffset > importsOffset && (Int(symbolsOffset) - Int(importsOffset)) >= entryStride {
-            importsEndBound = Int(symbolsOffset)
+        if symbolsOffsetInt > importsOffsetInt && (symbolsOffsetInt - importsOffsetInt) >= entryStride {
+            importsEndBound = symbolsOffsetInt
         } else {
             importsEndBound = datasize
         }
-        let maxReadableEntries = (importsEndBound - Int(importsOffset)) / entryStride
+        let maxReadableEntries = (importsEndBound - importsOffsetInt) / entryStride
         let availableCount = min(cappedCount, maxReadableEntries)
-        guard availableCount > 0 else { return [] }
+        guard availableCount > 0 else { return ([], 0, 0) }
 
-        let symPoolStart = dataoff + Int(symbolsOffset)
-        let symPoolSize = datasize - Int(symbolsOffset)
+        let symPoolStart = dataoff + symbolsOffsetInt
+        let symPoolSize = datasize - symbolsOffsetInt
         let symbolsPool: Data
+        var zlibUsed = 0
         if symbolsFormat == 0 {
-            guard let sub = reader.subdata(offset: symPoolStart, length: symPoolSize) else { return [] }
+            guard let sub = reader.subdata(offset: symPoolStart, length: symPoolSize) else { return ([], 0, 0) }
             symbolsPool = sub
         } else if symbolsFormat == 1 {
-            guard let comp = reader.subdata(offset: symPoolStart, length: symPoolSize),
-                  let inflated = inflateZlibBounded(comp, maxOutputBytes: 16 * 1024 * 1024) else {
-                return []
+            guard maxZlibOutputBytes > 0,
+                  let comp = reader.subdata(offset: symPoolStart, length: symPoolSize),
+                  let inflated = inflateZlibBounded(comp, maxOutputBytes: maxZlibOutputBytes) else {
+                return ([], 0, 0)
             }
             symbolsPool = inflated
+            zlibUsed = inflated.count
         } else {
-            return []
+            return ([], 0, 0)
         }
 
         let symReader = BinaryReader(data: symbolsPool)
-        let importsBase = dataoff + Int(importsOffset)
+        let importsBase = dataoff + importsOffsetInt
         var results: [String] = []
         results.reserveCapacity(min(availableCount, 4096))
 
@@ -1879,7 +3876,7 @@ public final class MachOParser: Sendable {
                 results.append(sym)
             }
         }
-        return results
+        return (results, zlibUsed, availableCount)
     }
 
     private static func inflateZlibBounded(_ compressed: Data, maxOutputBytes: Int) -> Data? {
@@ -1941,6 +3938,7 @@ public final class MachOParser: Sendable {
                     continue
                 }
                 if cpuType == CPU_TYPE_ARM64 || cpuType == CPU_TYPE_ARM64_32 {
+                    guard sizeInt >= 12 else { continue }
                     var pos = start
                     let limit = start + sizeInt - 12
                     while pos <= limit && offsets.count < 16_384 {
@@ -2146,88 +4144,151 @@ public final class MachOParser: Sendable {
                     b >= 0x21 && b <= 0x7E
                 }
 
+                // 2-bit memo per byte in [0, end): 0 = unvisited, 1 = false, 2 = true
+                var memo = [UInt64](repeating: 0, count: (end + 31) >> 5)
+                var trace: [Int] = []
+                trace.reserveCapacity(64)
+
+                @inline(__always)
+                func getMemo(_ idx: Int) -> UInt64 {
+                    (memo[idx >> 5] >> ((idx & 31) << 1)) & 0x3
+                }
+
+                @inline(__always)
+                func setMemo(_ idx: Int, _ val: UInt64) {
+                    let wordIdx = idx >> 5
+                    let shift = (idx & 31) << 1
+                    memo[wordIdx] = (memo[wordIdx] & ~(UInt64(0x3) << shift)) | (val << shift)
+                }
+
                 func reachesDoBind(from tailStart: Int) -> Bool {
+                    guard tailStart >= 0, tailStart < end else { return false }
+                    let cached = getMemo(tailStart)
+                    if cached != 0 { return cached == 2 }
+
+                    trace.removeAll(keepingCapacity: true)
                     var cur = tailStart
-                    var steps = 0
-                    while cur < end && steps < 4096 {
-                        steps += 1
+                    var outcome = false
+                    while cur < end {
+                        let cMemo = getMemo(cur)
+                        if cMemo != 0 {
+                            outcome = (cMemo == 2)
+                            break
+                        }
+                        trace.append(cur)
                         let opByte = base[cur]
                         cur += 1
                         let op = opByte & 0xF0
                         let im = opByte & 0x0F
                         switch op {
                         case 0x90: // BIND_OPCODE_DO_BIND
-                            return true
+                            outcome = true
+                            cur = end
                         case 0xA0, 0xB0: // DO_BIND_ADD_ADDR_*
-                            if op == 0xA0 && !skipLEB128(at: &cur) { return false }
-                            return true
+                            if op == 0xA0 && !skipLEB128(at: &cur) {
+                                outcome = false
+                            } else {
+                                outcome = true
+                            }
+                            cur = end
                         case 0xC0: // DO_BIND_ULEB_TIMES_SKIPPING_ULEB
-                            if !skipLEB128(at: &cur) || !skipLEB128(at: &cur) { return false }
-                            return true
+                            if !skipLEB128(at: &cur) || !skipLEB128(at: &cur) {
+                                outcome = false
+                            } else {
+                                outcome = true
+                            }
+                            cur = end
                         case 0x00: // BIND_OPCODE_DONE before DO_BIND
-                            return false
+                            outcome = false
+                            cur = end
                         case 0x10, 0x30, 0x50:
                             continue
                         case 0x20, 0x60, 0x70, 0x80:
-                            if !skipLEB128(at: &cur) { return false }
+                            if !skipLEB128(at: &cur) {
+                                outcome = false
+                                cur = end
+                            }
                         case 0xD0:
                             if im == 0x00 {
-                                if !skipLEB128(at: &cur) { return false }
+                                if !skipLEB128(at: &cur) {
+                                    outcome = false
+                                    cur = end
+                                }
                             } else if im != 0x01 {
-                                return false
+                                outcome = false
+                                cur = end
                             }
                         case 0x40:
                             while cur < end && base[cur] != 0 { cur += 1 }
-                            guard cur < end else { return false }
-                            cur += 1
-                        default:
-                            return false
-                        }
-                    }
-                    return false
-                }
-
-                var pos = 0
-                while pos + 3 <= end && results.count < 65_536 {
-                    if (base[pos] & 0xF0) == 0x40, isValidSymbolStart(base[pos + 1]) {
-                        var nulPos = pos + 1
-                        var allPrintable = true
-                        while nulPos < end && base[nulPos] != 0 && (nulPos - (pos + 1)) <= 512 {
-                            if !isValidSymbolBody(base[nulPos]) {
-                                allPrintable = false
+                            guard cur < end else {
+                                outcome = false
+                                cur = end
                                 break
                             }
-                            nulPos += 1
+                            cur += 1
+                        default:
+                            outcome = false
+                            cur = end
                         }
-                        let symLen = nulPos - (pos + 1)
-                        if allPrintable, nulPos < end, base[nulPos] == 0, symLen >= 1, symLen <= 512,
-                           reachesDoBind(from: nulPos + 1) {
-                            let s = String(decoding: UnsafeBufferPointer(start: base.advanced(by: pos + 1), count: symLen), as: UTF8.self)
-                            appendSymbol(s)
-                            // Also inspect any interior `0x40..0x4F` opcode immediately followed by `'_'` (`0x5F`) or `'$'` (`0x24`)
-                            // inside `[pos + 1, nulPos - 1)` so a dead `0x40..0x4F` prefix byte (e.g., `[0x72, 0x40, 0x41, "_fsgetpath\0"]`
-                            // where `0x41` is `'A'`) cannot swallow the real `SET_SYMBOL` opcode via `pos = nulPos + 1`.
-                            if nulPos - (pos + 1) >= 2 {
-                                for innerPos in (pos + 1)..<(nulPos - 1) {
-                                    let ib = base[innerPos]
-                                    let nextB = base[innerPos + 1]
-                                    if (ib & 0xF0) == 0x40 && (nextB == 0x5F || nextB == 0x24) {
-                                        let innerLen = nulPos - (innerPos + 1)
-                                        if innerLen >= 1 && innerLen <= 512 {
-                                            let innerSym = String(
-                                                decoding: UnsafeBufferPointer(start: base.advanced(by: innerPos + 1), count: innerLen),
-                                                as: UTF8.self
-                                            )
-                                            appendSymbol(innerSym)
+                    }
+
+                    let mark: UInt64 = outcome ? 2 : 1
+                    for idx in trace {
+                        setMemo(idx, mark)
+                    }
+                    return outcome
+                }
+
+                // O(N) NUL-anchored backward scan
+                var nulPos = 2
+                while nulPos < end && results.count < 65_536 {
+                    if base[nulPos] == 0, reachesDoBind(from: nulPos + 1) {
+                        let minScan = max(0, nulPos - 513)
+                        var runStart = nulPos
+                        while runStart > minScan && isValidSymbolBody(base[runStart - 1]) {
+                            runStart -= 1
+                        }
+                        if nulPos - runStart >= 2 {
+                            var outerOpIdx: Int?
+                            let limitOp = nulPos - 1
+                            for idx in runStart..<limitOp {
+                                if (base[idx] & 0xF0) == 0x40 && isValidSymbolStart(base[idx + 1]) {
+                                    let symLen = nulPos - (idx + 1)
+                                    if symLen >= 1 && symLen <= 512 {
+                                        outerOpIdx = idx
+                                        break
+                                    }
+                                }
+                            }
+                            if let firstOp = outerOpIdx {
+                                let symLen = nulPos - (firstOp + 1)
+                                let s = String(
+                                    decoding: UnsafeBufferPointer(start: base.advanced(by: firstOp + 1), count: symLen),
+                                    as: UTF8.self
+                                )
+                                appendSymbol(s)
+                                // Also inspect any interior `0x40..0x4F` opcode immediately followed by `'_'` (`0x5F`) or `'$'` (`0x24`)
+                                // inside `[firstOp + 1, limitOp)` so a dead `0x40..0x4F` prefix byte cannot swallow the real `SET_SYMBOL`.
+                                if nulPos - (firstOp + 1) >= 2 {
+                                    for innerPos in (firstOp + 1)..<limitOp {
+                                        let ib = base[innerPos]
+                                        let nextB = base[innerPos + 1]
+                                        if (ib & 0xF0) == 0x40 && (nextB == 0x5F || nextB == 0x24) {
+                                            let innerLen = nulPos - (innerPos + 1)
+                                            if innerLen >= 1 && innerLen <= 512 {
+                                                let innerSym = String(
+                                                    decoding: UnsafeBufferPointer(start: base.advanced(by: innerPos + 1), count: innerLen),
+                                                    as: UTF8.self
+                                                )
+                                                appendSymbol(innerSym)
+                                            }
                                         }
                                     }
                                 }
                             }
-                            pos = nulPos + 1
-                            continue
                         }
                     }
-                    pos += 1
+                    nulPos += 1
                 }
             }
         }

@@ -333,11 +333,74 @@ public final class WhitelistEngine: @unchecked Sendable {
         return evaluateFindingWhitelist(finding, runningSelfBundleId: runningSelfBid)
     }
 
+    public static func isNonWhitelistableStructuralSignature(_ sig: String) -> Bool {
+        sig.hasPrefix("SymlinkEscape:")
+            || sig.hasPrefix("MalformedPackage:")
+            || sig.hasPrefix("CorruptMachO:")
+            || sig == "AppexExecutableTraversal"
+            || sig == "CODE_SIGNATURE_SEAL_MISMATCH"
+            || sig == "BUNDLE_ESCAPING_SYMLINK"
+            || sig == "ArchiveSymlinkCollision"
+            || sig == "ArchiveSymlinkQuotaExceeded"
+            || sig.hasPrefix("CONTAINER_")
+            || sig == "SYSTEMGROUP_SUPERVISION_DETECTED"
+            || sig.hasPrefix("CloudConfigurationDetails.")
+            || sig == "AppleSystemAppGroup"
+            || sig.hasPrefix("AppleSystemAppGroup(")
+    }
+
+    private static func isHighRiskImpersonationSignature(_ sig: String) -> Bool {
+        guard sig.hasPrefix("IMPERSONATION:") else { return false }
+        let brandName = String(sig.dropFirst("IMPERSONATION:".count))
+        return ExpandedThreatCatalog.targetBrands.contains(where: { $0.name == brandName })
+            || brandName.contains("Alipay")
+    }
+
+    private static func isNonResearchHighRiskThreatSignature(_ sig: String) -> Bool {
+        if sig == "com.apple.private.security.no-container"
+            || sig == "com.apple.private.security.no-sandbox"
+            || sig == "com.apple.private.security.container-required"
+            || sig == "com.apple.private.MobileContainerManager.allowed"
+            || sig == "com.apple.private.security.storage.AppDataContainers"
+            || sig == "platform-application"
+            || sig == "com.apple.private.tcc.allow"
+            || sig == "com.apple.private.tcc.allow-prompting"
+            || sig == "keychain-access-groups(*)"
+            || sig == "arm64:svc_0x80"
+            || sig.contains(IOCTokenArmor.tPhotoLibFw)
+            || sig.contains(IOCTokenArmor.tAssetsLibFw)
+            || sig == IOCTokenArmor.tPLPhotoLib
+            || sig == "_OBJC_CLASS_$_\(IOCTokenArmor.tPLPhotoLib)"
+            || sig.hasPrefix("-[\(IOCTokenArmor.tPLPhotoLib)")
+            || sig.hasPrefix("+[\(IOCTokenArmor.tPLPhotoLib)")
+            || sig.contains(IOCTokenArmor.tPLPhotoLib)
+            || sig == IOCTokenArmor.tPhotoLibSvc
+            || sig.contains(IOCTokenArmor.tSysPhotoLib)
+            || sig == "com.apple.photos.bourgeoisie" {
+            return true
+        }
+        if sig.hasPrefix("MobileGestaltTamper:")
+            || sig.hasPrefix("BookRestore:")
+            || sig.hasPrefix("CVE-2026-")
+            || sig.hasPrefix("com.apple.private.photos.")
+            || (sig.hasPrefix("UIBackgroundModes(") && sig.hasSuffix("+\(IOCTokenArmor.tUIPasteboard)")) {
+            return true
+        }
+        return isHighRiskImpersonationSignature(sig)
+    }
+
     internal func evaluateFindingWhitelist(
         _ finding: ScanFinding,
         runningSelfBundleId: String
     ) -> (isWhitelisted: Bool, toolName: String?) {
-        guard finding.evidence.escapingSymlinks.isEmpty else {
+        guard finding.evidence.escapingSymlinks.isEmpty,
+              !finding.indicators.contains(where: {
+                  Self.isNonWhitelistableStructuralSignature($0.signature)
+                      || ($0.severity == .highRisk && $0.signature.hasPrefix("IMPERSONATION:"))
+              }),
+              !finding.evidence.matchedSymbols.contains(where: {
+                  Self.isNonWhitelistableStructuralSignature($0) || Self.isHighRiskImpersonationSignature($0)
+              }) else {
             return (false, nil)
         }
 
@@ -378,27 +441,30 @@ public final class WhitelistEngine: @unchecked Sendable {
         // Running iOS host self-whitelist fallback for enterprise/sideload-resigned WQGuard
         let cleanSelfBid = runningSelfBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanRecBid = finding.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanCorrelatedBid = finding.evidence.correlatedPackageBundleId?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasDistinctCorrelatedBid = !cleanCorrelatedBid.isEmpty
+            && cleanCorrelatedBid.caseInsensitiveCompare(cleanRecBid) != .orderedSame
+        let allowSelfFallbackForDepth: Bool
+        switch finding.evidence.auditDepth {
+        case .registryEntitlements:
+            allowSelfFallbackForDepth = true
+        case .fullBinaryAndRegistry:
+            allowSelfFallbackForDepth = finding.evidence.isWhitelistEligible
+        case .onDeviceProbe:
+            allowSelfFallbackForDepth = false
+        }
         if !cleanSelfBid.isEmpty,
-           (finding.evidence.auditDepth == .registryEntitlements || finding.evidence.auditDepth == .fullBinaryAndRegistry),
+           allowSelfFallbackForDepth,
+           !hasDistinctCorrelatedBid,
+           !finding.indicators.contains(where: { $0.severity == .highRisk }),
            (cleanRecBid.caseInsensitiveCompare(cleanSelfBid) == .orderedSame
                || (cleanRecBid.caseInsensitiveCompare("com.wqguard.app") == .orderedSame
                    && finding.displayName.trimmingCharacters(in: .whitespacesAndNewlines) == "WQGuard")),
            let wqTool = tool(named: "WQGuard"), wqTool.isEnabled {
-            if finding.evidence.auditDepth == .registryEntitlements,
-               finding.indicators.contains(where: { $0.severity == .highRisk }) {
-                return (false, nil)
-            }
-            let disallowedTokens = [
-                "metamask", "trustwallet", "phantom", "imtoken", "tokenpocket", "bitkeep",
-                "bitget", "okx", "binance", "coinbase", "bybit", "ledger", "onekey",
-                "telegram", "whatsapp", "alipay", "tencent.xin", "wechat"
-            ]
-            let hasDisallowedGroup = finding.evidence.appGroups.contains { grp in
-                let lg = grp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                if lg.hasPrefix("group.com.apple.") || lg.hasPrefix("systemgroup.com.apple.") {
-                    return true
-                }
-                return disallowedTokens.contains { lg.contains($0) }
+            let hasDisallowedGroup = finding.evidence.appGroups.contains {
+                !PatternMatcher.isStrictIdentifierASCII($0)
+                    || ExpandedThreatCatalog.isProtectedVictimOrAppleSystemAppGroup($0)
             }
             if !hasDisallowedGroup {
                 let allExpected = allSignatures.allSatisfy { sig in
@@ -428,12 +494,9 @@ public final class WhitelistEngine: @unchecked Sendable {
             return (false, nil)
         }
 
-        // Structurally hostile archive/package/Mach-O anomalies can never be downgraded by any whitelist rule
+        // Structurally hostile archive/package/Mach-O anomalies and high-risk impersonation drainers can never be downgraded by any whitelist rule
         if matchedSignatures.contains(where: {
-            $0.hasPrefix("SymlinkEscape:")
-                || $0.hasPrefix("MalformedPackage:")
-                || $0.hasPrefix("CorruptMachO:")
-                || $0 == "AppexExecutableTraversal"
+            Self.isNonWhitelistableStructuralSignature($0) || Self.isHighRiskImpersonationSignature($0)
         }) {
             return (false, nil)
         }
@@ -525,13 +588,21 @@ public final class WhitelistEngine: @unchecked Sendable {
                 return PatternMatcher.matches(pattern: pattern, value: group)
             }
 
+            if !tool.isBuiltIn && appGroups.contains(where: { ExpandedThreatCatalog.isProtectedVictimOrAppleSystemAppGroup($0) }) {
+                continue
+            }
+
             let allCandidateBidsAreApple = requiredBundleIds.allSatisfy {
                 $0.trimmingCharacters(in: PatternMatcher.asciiWhitespace).lowercased().hasPrefix("com.apple.")
             }
             let requiresExplicitAppleGroupPattern = !tool.isBuiltIn || !allCandidateBidsAreApple
             let hasUnauthorizedAppleSystemGroup = requiresExplicitAppleGroupPattern && appGroups.contains { grp in
-                let lowerGrp = grp.trimmingCharacters(in: PatternMatcher.asciiWhitespace).lowercased()
-                guard lowerGrp.hasPrefix("group.com.apple.") || lowerGrp.hasPrefix("systemgroup.com.apple.") else {
+                let lowerGrp = ExpandedThreatCatalog.foldConfusablesToASCII(grp)
+                    .trimmingCharacters(in: PatternMatcher.asciiWhitespace)
+                    .lowercased()
+                guard lowerGrp.hasPrefix("group.com.apple.")
+                    || lowerGrp.hasPrefix("systemgroup.com.apple.")
+                    || InstalledAppRegistryScanner.isAppleOwnedAppGroup(lowerGrp) else {
                     return false
                 }
                 return !concreteGroupPatterns.contains { pattern in matchesGroupPattern(pattern, grp) }
@@ -561,7 +632,11 @@ public final class WhitelistEngine: @unchecked Sendable {
             }
 
             // 4. Matched signatures subset check (prevents Trojanized builds carrying unexpected exploit primitives from spoofing a whitelist rule)
-            if !tool.expectedSignatures.isEmpty && !matchedSignatures.isEmpty {
+            if tool.expectedSignatures.isEmpty {
+                if matchedSignatures.contains(where: Self.isNonResearchHighRiskThreatSignature) {
+                    continue
+                }
+            } else if !matchedSignatures.isEmpty {
                 let allExpected = matchedSignatures.allSatisfy { sig in
                     let cleanSig = sig.hasPrefix("_") ? String(sig.dropFirst()) : sig
                     return tool.expectedSignatures.contains { pattern in

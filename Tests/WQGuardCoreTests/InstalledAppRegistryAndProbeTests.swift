@@ -491,20 +491,32 @@ final class InstalledAppRegistryAndProbeTests: XCTestCase {
         let records = try InstalledAppRegistryScanner.shared.parseSnapshotData(jsonData)
         XCTAssertEqual(records.count, 3)
 
-        // 1. When `includeAppStoreApps: false`, TestFlight apps are trusted official builds and excluded
+        // 1. When `includeAppStoreApps: false`, official TestFlight apps (`Surge`, `APTV`) are trusted and excluded,
+        //    while third-party `"Apple Distribution:"` + `ProfileValidated` + `beta-reports-active` (`DistBeta`)
+        //    must NOT spoof `.testFlight` offline and is surfaced as `.enterpriseInHouse`.
         let sideloadOnly = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: false)
-        XCTAssertTrue(sideloadOnly.isEmpty, "TestFlight apps Surge and APTV must not be treated as Enterprise/Sideloaded")
+        XCTAssertEqual(sideloadOnly.count, 1)
+        XCTAssertEqual(sideloadOnly.first?.bundleId, "com.example.distbeta")
+        XCTAssertEqual(sideloadOnly.first?.installChannel, .enterpriseInHouse)
+        XCTAssertEqual(sideloadOnly.first?.riskTier, .caution)
 
-        // 2. When `includeAppStoreApps: true`, all are classified as `.testFlight` + `.safe` with FairPlay DRM
+        // 2. When `includeAppStoreApps: true`, `Surge` and `APTV` are `.testFlight` + `.safe` with FairPlay DRM,
+        //    whereas `DistBeta` remains `.enterpriseInHouse` (not `.testFlight`).
         let allFindings = InstalledAppRegistryScanner.shared.evaluateRecords(records, includeAppStoreApps: true)
         XCTAssertEqual(allFindings.count, 3)
-        for finding in allFindings {
+        for tfId in ["com.nssurge.inc.surge-ios", "com.kimen.aptvpro"] {
+            let finding = try XCTUnwrap(allFindings.first { $0.bundleId == tfId })
             XCTAssertEqual(finding.installChannel, .testFlight, "\(finding.displayName) must be .testFlight, not .enterpriseInHouse")
             XCTAssertEqual(finding.riskTier, .safe, "\(finding.displayName) must be .safe, not .caution")
             XCTAssertTrue(finding.evidence.isFairPlayEncrypted)
             XCTAssertEqual(finding.evidence.cryptid, 1)
             XCTAssertTrue(finding.indicators.isEmpty)
         }
+        let distBeta = try XCTUnwrap(allFindings.first { $0.bundleId == "com.example.distbeta" })
+        XCTAssertEqual(distBeta.installChannel, .enterpriseInHouse)
+        XCTAssertFalse(distBeta.evidence.isFairPlayEncrypted)
+        XCTAssertEqual(distBeta.evidence.cryptid, 0)
+        XCTAssertEqual(distBeta.riskTier, .caution)
     }
 
     func testSSVSystemAppsWithPrivateEntitlementsAndNilSignerExcluded_WhileTrollStoreAndJailbreakSpoofsCaught() throws {

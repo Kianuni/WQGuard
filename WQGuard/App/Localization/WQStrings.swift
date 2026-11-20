@@ -166,7 +166,52 @@ public enum WQStrings {
     public static var addToWhitelistButton: String { localized("add_to_whitelist_button", en: "Add App to Trusted Whitelist", zh: "将此应用加入信任白名单") }
     public static var whitelistAddedTitle: String { localized("whitelist_added_title", en: "Added to Whitelist", zh: "已加入白名单") }
     public static func whitelistAddedMessage(appName: String) -> String {
-        return localized("whitelist_added_message", en: "App \"\(appName)\" has been added to local rules. Risk tier adjusted to Known Tool.", zh: "应用「\(appName)」已添加至本地规则，风险等级已调整为已知工具。")
+        let format = localized("whitelist_added_message", en: "App \"%@\" has been added to local rules. Risk tier adjusted to Known Tool.", zh: "应用「%@」已添加至本地规则，风险等级已调整为已知工具。")
+        return String(format: format, appName)
+    }
+    public static var whitelistRejectedTitle: String {
+        localized("whitelist_rejected_title", en: "Unable to Whitelist", zh: "无法加入白名单")
+    }
+    public static var whitelistRejectedFallback: String {
+        localized("whitelist_rejected_fallback", en: "This finding does not satisfy strict whitelist eligibility requirements.", zh: "该审计结果不满足严格白名单准入条件，已被安全策略拦截。")
+    }
+    public static var whitelistInvalidBundleId: String {
+        localized("whitelist_invalid_bundle_id", en: "Bundle ID must be a concrete ASCII identifier (wildcards require trailing .* after at least two domain labels, e.g. com.example.tool.*).", zh: "Bundle ID 必须为有效的 ASCII 标识符（通配符仅支持至少两级域名后的 .* 后缀，如 com.example.tool.*）。")
+    }
+    public static var whitelistReservedAppleBundleId: String {
+        localized("whitelist_reserved_apple_bundle_id", en: "Reserved Apple bundle identifiers (com.apple.*) cannot be added as custom whitelist rules.", zh: "禁止将苹果系统保留标识符 (com.apple.*) 添加为自定义白名单规则。")
+    }
+    public static var whitelistInvalidRuleName: String {
+        localized("whitelist_invalid_rule_name", en: "Rule name contains invalid control characters.", zh: "规则名称包含非法控制字符。")
+    }
+    public static func whitelistDuplicateRuleName(_ name: String) -> String {
+        let format = localized("whitelist_duplicate_rule_name", en: "A whitelist rule named \"%@\" already exists (built-in or custom rules cannot be overwritten).", zh: "已存在名为「%@」的白名单规则（不可覆盖内置或已有规则）。")
+        return String(format: format, name)
+    }
+    public static func whitelistInvalidAppGroup(_ group: String) -> String {
+        let format = localized("whitelist_invalid_app_group", en: "Invalid App Group pattern \"%@\". Broad wildcards and non-ASCII characters are rejected.", zh: "App Group 模式「%@」无效，禁止宽泛通配符或非 ASCII 字符。")
+        return String(format: format, group)
+    }
+    public static func whitelistProtectedAppGroup(_ group: String) -> String {
+        let format = localized("whitelist_protected_app_group", en: "App Group \"%@\" belongs to Apple system or protected wallet/messaging containers and cannot be whitelisted.", zh: "App Group「%@」属于苹果系统或受保护钱包/通讯容器，禁止加入白名单。")
+        return String(format: format, group)
+    }
+    public static func whitelistInvalidTeamId(_ teamId: String) -> String {
+        let format = localized("whitelist_invalid_team_id", en: "Team ID \"%@\" must contain alphanumeric characters only (no wildcards).", zh: "Team ID「%@」必须仅包含字母与数字（不支持通配符）。")
+        return String(format: format, teamId)
+    }
+    public static func remediationMatchedWhitelist(_ toolName: String) -> String {
+        let format = localized("remediation_matched_whitelist", en: "Matched trusted whitelist rule (%@).", zh: "匹配已知开源安全研究工具白名单（%@）。")
+        return String(format: format, toolName)
+    }
+    public static var remediationHighRisk: String {
+        localized("remediation_high_risk", en: "High-risk exploit or privilege escalation indicators detected. Uninstall immediately and remove its provisioning profile.", zh: "检测到高危越权或本地利用特征，建议立即卸载并注销描述文件。")
+    }
+    public static var remediationCaution: String {
+        localized("remediation_caution", en: "Application declares shared containers or includes third-party dynamic libraries / supply-chain advisories. Review source before trusting.", zh: "应用声明了共享容器或包含第三方动态库/供应链风险组件，建议复核安装来源。")
+    }
+    public static var remediationSafe: String {
+        localized("remediation_safe", en: "No cross-container sandbox escape or malicious exploit indicators detected; safe.", zh: "未发现跨沙盒越权或恶意利用特征，状态安全。")
     }
 
     // MARK: - Remediation Card View
@@ -187,6 +232,8 @@ public enum WQStrings {
     public static var ipaAnalyzing: String { localized("ipa_analyzing", en: "Performing 4-layer sandbox analysis & Mach-O static binary audit...", zh: "正在进行 4 层沙盒解析与 Mach-O 静态二进制审计...") }
     public static var ipaAnalysisFailed: String { localized("ipa_analysis_failed", en: "IPA Analysis Failed", zh: "IPA 分析失败") }
     public static var preinstallAlertHighRisk: String { localized("preinstall_alert_high_risk", en: "Pre-install Warning: Detected sandbox escape exploit! Do NOT install!", zh: "安装前预警：检测到越界沙盒逃逸特征，切勿安装！") }
+    public static var preinstallAlertCaution: String { localized("preinstall_alert_caution", en: "Pre-install Advisory: App declares shared containers, dylibs, or sideload traits. Review before installing.", zh: "安装前提示：该安装包声明了共享容器、注入动态库或侧载组件特征，建议核验来源后再安装。") }
+    public static var preinstallAlertKnownTool: String { localized("preinstall_alert_known_tool", en: "Pre-install Assessment: Matched trusted self-identity / whitelist rule (Known Tool).", zh: "安装前评估：匹配受信任白名单规则（已知工具）。") }
     public static var preinstallAlertSafe: String { localized("preinstall_alert_safe", en: "Pre-install Assessment: Clean. No exploit signatures detected.", zh: "安装前评估：未发现已知越权利用特征，处于安全状态。") }
 
     public static var ipaDistributionChannel: String { localized("ipa_distribution_channel", en: "Distribution Channel", zh: "分发渠道") }
@@ -348,8 +395,8 @@ public enum WQStrings {
     public static var consentConfirmButton: String { localized("consent_confirm_button", en: "Acknowledge Risks & Enable Full Scan", zh: "确认知悉风险并开启全盘扫描") }
     public static var consentKeepDefaultButton: String { localized("consent_keep_default_button", en: "Cancel (Keep Default IPA Upload Mode)", zh: "取消（保持默认上传 IPA 检测）") }
 
-    public static var settingsBuiltinWhitelist: String { localized("settings_builtin_whitelist", en: "Built-in Research Tools Whitelist", zh: "内置已知研究工具白名单") }
-    public static var settingsBuiltinWhitelistFooter: String { localized("settings_builtin_whitelist_footer", en: "When enabled, apps matching open-source research tools are classified as Known Tools rather than High Risk.", zh: "启用白名单后，匹配开源工具特征的应用将评级为「已知工具提示」而非「高危告警」。") }
+    public static var settingsBuiltinWhitelist: String { localized("settings_builtin_whitelist", en: "Built-in Self-Identity Whitelist", zh: "内置自身身份白名单") }
+    public static var settingsBuiltinWhitelistFooter: String { localized("settings_builtin_whitelist_footer", en: "Only WQGuard's own self-identity rule is built-in (strict zero trust for third-party sideload tools). User-authorized rules are classified as Known Tools.", zh: "默认仅保留 WQGuard 自身身份规则（对第三方侧载工具严格零信任）。用户显式添加白名单的应用将评级为「已知工具提示」。") }
     public static var settingsCustomRules: String { localized("settings_custom_rules", en: "Custom Whitelist Rules", zh: "自定义白名单规则") }
     public static var settingsNoCustomRules: String { localized("settings_no_custom_rules", en: "No custom rules configured", zh: "暂无自定义规则") }
     public static var settingsAddRule: String { localized("settings_add_rule", en: "Add Custom Bundle ID Rule", zh: "添加自定义 Bundle ID 规则") }
@@ -380,11 +427,27 @@ public enum WQStrings {
     }
 
     public static var ruleSheetBundleIdPlaceholder: String {
-        localized("rule_sheet_bundle_id_placeholder", en: "Bundle Identifier (e.g. com.example.tool*)", zh: "Bundle Identifier (例如: com.example.tool*)")
+        localized("rule_sheet_bundle_id_placeholder", en: "Bundle Identifier (e.g. com.example.tool.*)", zh: "Bundle Identifier (例如: com.example.tool.*)")
     }
 
     public static var ruleSheetAppGroupPlaceholder: String {
         localized("rule_sheet_app_group_placeholder", en: "App Group (Optional, e.g. group.com.example)", zh: "App Group (可选，例如: group.com.example)")
+    }
+
+    public static var ruleSheetTeamIdPlaceholder: String {
+        localized("rule_sheet_team_id_placeholder", en: "Team ID (Optional, recommended e.g. 96VJNMX6ZP)", zh: "Team ID (可选，建议填写如 96VJNMX6ZP)")
+    }
+
+    public static var ruleSheetAnyTeamWarning: String {
+        localized("rule_sheet_any_team_warning", en: "Any Team ID (Unpinned)", zh: "不限 Team ID（未绑定签名团队）")
+    }
+
+    public static func ruleSheetTeamSummary(_ teamIds: [String]?) -> String {
+        let clean = (teamIds ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if clean.isEmpty {
+            return ruleSheetAnyTeamWarning
+        }
+        return "Team ID: \(clean.joined(separator: ", "))"
     }
 
     public static var ruleSheetSectionHeader: String {
@@ -392,7 +455,7 @@ public enum WQStrings {
     }
 
     public static var ruleSheetSectionFooter: String {
-        localized("rule_sheet_section_footer", en: "Bundle ID and App Group support wildcard patterns (e.g. com.test.*).", zh: "Bundle ID 与 App Group 支持通配符匹配（如 com.test.*）。")
+        localized("rule_sheet_section_footer", en: "Bundle ID supports exact or trailing .* patterns (e.g. com.example.tool.*); App Group requires exact identifiers. Apple system/protected groups and broad wildcards are rejected.", zh: "Bundle ID 支持精确值或末尾 .* 通配（如 com.example.tool.*）；App Group 仅支持精确标识符。系统保留域名、受保护钱包/通讯组与宽泛通配符将被拒绝。")
     }
 
     public static var ruleSheetNavTitle: String {

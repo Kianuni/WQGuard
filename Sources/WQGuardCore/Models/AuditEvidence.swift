@@ -87,11 +87,11 @@ public struct AuditEvidence: Codable, Sendable, Equatable {
         self.dynamicLoadingPresent = try container.decode(Bool.self, forKey: .dynamicLoadingPresent)
         self.pathEnumerationPresent = try container.decode(Bool.self, forKey: .pathEnumerationPresent)
         self.remediationGuidance = try container.decode(String.self, forKey: .remediationGuidance)
-        self.auditDepth = try container.decodeIfPresent(AuditDepth.self, forKey: .auditDepth) ?? .fullBinaryAndRegistry
+        self.auditDepth = try container.decodeIfPresent(AuditDepth.self, forKey: .auditDepth) ?? .onDeviceProbe
         self.signerIdentity = try container.decodeIfPresent(String.self, forKey: .signerIdentity)
         self.correlatedPackageBundleId = try container.decodeIfPresent(String.self, forKey: .correlatedPackageBundleId)
-        self.isWhitelistEligible = try container.decodeIfPresent(Bool.self, forKey: .isWhitelistEligible) ?? true
-        self.isTeamIdWhitelistVerified = try container.decodeIfPresent(Bool.self, forKey: .isTeamIdWhitelistVerified) ?? true
+        self.isWhitelistEligible = try container.decodeIfPresent(Bool.self, forKey: .isWhitelistEligible) ?? false
+        self.isTeamIdWhitelistVerified = try container.decodeIfPresent(Bool.self, forKey: .isTeamIdWhitelistVerified) ?? false
     }
 
     /// Generates an empty baseline evidence structure

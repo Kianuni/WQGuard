@@ -352,7 +352,7 @@ final class SecurityAuditV121RegressionTests: XCTestCase {
         // 5. Verify both Surge .sgmodule files on disk match valid Surge syntax
         for relPath in ["Shields/Surge/WQGuard-Brotli-Shield.sgmodule", "Surge/WQGuard-Brotli-Shield.sgmodule"] {
             let sg = try String(contentsOf: repoRoot.appendingPathComponent(relPath), encoding: .utf8)
-            XCTAssertTrue(sg.contains("#!version=1.3.4"), "\(relPath) must carry version 1.3.4")
+            XCTAssertTrue(sg.contains("#!version=1.3.5"), "\(relPath) must carry version 1.3.5")
             XCTAssertTrue(sg.contains("script-path=https://raw.githubusercontent.com/Kianuni/WQGuard/main/Shields/scripts/brotli-guard.js"))
             XCTAssertFalse(sg.contains("script-text="), "\(relPath) must not use invalid script-text=")
             XCTAssertTrue(SurgeBrotliShieldHelper.shared.validateModule(content: sg).isCompliant)

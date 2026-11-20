@@ -12,6 +12,8 @@ import MachO
 /// Static Mach-O binary, symbol table, and string scanner (Layer 2 of WQGuard pipeline).
 public final class MachOScanner: @unchecked Sendable {
     public static let shared = MachOScanner()
+
+    private let whitelistEngine: WhitelistEngine
     
     /// Scan context parameters providing application identity and entitlement information.
     public struct ScanContext: Sendable {
@@ -83,7 +85,9 @@ public final class MachOScanner: @unchecked Sendable {
         }
     }
     
-    public init() {}
+    public init(whitelistEngine: WhitelistEngine = .shared) {
+        self.whitelistEngine = whitelistEngine
+    }
     // MARK: - Mach-O Parsing (Delegated to MachOParser)
     
     /// Parses load commands, symbols, Objective-C selectors, and string tables across all slices in raw Mach-O data.
@@ -187,6 +191,10 @@ public final class MachOScanner: @unchecked Sendable {
                     inspectableBuffers.append(masked)
                     sawPartialUnencryptedContent = true
                 }
+            } else {
+                // `cryptid != 0` with `cryptsize == 0` (`encryptedRange == nil`): zero encrypted bytes, so full slice is plaintext.
+                inspectableBuffers.append(f.sliceData)
+                sawPartialUnencryptedContent = true
             }
         }
         
@@ -235,8 +243,8 @@ public final class MachOScanner: @unchecked Sendable {
                 } else {
                     var inSlice = inspectableBuffers.contains { $0.range(of: needle) != nil }
                     if !inSlice && caseInsensitiveFwKeys.contains(target) {
-                        let lowerTarget = target.lowercased()
-                        inSlice = inspectableBuffers.contains { String(decoding: $0, as: UTF8.self).lowercased().contains(lowerTarget) }
+                        let lowerNeedle = Array(target.lowercased().utf8)
+                        inSlice = inspectableBuffers.contains { Self.containsASCIIBytesCaseInsensitive(lowerNeedle, in: $0) }
                     }
                     if inSlice ||
                        (checkRawToo && rawData?.range(of: needle) != nil) ||
@@ -729,8 +737,8 @@ public final class MachOScanner: @unchecked Sendable {
         var whitelistedToolName: String? = nil
         var finalRisk = provisionalRisk
         
-        if provisionalRisk == .highRisk || provisionalRisk == .caution {
-            let whitelistResult = WhitelistEngine.shared.isWhitelisted(
+        if !hasCorruptedSlices && (provisionalRisk == .highRisk || provisionalRisk == .caution) {
+            let whitelistResult = whitelistEngine.isWhitelisted(
                 bundleId: context.bundleId ?? "",
                 appGroups: context.appGroups,
                 matchedSignatures: matchedSymbols,
@@ -760,7 +768,7 @@ public final class MachOScanner: @unchecked Sendable {
                 zh: "应用声明了 App Group 共享容器权限并包含动态符号解析能力，建议持续关注。"
             )
         } else {
-            if details.isFairPlayEncrypted {
+            if details.isFairPlayEncrypted && (context.installChannel == .appStore || context.installChannel == .testFlight) {
                 remediation = WQLocale.pick(
                     en: "Official App Store / TestFlight package protected by FairPlay DRM. No escape indicators found across unencrypted segments; safe.",
                     zh: "App Store / TestFlight 官方发布应用，FairPlay DRM 加密。未在非加密段发现越权特征，状态安全。"
@@ -784,7 +792,8 @@ public final class MachOScanner: @unchecked Sendable {
             escapingSymlinks: [],
             dynamicLoadingPresent: dynamicLoadingDetected,
             pathEnumerationPresent: pathEnumerationDetected,
-            remediationGuidance: remediation
+            remediationGuidance: remediation,
+            isWhitelistEligible: !hasCorruptedSlices
         )
         
         return ScanFinding(
@@ -845,6 +854,33 @@ public final class MachOScanner: @unchecked Sendable {
                         return true
                     }
                 }
+            }
+            return false
+        }
+    }
+
+    /// Zero-allocation case-insensitive ASCII byte-slice search (`needle` must already be lowercased ASCII bytes).
+    private static func containsASCIIBytesCaseInsensitive(_ needle: [UInt8], in data: Data) -> Bool {
+        let m = needle.count
+        guard m > 0, data.count >= m else { return false }
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
+            let limit = raw.count - m
+            var i = 0
+            while i <= limit {
+                var matched = true
+                var j = 0
+                while j < m {
+                    var b = base[i + j]
+                    if b >= 0x41 && b <= 0x5A { b &+= 0x20 }
+                    if b != needle[j] {
+                        matched = false
+                        break
+                    }
+                    j += 1
+                }
+                if matched { return true }
+                i += 1
             }
             return false
         }

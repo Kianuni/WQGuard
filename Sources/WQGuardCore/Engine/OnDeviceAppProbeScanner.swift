@@ -166,18 +166,41 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
         )
     ]
 
+    private static let maxCatalogEntries = 1_024
+    private static let maxSchemesPerEntry = 32
+
     private let whitelistEngine: WhitelistEngine
 
     public init(whitelistEngine: WhitelistEngine = .shared) {
         self.whitelistEngine = whitelistEngine
     }
 
+    internal static func isValidURLScheme(_ scheme: String) -> Bool {
+        let utf8 = Array(scheme.utf8)
+        guard !utf8.isEmpty, utf8.count <= 64 else { return false }
+        let first = utf8[0]
+        guard (first >= 0x41 && first <= 0x5A) || (first >= 0x61 && first <= 0x7A) else {
+            return false
+        }
+        return utf8.dropFirst().allSatisfy { b in
+            (b >= 0x41 && b <= 0x5A)
+                || (b >= 0x61 && b <= 0x7A)
+                || (b >= 0x30 && b <= 0x39)
+                || b == 0x2B // '+'
+                || b == 0x2D // '-'
+                || b == 0x2E // '.'
+        }
+    }
+
     /// Runs the URL-scheme probe catalog on the current iOS device.
     public func probeInstalledAppsAsync() async -> [ScanFinding] {
+        guard !Task.isCancelled else { return [] }
         #if canImport(UIKit) && os(iOS)
         return await MainActor.run {
-            self.evaluateProbes { scheme in
-                guard let url = URL(string: "\(scheme)://") else { return false }
+            guard !Task.isCancelled else { return [] }
+            return self.evaluateProbes { scheme in
+                guard Self.isValidURLScheme(scheme),
+                      let url = URL(string: "\(scheme)://") else { return false }
                 return UIApplication.shared.canOpenURL(url)
             }
         }
@@ -192,16 +215,28 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
         canOpenScheme: (String) -> Bool
     ) -> [ScanFinding] {
         var findings: [ScanFinding] = []
+        var seenBundleIds = Set<String>()
 
-        for item in catalog {
+        for item in catalog.prefix(Self.maxCatalogEntries) {
+            let cleanBundleId = item.canonicalBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanBundleId.isEmpty,
+                  cleanBundleId.utf8.count <= 256,
+                  !PatternMatcher.containsForbiddenScalar(cleanBundleId) else {
+                continue
+            }
+            let dedupKey = cleanBundleId.lowercased()
+            guard !seenBundleIds.contains(dedupKey) else { continue }
+
             var matchedScheme: String?
-            for scheme in item.schemes {
+            for scheme in item.schemes.prefix(Self.maxSchemesPerEntry) {
+                guard Self.isValidURLScheme(scheme) else { continue }
                 if canOpenScheme(scheme) {
                     matchedScheme = scheme
                     break
                 }
             }
             guard let activeScheme = matchedScheme else { continue }
+            seenBundleIds.insert(dedupKey)
 
             var indicators: [ThreatIndicator] = []
             let provisionalRisk: RiskTier = .caution
@@ -238,12 +273,22 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
             }
 
             let wl = whitelistEngine.isWhitelisted(
-                bundleId: item.canonicalBundleId,
+                bundleId: cleanBundleId,
                 appGroups: [],
                 matchedSignatures: ["URLScheme(\(activeScheme)://)"],
                 teamId: nil
             )
             let finalRisk: RiskTier = wl.isWhitelisted ? .knownTool : provisionalRisk
+            let effectiveGuidance: String
+            if wl.isWhitelisted {
+                let toolLabel = wl.toolName ?? "Known Tool"
+                effectiveGuidance = WQLocale.pick(
+                    en: "Matched user whitelist rule (\(toolLabel)) for on-device URL scheme probe.",
+                    zh: "本机 URL Scheme 探针结果已匹配用户自定义白名单规则（\(toolLabel)）。"
+                )
+            } else {
+                effectiveGuidance = summary
+            }
 
             let evidence = AuditEvidence(
                 matchedSymbols: [],
@@ -256,13 +301,15 @@ public final class OnDeviceAppProbeScanner: @unchecked Sendable {
                 escapingSymlinks: [],
                 dynamicLoadingPresent: false,
                 pathEnumerationPresent: false,
-                remediationGuidance: summary,
+                remediationGuidance: effectiveGuidance,
                 auditDepth: .onDeviceProbe,
-                signerIdentity: nil
+                signerIdentity: nil,
+                isWhitelistEligible: true,
+                isTeamIdWhitelistVerified: false
             )
 
             findings.append(ScanFinding(
-                bundleId: item.canonicalBundleId,
+                bundleId: cleanBundleId,
                 displayName: item.localizedDisplayName,
                 version: WQLocale.pick(en: "Installed (Probe)", zh: "已安装 (本机探针)"),
                 teamId: nil,

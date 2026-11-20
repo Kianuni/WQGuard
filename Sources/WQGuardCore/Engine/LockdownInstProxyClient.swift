@@ -97,6 +97,13 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
     }
 
     public static func parse(data: Data, fallbackUDID: String? = nil) throws -> LockdownPairingFile {
+        let maxPairingBytes = 4 * 1024 * 1024
+        guard data.count <= maxPairingBytes else {
+            throw LockdownClientError.invalidPairingFile(WQLocale.pick(
+                en: "Pairing file exceeds maximum safe size (4 MB)",
+                zh: "配对文件大小超过 4 MB 安全上限"
+            ))
+        }
         guard let outerPlist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] else {
             throw LockdownClientError.invalidPairingFile(WQLocale.pick(
                 en: "Not a valid XML or Binary Plist file",
@@ -173,13 +180,19 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
                 return !trimmed.isEmpty && !trimmed.hasPrefix("-----BEGIN") && !trimmed.hasPrefix("-----END")
             }
             let base64Body = lines.joined()
-            return Data(base64Encoded: base64Body, options: .ignoreUnknownCharacters)
+            guard let decoded = Data(base64Encoded: base64Body, options: .ignoreUnknownCharacters), !decoded.isEmpty else {
+                return nil
+            }
+            return decoded
         }
         // Raw DER ASN.1 SEQUENCE starts with 0x30
         if trimmedRaw.first == 0x30 {
             return trimmedRaw
         }
-        return Data(base64Encoded: trimmedRaw, options: .ignoreUnknownCharacters)
+        guard let decoded = Data(base64Encoded: trimmedRaw, options: .ignoreUnknownCharacters), !decoded.isEmpty else {
+            return nil
+        }
+        return decoded
     }
 
     /// Strips PKCS#8 PrivateKeyInfo wrapper around an inner PKCS#1 RSAPrivateKey if present,
@@ -210,7 +223,7 @@ public struct LockdownPairingFile: Codable, Sendable, Equatable {
                         idx += 1
                     }
                 }
-                if idx + payloadLen <= bytes.count && bytes[idx] == 0x30 {
+                if payloadLen > 0, idx < bytes.count, payloadLen <= bytes.count - idx, bytes[idx] == 0x30 {
                     return Data(bytes[idx..<(idx + payloadLen)])
                 }
                 break
@@ -297,12 +310,13 @@ public struct LocalNetworkSubnetDiagnosis: Sendable, Equatable {
 
             let flags = Int32(entry.ifa_flags)
             guard (flags & IFF_UP) != 0,
+                  let namePtr = entry.ifa_name,
                   let addr = entry.ifa_addr,
                   addr.pointee.sa_family == sa_family_t(AF_INET) else {
                 continue
             }
 
-            let name = String(cString: entry.ifa_name)
+            let name = String(cString: namePtr)
             guard let ipStr = ipv4String(from: addr) else { continue }
 
             if (name == "en0" || (foundWifiIP == nil && (name == "en1" || name == "bridge100"))),
@@ -750,6 +764,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         pairing: LockdownPairingFile,
         tlsOptions: NWProtocolTLS.Options?
     ) throws -> (port: UInt16, enableSSL: Bool) {
+        setSocketNoSigPipe(rawSocketFD)
         var socketTransferredToRelay = false
         defer {
             if !socketTransferredToRelay && rawSocketFD >= 0 {
@@ -878,6 +893,8 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
                     "BetaApp",
                     "Entitlements",
                     "UIBackgroundModes",
+                    "TeamIdentifier",
+                    "BundlePath",
                     "Path",
                     "Container"
                 ]
@@ -1015,7 +1032,11 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         return tls
     }
 
+    private static let keychainLock = NSLock()
+
     private func importIdentityIntoKeychain(certificate: SecCertificate, privateKey: SecKey) throws -> SecIdentity {
+        Self.keychainLock.lock()
+        defer { Self.keychainLock.unlock() }
         let targetCertDER = SecCertificateCopyData(certificate) as Data
 
         // Clean previous items under our isolated label
@@ -1171,6 +1192,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
     }
 
     static func writePlistPacket(_ dict: [String: Any], toFD fd: Int32, step: String = "Lockdown") throws {
+        setSocketNoSigPipe(fd)
         let plistData = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
         var lengthBE = UInt32(plistData.count).bigEndian
         var packet = Data(bytes: &lengthBE, count: 4)
@@ -1180,7 +1202,7 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
             guard let base = rawBuf.baseAddress else { return }
             var sent = 0
             while sent < rawBuf.count {
-                let n = Darwin.send(fd, base.advanced(by: sent), rawBuf.count - sent, 0)
+                let n = sendWithoutSigPipe(fd, base.advanced(by: sent), rawBuf.count - sent)
                 if n < 0 && errno == EINTR {
                     continue
                 }
@@ -1202,9 +1224,13 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
         }
     }
 
+    private static let incrementalReadChunkBytes = 65_536
+    private static let maxPacketDeadlineNs: UInt64 = 30 * 1_000_000_000
+
     static func readPlistPacket(fromFD fd: Int32, step: String = "Lockdown") throws -> [String: Any] {
+        setSocketNoSigPipe(fd)
         let header = try readExactBytes(count: 4, fromFD: fd, step: step)
-        let length = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let length = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
         guard length > 0, length <= 64 * 1024 * 1024 else {
             throw LockdownClientError.protocolError(WQLocale.pick(
                 en: "Invalid \(step) packet length: \(length)",
@@ -1222,36 +1248,53 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
     }
 
     private static func readExactBytes(count: Int, fromFD fd: Int32, step: String) throws -> Data {
-        var buffer = Data(count: count)
-        try buffer.withUnsafeMutableBytes { rawBuf in
-            guard let base = rawBuf.baseAddress else { return }
-            var offset = 0
-            while offset < count {
-                let n = Darwin.recv(fd, base.advanced(by: offset), count - offset, 0)
-                if n < 0 && errno == EINTR {
-                    continue
-                }
-                if n == 0 {
-                    throw LockdownClientError.protocolError(WQLocale.pick(
-                        en: "Peer closed connection during \(step) (EOF)",
-                        zh: "\(step) 阶段对端主动关闭连接 (EOF)"
-                    ))
-                }
-                if n < 0 {
-                    let errCode = errno
-                    if errCode == ECONNRESET {
-                        throw LockdownClientError.protocolError(WQLocale.pick(
-                            en: "Connection reset by peer during \(step) (EOF/ECONNRESET)",
-                            zh: "\(step) 阶段连接被对端重置 (EOF/ECONNRESET)"
-                        ))
-                    }
-                    throw LockdownClientError.protocolError(WQLocale.pick(
-                        en: "Socket read timeout during \(step) (errno=\(errCode))",
-                        zh: "\(step) 阶段 Socket 读取超时 (errno=\(errCode))"
-                    ))
-                }
-                offset += n
+        guard count >= 0 else {
+            throw LockdownClientError.protocolError("Negative read length")
+        }
+        if count == 0 {
+            return Data()
+        }
+        var buffer = Data()
+        buffer.reserveCapacity(min(count, incrementalReadChunkBytes))
+        var chunk = [UInt8](repeating: 0, count: min(count, incrementalReadChunkBytes))
+        let deadlineNs = DispatchTime.now().uptimeNanoseconds &+ maxPacketDeadlineNs
+
+        while buffer.count < count {
+            if DispatchTime.now().uptimeNanoseconds >= deadlineNs {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Overall packet read deadline exceeded during \(step)",
+                    zh: "\(step) 阶段数据包读取总超时"
+                ))
             }
+            let remaining = count - buffer.count
+            let toRead = min(chunk.count, remaining)
+            let n = chunk.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return Darwin.recv(fd, base, toRead, 0)
+            }
+            if n < 0 && errno == EINTR {
+                continue
+            }
+            if n == 0 {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Peer closed connection during \(step) (EOF)",
+                    zh: "\(step) 阶段对端主动关闭连接 (EOF)"
+                ))
+            }
+            if n < 0 {
+                let errCode = errno
+                if errCode == ECONNRESET {
+                    throw LockdownClientError.protocolError(WQLocale.pick(
+                        en: "Connection reset by peer during \(step) (EOF/ECONNRESET)",
+                        zh: "\(step) 阶段连接被对端重置 (EOF/ECONNRESET)"
+                    ))
+                }
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Socket read timeout during \(step) (errno=\(errCode))",
+                    zh: "\(step) 阶段 Socket 读取超时 (errno=\(errCode))"
+                ))
+            }
+            buffer.append(contentsOf: chunk[0..<n])
         }
         return buffer
     }
@@ -1259,14 +1302,56 @@ public final class LockdownInstProxyClient: @unchecked Sendable {
 
 // MARK: - Ephemeral Loopback Relay for Clean STARTTLS Upgrade
 
+@inline(__always)
+@discardableResult
+private func setSocketNoSigPipe(_ fd: Int32) -> Bool {
+    #if canImport(Darwin)
+    guard fd >= 0 else { return false }
+    var noSigPipe: Int32 = 1
+    if Darwin.setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0 {
+        return true
+    }
+    var current: Int32 = 0
+    var len = socklen_t(MemoryLayout<Int32>.size)
+    if Darwin.getsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &current, &len) == 0, current == 1 {
+        return true
+    }
+    return false
+    #else
+    return true
+    #endif
+}
+
+private func sendWithoutSigPipe(_ fd: Int32, _ buf: UnsafeRawPointer, _ len: Int) -> Int {
+    #if canImport(Darwin)
+    if !setSocketNoSigPipe(fd) {
+        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        _ = Darwin.poll(&pfd, 1, 0)
+        if (pfd.revents & Int16(POLLNVAL)) != 0 {
+            errno = EBADF
+        } else {
+            errno = EPIPE
+        }
+        return -1
+    }
+    return Darwin.send(fd, buf, len, 0)
+    #else
+    return Darwin.send(fd, buf, len, 0)
+    #endif
+}
+
 private final class LocalSocketTLSRelay: @unchecked Sendable {
     let localPort: UInt16
     private let listenFD: Int32
     private let upstreamFD: Int32
+    private var clientFD: Int32 = -1
     private let lock = NSLock()
     private var isStopped = false
+    private let acceptGroup = DispatchGroup()
+    private let pumpGroup = DispatchGroup()
 
     init(upstreamFD: Int32) throws {
+        setSocketNoSigPipe(upstreamFD)
         self.upstreamFD = upstreamFD
         let lfd = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard lfd >= 0 else {
@@ -1297,6 +1382,11 @@ private final class LocalSocketTLSRelay: @unchecked Sendable {
             ))
         }
 
+        let lFlags = fcntl(lfd, F_GETFL, 0)
+        if lFlags >= 0 {
+            _ = fcntl(lfd, F_SETFL, lFlags | O_NONBLOCK)
+        }
+
         var boundAddr = sockaddr_in()
         var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
         _ = withUnsafeMutablePointer(to: &boundAddr) {
@@ -1307,31 +1397,86 @@ private final class LocalSocketTLSRelay: @unchecked Sendable {
         self.listenFD = lfd
         self.localPort = UInt16(bigEndian: boundAddr.sin_port)
 
+        acceptGroup.enter()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { self?.acceptGroup.leave() }
             self?.acceptAndPump()
         }
     }
 
-    private func acceptAndPump() {
-        var clientAddr = sockaddr_in()
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let clientFD = withUnsafeMutablePointer(to: &clientAddr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.accept(listenFD, $0, &len)
-            }
-        }
-        guard clientFD >= 0 else { return }
-        var noSigPipe: Int32 = 1
-        setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+    deinit {
+        stop()
+    }
 
+    private func acceptAndPump() {
+        var acceptedFD: Int32 = -1
+        while true {
+            lock.lock()
+            let stopped = isStopped
+            lock.unlock()
+            if stopped { return }
+
+            var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
+            let pr = Darwin.poll(&pfd, 1, 50)
+            if pr < 0 && errno == EINTR { continue }
+            if pr < 0 { return }
+            if pr == 0 { continue }
+
+            var clientAddr = sockaddr_in()
+            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let cfd = withUnsafeMutablePointer(to: &clientAddr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.accept(listenFD, $0, &len)
+                }
+            }
+            if cfd < 0 {
+                if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { continue }
+                return
+            }
+            acceptedFD = cfd
+            break
+        }
+
+        guard acceptedFD >= 0 else { return }
+        var noSigPipe: Int32 = 1
+        setsockopt(acceptedFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        let cFlags = fcntl(acceptedFD, F_GETFL, 0)
+        if cFlags >= 0 {
+            _ = fcntl(acceptedFD, F_SETFL, cFlags & ~O_NONBLOCK)
+        }
+
+        lock.lock()
+        if isStopped {
+            lock.unlock()
+            Darwin.close(acceptedFD)
+            return
+        }
+        self.clientFD = acceptedFD
+        pumpGroup.enter()
+        pumpGroup.enter()
+        lock.unlock()
+
+        let acceptedClientFD = acceptedFD
         let upFD = self.upstreamFD
-        DispatchQueue.global(qos: .userInitiated).async {
-            Self.pump(from: clientFD, to: upFD)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { self?.pumpGroup.leave() }
+            guard let self else { return }
+            self.lock.lock()
+            let stopped = self.isStopped
+            self.lock.unlock()
+            guard !stopped else { return }
+            Self.pump(from: acceptedClientFD, to: upFD)
             Darwin.shutdown(upFD, SHUT_WR)
         }
-        DispatchQueue.global(qos: .userInitiated).async {
-            Self.pump(from: upFD, to: clientFD)
-            Darwin.close(clientFD)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { self?.pumpGroup.leave() }
+            guard let self else { return }
+            self.lock.lock()
+            let stopped = self.isStopped
+            self.lock.unlock()
+            guard !stopped else { return }
+            Self.pump(from: upFD, to: acceptedClientFD)
+            Darwin.shutdown(acceptedClientFD, SHUT_WR)
         }
     }
 
@@ -1344,7 +1489,7 @@ private final class LocalSocketTLSRelay: @unchecked Sendable {
             var sent = 0
             while sent < n {
                 let w = buf.withUnsafeBytes { ptr in
-                    Darwin.send(dst, ptr.baseAddress!.advanced(by: sent), n - sent, 0)
+                    sendWithoutSigPipe(dst, ptr.baseAddress!.advanced(by: sent), n - sent)
                 }
                 if w < 0 && errno == EINTR { continue }
                 if w <= 0 { return }
@@ -1357,9 +1502,28 @@ private final class LocalSocketTLSRelay: @unchecked Sendable {
         lock.lock()
         let already = isStopped
         isStopped = true
+        let cfd = clientFD
         lock.unlock()
         guard !already else { return }
+
+        Darwin.shutdown(upstreamFD, SHUT_RDWR)
+        if cfd >= 0 {
+            Darwin.shutdown(cfd, SHUT_RDWR)
+        }
+
+        _ = acceptGroup.wait(timeout: .now() + 1.0)
+        lock.lock()
+        let finalClientFD = clientFD
+        lock.unlock()
+        if finalClientFD >= 0 && finalClientFD != cfd {
+            Darwin.shutdown(finalClientFD, SHUT_RDWR)
+        }
+        _ = pumpGroup.wait(timeout: .now() + 1.0)
+
         Darwin.close(listenFD)
+        if finalClientFD >= 0 {
+            Darwin.close(finalClientFD)
+        }
         Darwin.close(upstreamFD)
     }
 }
@@ -1399,6 +1563,19 @@ private final class SyncNWChannel: @unchecked Sendable {
             case .ready:
                 if stateBox.setIfNil(.success(())) {
                     sema.signal()
+                }
+            case .waiting(let err):
+                switch err {
+                case .tls:
+                    if stateBox.setIfNil(.failure(LockdownClientError.protocolError(err.localizedDescription))) {
+                        sema.signal()
+                    }
+                case .posix(let code) where code == .ECONNRESET || code == .EPIPE || code == .ECONNABORTED:
+                    if stateBox.setIfNil(.failure(LockdownClientError.protocolError(err.localizedDescription))) {
+                        sema.signal()
+                    }
+                default:
+                    break
                 }
             case .failed(let err):
                 if stateBox.setIfNil(.failure(LockdownClientError.protocolError(err.localizedDescription))) {
@@ -1447,7 +1624,7 @@ private final class SyncNWChannel: @unchecked Sendable {
 
     func receivePlist() throws -> [String: Any] {
         let header = try receiveExact(length: 4)
-        let bodyLen = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let bodyLen = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
         guard bodyLen > 0, bodyLen <= 64 * 1024 * 1024 else {
             throw LockdownClientError.protocolError(WQLocale.pick(en: "Invalid response packet length: \(bodyLen)", zh: "非法响应包长度: \(bodyLen)"))
         }
@@ -1458,11 +1635,31 @@ private final class SyncNWChannel: @unchecked Sendable {
         return dict
     }
 
+    private static let incrementalReserveBytes = 65_536
+    private static let maxPacketDeadlineNs: UInt64 = 30 * 1_000_000_000
+
     private func receiveExact(length: Int) throws -> Data {
+        guard length >= 0 else {
+            throw LockdownClientError.protocolError("Negative response packet length")
+        }
+        if length == 0 {
+            return Data()
+        }
         var accumulated = Data()
-        accumulated.reserveCapacity(length)
+        accumulated.reserveCapacity(min(length, Self.incrementalReserveBytes))
+        let deadlineNs = DispatchTime.now().uptimeNanoseconds &+ Self.maxPacketDeadlineNs
+
         while accumulated.count < length {
-            let needed = length - accumulated.count
+            let nowNs = DispatchTime.now().uptimeNanoseconds
+            guard nowNs < deadlineNs else {
+                throw LockdownClientError.protocolError(WQLocale.pick(
+                    en: "Overall packet read deadline exceeded from installation_proxy",
+                    zh: "读取 installation_proxy 数据包总超时"
+                ))
+            }
+            let remainingNs = deadlineNs - nowNs
+            let waitTimeoutSec = min(12.0, Double(remainingNs) / 1_000_000_000.0)
+            let needed = min(Self.incrementalReserveBytes, length - accumulated.count)
             let sema = DispatchSemaphore(value: 0)
             let chunkBox = LockedBox<Result<Data, Error>?>(nil)
             connection.receive(minimumIncompleteLength: 1, maximumLength: needed) { data, _, isComplete, err in
@@ -1473,15 +1670,18 @@ private final class SyncNWChannel: @unchecked Sendable {
                 } else if isComplete {
                     chunkBox.value = .failure(LockdownClientError.protocolError(WQLocale.pick(en: "Connection closed prematurely", zh: "连接提前关闭")))
                 } else {
-                    chunkBox.value = .success(Data())
+                    chunkBox.value = .failure(LockdownClientError.protocolError(WQLocale.pick(en: "Unexpected empty read chunk from installation_proxy", zh: "installation_proxy 返回空数据分片")))
                 }
                 sema.signal()
             }
-            if sema.wait(timeout: .now() + 12.0) == .timedOut {
+            if sema.wait(timeout: .now() + waitTimeoutSec) == .timedOut {
                 throw LockdownClientError.protocolError(WQLocale.pick(en: "Timed out waiting for installation_proxy data", zh: "等待 installation_proxy 数据超时"))
             }
             switch chunkBox.value {
             case .success(let chunk):
+                guard !chunk.isEmpty else {
+                    throw LockdownClientError.protocolError(WQLocale.pick(en: "Unexpected empty read chunk from installation_proxy", zh: "installation_proxy 返回空数据分片"))
+                }
                 accumulated.append(chunk)
             case .failure(let err):
                 throw err

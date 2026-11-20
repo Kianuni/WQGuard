@@ -47,7 +47,9 @@ public enum EntitlementGating {
     
     /// Evaluates gating given an entitlement presence flag and list of application group identifiers.
     public static func evaluate(hasAppGroups: Bool, appGroups: [String]) -> EntitlementGatingResult {
-        let validGroups = appGroups.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let validGroups = appGroups
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         if !hasAppGroups || validGroups.isEmpty {
             return EntitlementGatingResult(
                 isGatedOut: true,

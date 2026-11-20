@@ -46,6 +46,8 @@
 "ipa_analyzing" = "Performing 4-layer sandbox analysis & Mach-O static binary audit...";
 "ipa_analysis_failed" = "IPA Analysis Failed";
 "preinstall_alert_high_risk" = "Pre-install Warning: Detected sandbox escape exploit! Do NOT install!";
+"preinstall_alert_caution" = "Pre-install Advisory: App declares shared containers, dylibs, or sideload traits. Review before installing.";
+"preinstall_alert_known_tool" = "Pre-install Assessment: Matched trusted self-identity / whitelist rule (Known Tool).";
 "preinstall_alert_safe" = "Pre-install Assessment: Clean. No exploit signatures detected.";
 
 /* Settings View */
@@ -122,6 +124,19 @@
 "add_to_whitelist_button" = "Add App to Trusted Whitelist";
 "whitelist_added_title" = "Added to Whitelist";
 "whitelist_added_message" = "App \"%@\" has been added to local rules. Risk tier adjusted to Known Tool.";
+"whitelist_rejected_title" = "Unable to Whitelist";
+"whitelist_rejected_fallback" = "This finding does not satisfy strict whitelist eligibility requirements.";
+"whitelist_invalid_bundle_id" = "Bundle ID must be a concrete ASCII identifier (wildcards require trailing .* after at least two domain labels, e.g. com.example.tool.*).";
+"whitelist_reserved_apple_bundle_id" = "Reserved Apple bundle identifiers (com.apple.*) cannot be added as custom whitelist rules.";
+"whitelist_invalid_rule_name" = "Rule name contains invalid control characters.";
+"whitelist_duplicate_rule_name" = "A whitelist rule named \"%@\" already exists (built-in or custom rules cannot be overwritten).";
+"whitelist_invalid_app_group" = "Invalid App Group pattern \"%@\". Broad wildcards and non-ASCII characters are rejected.";
+"whitelist_protected_app_group" = "App Group \"%@\" belongs to Apple system or protected wallet/messaging containers and cannot be whitelisted.";
+"whitelist_invalid_team_id" = "Team ID \"%@\" must contain alphanumeric characters only (no wildcards).";
+"remediation_matched_whitelist" = "Matched trusted whitelist rule (%@).";
+"remediation_high_risk" = "High-risk exploit or privilege escalation indicators detected. Uninstall immediately and remove its provisioning profile.";
+"remediation_caution" = "Application declares shared containers or includes third-party dynamic libraries / supply-chain advisories. Review source before trusting.";
+"remediation_safe" = "No cross-container sandbox escape or malicious exploit indicators detected; safe.";
 
 /* Remediation Card View */
 "remediation_guidance_title" = "Remediation Guidance";
@@ -166,10 +181,12 @@
 "settings_reset_confirm_action" = "Reset to Defaults";
 "settings_reset_confirm_message" = "This will remove all custom whitelist rules and restore only the built-in WQGuard self-identity rule.";
 "rule_sheet_tool_name_placeholder" = "Tool / App Name (e.g. MyTool)";
-"rule_sheet_bundle_id_placeholder" = "Bundle Identifier (e.g. com.example.tool*)";
+"rule_sheet_bundle_id_placeholder" = "Bundle Identifier (e.g. com.example.tool.*)";
 "rule_sheet_app_group_placeholder" = "App Group (Optional, e.g. group.com.example)";
+"rule_sheet_team_id_placeholder" = "Team ID (Optional, recommended e.g. 96VJNMX6ZP)";
+"rule_sheet_any_team_warning" = "Any Team ID (Unpinned)";
 "rule_sheet_section_header" = "Rule Attributes";
-"rule_sheet_section_footer" = "Bundle ID and App Group support wildcard patterns (e.g. com.test.*).";
+"rule_sheet_section_footer" = "Bundle ID supports exact or trailing .* patterns (e.g. com.example.tool.*); App Group requires exact identifiers. Apple system/protected groups and broad wildcards are rejected.";
 "rule_sheet_nav_title" = "Add Custom Rule";
 
 /* Report Export View */

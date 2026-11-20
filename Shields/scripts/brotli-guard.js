@@ -6,18 +6,51 @@
  * nor the proxy client itself ever decompresses an unsolicited `Content-Encoding: br` stream.
  */
 (function () {
-  var headers = ($response && $response.headers) || {};
+  if (typeof $done !== "function") {
+    return;
+  }
+
+  function safeCoerceHeaderValue(val, depth) {
+    if (val === undefined || val === null) {
+      return "";
+    }
+    var t = typeof val;
+    if (t === "string" || t === "number" || t === "boolean") {
+      return String(val);
+    }
+    if (Array.isArray(val)) {
+      if (depth > 4) {
+        return "";
+      }
+      var parts = [];
+      for (var j = 0; j < val.length; j++) {
+        var coerced = safeCoerceHeaderValue(val[j], depth + 1);
+        if (coerced) {
+          parts.push(coerced);
+        }
+      }
+      return parts.join(", ");
+    }
+    try {
+      return String(val);
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  var rawResp = typeof $response !== "undefined" ? $response : null;
+  var headers = (rawResp && typeof rawResp.headers === "object" && rawResp.headers !== null)
+    ? rawResp.headers
+    : {};
   var encValues = [];
   var keys = Object.keys(headers);
   for (var i = 0; i < keys.length; i++) {
     var k = keys[i];
     var lk = String(k).trim().toLowerCase();
     if (lk === "content-encoding" || lk === "transfer-encoding") {
-      var v = headers[k];
-      if (Array.isArray(v)) {
-        encValues.push(v.join(", "));
-      } else if (v !== undefined && v !== null) {
-        encValues.push(String(v));
+      var coercedVal = safeCoerceHeaderValue(headers[k], 0);
+      if (coercedVal) {
+        encValues.push(coercedVal);
       }
     }
   }

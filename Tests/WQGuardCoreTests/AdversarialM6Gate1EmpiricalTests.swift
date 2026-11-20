@@ -157,7 +157,7 @@ final class AdversarialM6Gate1EmpiricalTests: XCTestCase {
         var magic = UInt32(CSBlobConstants.superBlobMagic).bigEndian
         let headerSize = 12
         let indexTableSize = entries.count * 8
-        var payloadOffset = headerSize + indexTableSize
+        let payloadOffset = headerSize + indexTableSize
 
         // Calculate total length
         var totalLength = payloadOffset

@@ -42,6 +42,8 @@
 "ipa_analyzing" = "正在进行 4 层沙盒解析与 Mach-O 静态二进制审计...";
 "ipa_analysis_failed" = "IPA 分析失败";
 "preinstall_alert_high_risk" = "安装前预警：检测到越界沙盒逃逸特征，切勿安装！";
+"preinstall_alert_caution" = "安装前提示：该安装包声明了共享容器、注入动态库或侧载组件特征，建议核验来源后再安装。";
+"preinstall_alert_known_tool" = "安装前评估：匹配受信任白名单规则（已知工具）。";
 "preinstall_alert_safe" = "安装前评估：未发现已知越权利用特征，处于安全状态。";
 
 /* Settings View */
@@ -118,6 +120,19 @@
 "add_to_whitelist_button" = "将此应用加入信任白名单";
 "whitelist_added_title" = "已加入白名单";
 "whitelist_added_message" = "应用「%@」已添加至本地规则，风险等级已调整为已知工具。";
+"whitelist_rejected_title" = "无法加入白名单";
+"whitelist_rejected_fallback" = "该审计结果不满足严格白名单准入条件，已被安全策略拦截。";
+"whitelist_invalid_bundle_id" = "Bundle ID 必须为有效的 ASCII 标识符（通配符仅支持至少两级域名后的 .* 后缀，如 com.example.tool.*）。";
+"whitelist_reserved_apple_bundle_id" = "禁止将苹果系统保留标识符 (com.apple.*) 添加为自定义白名单规则。";
+"whitelist_invalid_rule_name" = "规则名称包含非法控制字符。";
+"whitelist_duplicate_rule_name" = "已存在名为「%@」的白名单规则（不可覆盖内置或已有规则）。";
+"whitelist_invalid_app_group" = "App Group 模式「%@」无效，禁止宽泛通配符或非 ASCII 字符。";
+"whitelist_protected_app_group" = "App Group「%@」属于苹果系统或受保护钱包/通讯容器，禁止加入白名单。";
+"whitelist_invalid_team_id" = "Team ID「%@」必须仅包含字母与数字（不支持通配符）。";
+"remediation_matched_whitelist" = "匹配已知开源安全研究工具白名单（%@）。";
+"remediation_high_risk" = "检测到高危越权或本地利用特征，建议立即卸载并注销描述文件。";
+"remediation_caution" = "应用声明了共享容器或包含第三方动态库/供应链风险组件，建议复核安装来源。";
+"remediation_safe" = "未发现跨沙盒越权或恶意利用特征，状态安全。";
 
 /* Remediation Card View */
 "remediation_guidance_title" = "处置建议 (Remediation Guidance)";
@@ -162,10 +177,12 @@
 "settings_reset_confirm_action" = "确认重置为默认";
 "settings_reset_confirm_message" = "将清除所有自定义规则，并仅保留 WQGuard 自身默认白名单。";
 "rule_sheet_tool_name_placeholder" = "工具/应用名称 (例如: MyTool)";
-"rule_sheet_bundle_id_placeholder" = "Bundle Identifier (例如: com.example.tool*)";
+"rule_sheet_bundle_id_placeholder" = "Bundle Identifier (例如: com.example.tool.*)";
 "rule_sheet_app_group_placeholder" = "App Group (可选，例如: group.com.example)";
+"rule_sheet_team_id_placeholder" = "Team ID (可选，建议填写如 96VJNMX6ZP)";
+"rule_sheet_any_team_warning" = "不限 Team ID（未绑定签名团队）";
 "rule_sheet_section_header" = "规则属性";
-"rule_sheet_section_footer" = "Bundle ID 与 App Group 支持通配符匹配（如 com.test.*）。";
+"rule_sheet_section_footer" = "Bundle ID 支持精确值或末尾 .* 通配（如 com.example.tool.*）；App Group 仅支持精确标识符。系统保留域名、受保护钱包/通讯组与宽泛通配符将被拒绝。";
 "rule_sheet_nav_title" = "添加自定义规则";
 
 /* Report Export View */

@@ -649,12 +649,13 @@ final class AdversarialM6Challenger1Tests: XCTestCase {
         let scanner = MachOScanner.shared
 
         // App Store encrypted binary linking libsystem_containermanager.dylib
-        let bin = SyntheticMachOGenerator.shared.generateThin(config: .init(
+        let (bin, _) = try M1TestCMSFixtures.buildSignedMachO(
+            identifier: "com.fairplay.victim",
             cryptid: 1,
-            linkedDylibs: ["/usr/lib/system/libsystem_containermanager.dylib"],
+            xmlEntitlements: SyntheticMachOGenerator.createXMLEntitlements(appGroups: ["group.fairplay.app"]),
             symbols: ["container_query_create"],
-            xmlEntitlements: SyntheticMachOGenerator.createXMLEntitlements(appGroups: ["group.fairplay.app"])
-        ))
+            linkedDylibs: ["/usr/lib/system/libsystem_containermanager.dylib"]
+        )
 
         let details = try scanner.parseMachO(data: bin)
         XCTAssertEqual(details.cryptid, 1)

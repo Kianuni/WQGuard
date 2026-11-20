@@ -24,7 +24,9 @@ struct WQGuardApp: App {
                 }
                 .onChange(of: scenePhase) { newPhase in
                     if newPhase == .active {
-                        viewModel.autoImportFromDocumentsFolderIfNeeded()
+                        Task {
+                            _ = await viewModel.autoImportFromDocumentsFolderIfNeededAsync()
+                        }
                     }
                 }
         }

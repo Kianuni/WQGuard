@@ -1,4 +1,4 @@
-#!version=1.3.4
+#!version=1.3.5
 name: "WQGuard · Brotli Downgrade Shield / 防溢出降级护盾 (CVE-2026-111497)"
 desc: "Mitigates iOS 26.x / 27.0–27.2.0 libbrotli OOB write (HTTP2Shell) by stripping br in Accept-Encoding & blocking unsolicited br responses; 16 Apple/banking exclusions. | 剥离 br 请求声明并阻断强推响应，内置 16 项负向排除。"
 category: "Security / 安全防护"
@@ -56,26 +56,45 @@ http:
 script-providers:
   brotli-response-guard:
     payload: |
-      const headers = ($response && $response.headers) || {};
-      const encParts = [];
-      for (const k of Object.keys(headers)) {
-        const lk = String(k).trim().toLowerCase();
-        if (lk === 'content-encoding' || lk === 'transfer-encoding') {
-          const v = headers[k];
-          encParts.push(Array.isArray(v) ? v.join(', ') : String(v ?? ''));
-        }
-      }
-      const rawEnc = encParts.join(', ');
-      if (/(^|[^A-Za-z0-9_.-])((?:x-)?(?:br|brotli|dcb|sbr))($|[^A-Za-z0-9_.-])/i.test(rawEnc)) {
-        $done({
-          status: 403,
-          headers: {
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Content-Length': '0',
-            'Connection': 'close',
-            'X-WQGuard-Shield': 'Blocked-Unsolicited-Brotli'
+      (function () {
+        if (typeof $done !== 'function') { return; }
+        function coerceHdr(val, depth) {
+          if (val === undefined || val === null) { return ''; }
+          const t = typeof val;
+          if (t === 'string' || t === 'number' || t === 'boolean') { return String(val); }
+          if (Array.isArray(val)) {
+            if (depth > 4) { return ''; }
+            const items = [];
+            for (let j = 0; j < val.length; j++) {
+              const s = coerceHdr(val[j], depth + 1);
+              if (s) { items.push(s); }
+            }
+            return items.join(', ');
           }
-        });
-      } else {
-        $done({});
-      }
+          try { return String(val); } catch (_e) { return ''; }
+        }
+        const resp = typeof $response !== 'undefined' ? $response : null;
+        const headers = (resp && typeof resp.headers === 'object' && resp.headers !== null) ? resp.headers : {};
+        const encParts = [];
+        for (const k of Object.keys(headers)) {
+          const lk = String(k).trim().toLowerCase();
+          if (lk === 'content-encoding' || lk === 'transfer-encoding') {
+            const s = coerceHdr(headers[k], 0);
+            if (s) { encParts.push(s); }
+          }
+        }
+        const rawEnc = encParts.join(', ');
+        if (/(^|[^A-Za-z0-9_.-])((?:x-)?(?:br|brotli|dcb|sbr))($|[^A-Za-z0-9_.-])/i.test(rawEnc)) {
+          $done({
+            status: 403,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Content-Length': '0',
+              'Connection': 'close',
+              'X-WQGuard-Shield': 'Blocked-Unsolicited-Brotli'
+            }
+          });
+        } else {
+          $done({});
+        }
+      })();

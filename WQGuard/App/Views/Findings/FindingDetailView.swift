@@ -12,9 +12,23 @@ public struct FindingDetailView: View {
     public let finding: ScanFinding
     @EnvironmentObject var vm: ScanViewModel
     @State private var showAddedToast = false
+    @State private var showRejectedAlert = false
+    @State private var whitelistErrorMessage: String = ""
 
     public init(finding: ScanFinding) {
         self.finding = finding
+    }
+
+    private var activeFinding: ScanFinding {
+        vm.currentSession?.findings.first(where: { $0.id == finding.id }) ?? finding
+    }
+
+    private var canOfferWhitelistAction: Bool {
+        !activeFinding.isWhitelisted
+            && activeFinding.riskTier == .caution
+            && activeFinding.evidence.isWhitelistEligible
+            && activeFinding.evidence.escapingSymlinks.isEmpty
+            && activeFinding.evidence.auditDepth != .onDeviceProbe
     }
 
     public var body: some View {
@@ -31,19 +45,19 @@ public struct FindingDetailView: View {
                             .foregroundColor(tierColor)
                     }
 
-                    Text(finding.displayName)
+                    Text(activeFinding.displayName)
                         .font(.title2.bold())
                         .foregroundColor(.white)
 
-                    Text(finding.bundleId)
+                    Text(activeFinding.bundleId)
                         .font(.caption.monospaced())
                         .foregroundColor(.gray)
 
                     HStack(spacing: 8) {
-                        RiskBadge(tier: finding.riskTier)
-                        InstallChannelBadge(channel: finding.installChannel)
-                        AuditDepthBadge(depth: finding.evidence.auditDepth)
-                        if finding.isWhitelisted {
+                        RiskBadge(tier: activeFinding.riskTier)
+                        InstallChannelBadge(channel: activeFinding.installChannel)
+                        AuditDepthBadge(depth: activeFinding.evidence.auditDepth)
+                        if activeFinding.isWhitelisted {
                             Text(WQStrings.whitelistedBadge)
                                 .font(.caption.bold())
                                 .padding(.horizontal, 8)
@@ -63,18 +77,18 @@ public struct FindingDetailView: View {
                 .padding(.horizontal)
 
                 // Actionable Remediation Card
-                RemediationCardView(finding: finding)
+                RemediationCardView(finding: activeFinding)
                     .padding(.horizontal)
 
                 // Matched Threat Indicators
-                if !finding.indicators.isEmpty {
+                if !activeFinding.indicators.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(WQStrings.threatIndicatorsHeader(finding.indicators.count))
+                        Text(WQStrings.threatIndicatorsHeader(activeFinding.indicators.count))
                             .font(.headline)
                             .foregroundColor(.white)
                             .padding(.horizontal)
 
-                        ForEach(finding.indicators) { ind in
+                        ForEach(activeFinding.indicators) { ind in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
                                     Text(ind.signature)
@@ -116,18 +130,18 @@ public struct FindingDetailView: View {
                         .padding(.horizontal)
 
                     VStack(alignment: .leading, spacing: 12) {
-                        EvidenceRow(label: WQStrings.evidenceAuditDepth, value: WQStrings.auditDepthFullDesc(finding.evidence.auditDepth))
-                        if let signer = finding.evidence.signerIdentity, !signer.isEmpty {
+                        EvidenceRow(label: WQStrings.evidenceAuditDepth, value: WQStrings.auditDepthFullDesc(activeFinding.evidence.auditDepth))
+                        if let signer = activeFinding.evidence.signerIdentity, !signer.isEmpty {
                             EvidenceRow(label: WQStrings.evidenceSignerIdentity, value: signer)
                         }
-                        EvidenceRow(label: WQStrings.evidenceVersion, value: finding.version)
-                        EvidenceRow(label: WQStrings.evidenceTeamId, value: finding.teamId ?? WQStrings.evidenceTeamIdUnsigned)
-                        EvidenceRow(label: WQStrings.evidenceDrmStatus, value: finding.evidence.isFairPlayEncrypted ? WQStrings.evidenceDrmEncrypted : WQStrings.evidenceDrmUnencrypted)
-                        EvidenceRow(label: WQStrings.evidenceAppGroups, value: finding.evidence.appGroups.isEmpty ? WQStrings.evidenceAppGroupsNone : finding.evidence.appGroups.joined(separator: ", "))
-                        EvidenceRow(label: WQStrings.evidencePrivateSymbols, value: finding.evidence.matchedSymbols.isEmpty ? WQStrings.evidenceNone : finding.evidence.matchedSymbols.joined(separator: ", "))
-                        EvidenceRow(label: WQStrings.evidenceDynamicLoading, value: finding.evidence.dynamicLoadingPresent ? WQStrings.evidenceDetectedDlopen : WQStrings.evidenceNone)
-                        EvidenceRow(label: WQStrings.evidencePathEnumeration, value: finding.evidence.pathEnumerationPresent ? WQStrings.evidenceDetectedFsgetpath : WQStrings.evidenceNone)
-                        EvidenceRow(label: WQStrings.evidenceInstallPath, value: finding.bundlePath)
+                        EvidenceRow(label: WQStrings.evidenceVersion, value: activeFinding.version)
+                        EvidenceRow(label: WQStrings.evidenceTeamId, value: activeFinding.teamId ?? WQStrings.evidenceTeamIdUnsigned)
+                        EvidenceRow(label: WQStrings.evidenceDrmStatus, value: activeFinding.evidence.isFairPlayEncrypted ? WQStrings.evidenceDrmEncrypted : WQStrings.evidenceDrmUnencrypted)
+                        EvidenceRow(label: WQStrings.evidenceAppGroups, value: activeFinding.evidence.appGroups.isEmpty ? WQStrings.evidenceAppGroupsNone : activeFinding.evidence.appGroups.joined(separator: ", "))
+                        EvidenceRow(label: WQStrings.evidencePrivateSymbols, value: activeFinding.evidence.matchedSymbols.isEmpty ? WQStrings.evidenceNone : activeFinding.evidence.matchedSymbols.joined(separator: ", "))
+                        EvidenceRow(label: WQStrings.evidenceDynamicLoading, value: activeFinding.evidence.dynamicLoadingPresent ? WQStrings.evidenceDetectedDlopen : WQStrings.evidenceNone)
+                        EvidenceRow(label: WQStrings.evidencePathEnumeration, value: activeFinding.evidence.pathEnumerationPresent ? WQStrings.evidenceDetectedFsgetpath : WQStrings.evidenceNone)
+                        EvidenceRow(label: WQStrings.evidenceInstallPath, value: activeFinding.bundlePath)
                     }
                     .padding(16)
                     .background(
@@ -137,11 +151,36 @@ public struct FindingDetailView: View {
                     .padding(.horizontal)
                 }
 
-                // Whitelist Action Button
-                if !finding.isWhitelisted {
+                // Anchored Whitelist Action Button (strictly hidden on .highRisk, ineligible, escaping symlink, or probe-only findings)
+                if canOfferWhitelistAction {
                     Button(action: {
-                        vm.addCustomWhitelistRule(bundleId: finding.bundleId, name: finding.displayName)
-                        showAddedToast = true
+                        let verifiedTeamIds: [String]? = activeFinding.evidence.isTeamIdWhitelistVerified
+                            ? activeFinding.teamId.map { [$0] }
+                            : nil
+                        let correlatedBids: [String] = {
+                            guard let corr = activeFinding.evidence.correlatedPackageBundleId?
+                                .trimmingCharacters(in: .whitespacesAndNewlines),
+                                  !corr.isEmpty,
+                                  corr.caseInsensitiveCompare(activeFinding.bundleId) != .orderedSame else {
+                                return []
+                            }
+                            return [corr]
+                        }()
+                        let result = vm.addCustomWhitelistRule(
+                            bundleId: activeFinding.bundleId,
+                            additionalBundleIds: correlatedBids,
+                            name: activeFinding.displayName,
+                            allowedAppGroups: activeFinding.evidence.appGroups,
+                            allowedTeamIds: verifiedTeamIds,
+                            expectedSignatures: activeFinding.evidence.matchedSymbols,
+                            requiringPromotionForFinding: activeFinding
+                        )
+                        if result.success, activeFinding.isWhitelisted {
+                            showAddedToast = true
+                        } else {
+                            whitelistErrorMessage = result.errorMessage ?? WQStrings.whitelistRejectedFallback
+                            showRejectedAlert = true
+                        }
                     }) {
                         Label(WQStrings.addToWhitelistButton, systemImage: "checkmark.shield")
                             .font(.subheadline.bold())
@@ -156,16 +195,21 @@ public struct FindingDetailView: View {
             }
             .padding(.vertical, 16)
         }
-        .navigationTitle(finding.displayName)
+        .navigationTitle(activeFinding.displayName)
         .alert(WQStrings.whitelistAddedTitle, isPresented: $showAddedToast) {
             Button(WQStrings.buttonOK, role: .cancel) {}
         } message: {
-            Text(WQStrings.whitelistAddedMessage(appName: finding.displayName))
+            Text(WQStrings.whitelistAddedMessage(appName: activeFinding.displayName))
+        }
+        .alert(WQStrings.whitelistRejectedTitle, isPresented: $showRejectedAlert) {
+            Button(WQStrings.buttonOK, role: .cancel) {}
+        } message: {
+            Text(whitelistErrorMessage)
         }
     }
 
     private var tierColor: Color {
-        switch finding.riskTier {
+        switch activeFinding.riskTier {
         case .highRisk: return .red
         case .caution: return .orange
         case .knownTool: return .yellow
@@ -174,7 +218,7 @@ public struct FindingDetailView: View {
     }
 
     private var iconName: String {
-        switch finding.riskTier {
+        switch activeFinding.riskTier {
         case .highRisk: return "exclamationmark.shield.fill"
         case .caution: return "shield.lefthalf.filled.badge.alert"
         case .knownTool: return "wrench.and.screwdriver.fill"

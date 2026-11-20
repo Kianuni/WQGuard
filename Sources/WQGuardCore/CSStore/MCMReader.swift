@@ -133,7 +133,7 @@ public final class MCMReader: Sendable {
 
     /// Reads and parses metadata directly from a plist file URL.
     public func readMetadata(at plistURL: URL, containerURL: URL? = nil) throws -> MCMMetadata {
-        let path = plistURL.path
+        let path = IPAPackageScanner.stripTrailingSlashes(plistURL.path)
 
         // Check if plist itself is a symlink using lstat
         var st = stat()
@@ -232,8 +232,15 @@ public final class MCMReader: Sendable {
             throw MCMReaderError.corruptedPlist(reason: "Root element is not a dictionary.")
         }
 
-        guard let identifier = dict["MCMMetadataIdentifier"] as? String, !identifier.isEmpty else {
+        guard let rawIdentifier = dict["MCMMetadataIdentifier"] as? String else {
             throw MCMReaderError.missingRequiredKey(key: "MCMMetadataIdentifier")
+        }
+        let trimmedIdentifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedIdentifier.isEmpty else {
+            throw MCMReaderError.missingRequiredKey(key: "MCMMetadataIdentifier")
+        }
+        guard Self.isSafeMCMToken(rawIdentifier, maxBytes: 512) else {
+            throw MCMReaderError.corruptedPlist(reason: "MCMMetadataIdentifier contains invalid, oversized, or forbidden control/path characters.")
         }
 
         guard let uuid = dict["MCMMetadataUUID"] as? String, !uuid.isEmpty else {
@@ -244,14 +251,22 @@ public final class MCMReader: Sendable {
             throw MCMReaderError.invalidUUID(uuid: uuid)
         }
 
-        let rawClass = dict["MCMMetadataClass"] as? Int ?? -1
+        let rawClass = Self.parseStrictInt(dict["MCMMetadataClass"]) ?? -1
         let containerClass = MCMContainerClass(rawValue: rawClass)
-        let version = dict["MCMMetadataVersion"] as? Int ?? 1
-        let user = dict["MCMMetadataUser"] as? String
-        let schemaVersion = dict["MCMMetadataSchemaVersion"] as? Int
+        let version = Self.parseStrictInt(dict["MCMMetadataVersion"]) ?? 1
+        let user: String?
+        if let rawUser = dict["MCMMetadataUser"] as? String {
+            guard Self.isSafeMCMToken(rawUser, maxBytes: 256) else {
+                throw MCMReaderError.corruptedPlist(reason: "MCMMetadataUser contains invalid, oversized, or forbidden control/path characters.")
+            }
+            user = rawUser
+        } else {
+            user = nil
+        }
+        let schemaVersion = Self.parseStrictInt(dict["MCMMetadataSchemaVersion"])
 
         return MCMMetadata(
-            identifier: identifier,
+            identifier: rawIdentifier,
             uuid: uuid,
             containerClass: containerClass,
             rawClass: rawClass,
@@ -260,5 +275,30 @@ public final class MCMReader: Sendable {
             schemaVersion: schemaVersion,
             containerURL: containerURL
         )
+    }
+
+    private static func isSafeMCMToken(_ value: String, maxBytes: Int) -> Bool {
+        guard value.utf8.count <= maxBytes,
+              !PatternMatcher.containsForbiddenScalar(value),
+              !value.contains("/"),
+              !value.contains("\\"),
+              !value.contains("..") else {
+            return false
+        }
+        return true
+    }
+
+    private static func parseStrictInt(_ value: Any?) -> Int? {
+        guard let value else { return nil }
+        if value is Bool && CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() {
+            return nil
+        }
+        if let num = value as? NSNumber {
+            if CFGetTypeID(num) == CFBooleanGetTypeID() {
+                return nil
+            }
+            return num.intValue
+        }
+        return value as? Int
     }
 }
