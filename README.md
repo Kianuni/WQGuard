@@ -13,7 +13,7 @@
 [![Unit Tests](https://img.shields.io/badge/Tests-1020%20Passing-brightgreen.svg)]()
 [![Read-Only Invariant](https://img.shields.io/badge/Kernel%20I%2FO-O__RDONLY%20%7C%20O__NOFOLLOW-success.svg)](SECURITY.md)
 
-**[🇨🇳 简体中文](#简体中文) · [🇺🇸 English](#english) · [📥 下载 IPA 与护盾规则](https://github.com/Kianuni/WQGuard/releases/latest) · [🔒 安全不变量规范](SECURITY.md) · [📖 底层技术白皮书](USAGE_GUIDE.md)**
+**[🇨🇳 简体中文](#简体中文) · [🇺🇸 English](#english) · [📥 下载 IPA 与护盾规则](https://github.com/Kianuni/WQGuard/releases/latest) · [🔒 安全不变量规范](SECURITY.md) · [📖 底层技术白皮书](USAGE_GUIDE.md) · [⌨️ Lokey 零联网输入法](https://kianuni.github.io/Lokey-Audit/)**
 
 </div>
 
@@ -376,6 +376,16 @@ swift build -c release --product wqguard-cli
 .build/release/wqguard-cli --firmware-radar 26.2 --format json
 .build/release/wqguard-cli --export-shield ./WQGuard-Brotli-Shield.stoverride
 ```
+
+---
+
+## 🔗 同作者零信任与离线隐私项目 / Related Zero-Trust & Offline-Privacy Projects
+
+如果你关注「无需信任口头承诺、可直接通过 Mach-O / 符号表验证物理边界」的安全设计，欢迎一并了解同作者的零联网原生 iOS 工具：
+
+- **[Lokey · 落键（产品官网）](https://kianuni.github.io/Lokey-Audit/)** — **1:1 iOS 26 原生手感（零学习适应成本）· 物理级零联网全拼/双拼输入法**：宿主应用与键盘扩展 0 网络框架依赖、0 Socket 符号，关闭「允许完全访问」照样离线整句盲打；18 份核心 Swift 源码已在 **[Kianuni/Lokey-Audit](https://github.com/Kianuni/Lokey-Audit)** 字节级公开，支持直接用 `otool -L` / `nm -u` 或 **WQGuard** 进行零联网与隐私审计（另配 [55 万词白霜 `.lokeypack` 离线包](https://github.com/Kianuni/lokey-frost-pack)）。  
+  *1:1 native iOS 26 ergonomics (zero learning curve), physically zero-network Chinese Pinyin/Shuangpin keyboard with byte-identical auditable Swift core (`otool -L` / `nm -u` & WQGuard verifiable) and zero-copy `.lokeypack` external lexicons.*
+- **[Enkard](https://github.com/Kianuni/Enkard)** — 纯离线、零联网代码、硬件绑定 Apple Secure Enclave 的 iPhone 加密卡包。
 
 ---
 
