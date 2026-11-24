@@ -383,8 +383,8 @@ swift build -c release --product wqguard-cli
 
 如果你关注「无需信任口头承诺、可直接通过 Mach-O / 符号表验证物理边界」的安全设计，欢迎一并了解同作者的零联网原生 iOS 工具：
 
-- **[Lokey · 落键（产品官网）](https://kianuni.github.io/Lokey-Audit/)** — **1:1 iOS 26 原生手感（零学习适应成本）· 物理级零联网全拼/双拼输入法**：宿主应用与键盘扩展 0 网络框架依赖、0 Socket 符号，关闭「允许完全访问」照样离线整句盲打；18 份核心 Swift 源码已在 **[Kianuni/Lokey-Audit](https://github.com/Kianuni/Lokey-Audit)** 字节级公开，支持直接用 `otool -L` / `nm -u` 或 **WQGuard** 进行零联网与隐私审计（另配 [55 万词白霜 `.lokeypack` 离线包](https://github.com/Kianuni/lokey-frost-pack)）。  
-  *1:1 native iOS 26 ergonomics (zero learning curve), physically zero-network Chinese Pinyin/Shuangpin keyboard with byte-identical auditable Swift core (`otool -L` / `nm -u` & WQGuard verifiable) and zero-copy `.lokeypack` external lexicons.*
+- **[Lokey（产品官网）](https://kianuni.github.io/Lokey-Audit/)** — **1:1 原生手感（零学习适应成本）· 纯离线物理级零联网的 iOS 26 键全拼与双拼中文输入法**：内置自研「落墨 · Inkstone」输入引擎（26 键盲打热区自适应校准、双向神经网络长句语义、句内中英混输、OpenCC 词级简繁与本地自造词记忆）；宿主应用与键盘扩展在源码与二进制层面均不含任何网络框架、Socket 符号或数据采集，核心 Swift 源码已在 **[Kianuni/Lokey-Audit](https://github.com/Kianuni/Lokey-Audit)** 字节级公开，支持直接用 `otool -L` / `nm -u` 或 **WQGuard** 独立审计（另配 [55.3 万词白霜 `.lokeypack`](https://github.com/Kianuni/lokey-frost-pack)）。  
+  *Offline, physically zero-network iOS 26-key Full Pinyin & Shuangpin keyboard combining 1:1 native ergonomics (zero learning curve) with the Inkstone engine (adaptive 26-key heatmap, bidirectional neural semantics, inline CN-EN mixed decoding, word-level OpenCC & local user-phrase memory) and byte-identical auditable Swift core (`otool -L` / `nm -u` & WQGuard verifiable).*
 - **[Enkard](https://github.com/Kianuni/Enkard)** — 纯离线、零联网代码、硬件绑定 Apple Secure Enclave 的 iPhone 加密卡包。
 
 ---
