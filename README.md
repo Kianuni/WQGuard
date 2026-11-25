@@ -381,11 +381,14 @@ swift build -c release --product wqguard-cli
 
 ## 🔗 同作者零信任与离线隐私项目 / Related Zero-Trust & Offline-Privacy Projects
 
-如果你关注「无需信任口头承诺、可直接通过 Mach-O / 符号表验证物理边界」的安全设计，欢迎一并了解同作者的零联网原生 iOS 工具：
+如果你关注「不依赖口头承诺、可直接经 Mach-O 与符号表验证物理边界」的安全设计，欢迎一并了解同作者的零联网原生工具：  
+*For readers who prefer hardware and binary-verifiable boundaries over trust-me privacy policies:*
 
-- **[Lokey（产品官网）](https://kianuni.github.io/Lokey-Audit/)** — **1:1 原生手感（零学习适应成本）· 纯离线物理级零联网的 iOS 26 键全拼与双拼中文输入法**：内置自研「落墨 · Inkstone」输入引擎（26 键盲打热区自适应校准、双向神经网络长句语义、句内中英混输、OpenCC 词级简繁与本地自造词记忆）；宿主应用与键盘扩展在源码与二进制层面均不含任何网络框架、Socket 符号或数据采集，核心 Swift 源码已在 **[Kianuni/Lokey-Audit](https://github.com/Kianuni/Lokey-Audit)** 字节级公开，支持直接用 `otool -L` / `nm -u` 或 **WQGuard** 独立审计（另配 [55.3 万词白霜 `.lokeypack`](https://github.com/Kianuni/lokey-frost-pack)）。  
-  *Offline, physically zero-network iOS 26-key Full Pinyin & Shuangpin keyboard combining 1:1 native ergonomics (zero learning curve) with the Inkstone engine (adaptive 26-key heatmap, bidirectional neural semantics, inline CN-EN mixed decoding, word-level OpenCC & local user-phrase memory) and byte-identical auditable Swift core (`otool -L` / `nm -u` & WQGuard verifiable).*
-- **[Enkard](https://github.com/Kianuni/Enkard)** — 纯离线、零联网代码、硬件绑定 Apple Secure Enclave 的 iPhone 加密卡包。
+- **[Lokey](https://kianuni.github.io/Lokey-Audit/)** — **与原生键盘一致的 1:1 手感，可经二进制验证的物理零联网中文输入法**。内置端侧「落墨」全拼/双拼引擎与密码框自动隔离；宿主与键盘扩展均实现 `0` 网络框架、`0` Socket 符号，18 份核心源码于 **[Kianuni/Lokey-Audit](https://github.com/Kianuni/Lokey-Audit)** 字节级公开，支持直接用 `otool -L`、`nm -u` 或 **WQGuard** 独立核验（[TestFlight 体验](https://testflight.apple.com/join/Bx9gxXTN) · [55.3 万词白霜包](https://github.com/Kianuni/lokey-frost-pack)）。  
+  *Air-gapped iOS 26-key Full Pinyin & Shuangpin keyboard pairing 1:1 native ergonomics with the on-device Inkstone engine and automatic `isSecureTextEntry` isolation. Zero networking frameworks or socket symbols across host and `.appex`, with 18 byte-identical core Swift files auditable via `otool -L`, `nm -u`, or **WQGuard** ([TestFlight](https://testflight.apple.com/join/Bx9gxXTN) · [`Lokey-Audit`](https://github.com/Kianuni/Lokey-Audit) · [`lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack)).*
+- **[Enkard](https://github.com/Kianuni/Enkard)** — 纯离线、零联网代码、硬件绑定 Apple Secure Enclave 安全芯片的 iPhone 私人加密卡包。  
+  *Pure-offline, zero-network iPhone financial card vault hardware-bound to the Apple Secure Enclave with 38-segment supply-chain SHA-256 verification.*
+- **更多同作者苹果生态开源工具 / More Ecosystem Tools**：[Erosion-CN](https://github.com/Kianuni/Erosion-CN) · [AppleFlow](https://github.com/Kianuni/AppleFlow) · [AppleLens](https://github.com/Kianuni/AppleLens) · [Camlo · 开幕](https://github.com/Kianuni/Camlo)
 
 ---
 
