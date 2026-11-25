@@ -43,6 +43,8 @@
 2. **macOS 原生命令行工具 (`wqguard-cli`)**：面向安全研究员、备份取证与 CI/CD 自动化流水线的单文件 Darwin 可执行程序，支持严格流纯净度控制（非 TTY 零 ANSI 污染）与分级退出码门禁（`0` 合规 / `1` 检出高危 / `2` 参数或 I/O 异常）。
 3. **独立多端网络层 CVE 护盾规则集 ([`Shields/`](Shields/))**：开箱即用的 HTTP 传输层请求头降级重写与零响应体解压熔断规则，在不升级系统的前提下拦截 `CVE-2026-111497` (`HTTP2Shell`, CVSS 9.2) 远程堆越界写核心 HTTP `br` 压缩流。
 
+> 📖 外部独立底层架构解析：[《零漏洞借调与双槽 CSBlob 验签门禁：WQGuard 构建 iOS 26/27 侧载审计与固件 CVE 免疫防线》](https://lijianfei.com/post/wqguard-ios-sandbox-escape-macho-audit-architecture/)
+
 #### 🛠️ 七大零依赖自研底层解析器与协议引擎
 
 不同于依赖现成脚本或系统高危越权接口的套壳工具，WQGuardCore 内置了 7 套针对恶意畸形样本做过算术溢出加固的底层解析器：
@@ -307,6 +309,8 @@ $ .build/release/wqguard-cli --export-shield ./WQGuard-Brotli-Shield.module
 1. **Native iOS Security Center (`WQGuard.app`)**: Features **3-engine exploit-free installed-app auditing**, **multi-select `.ipa` / `.tipa` pre-install Mach-O static binary auditing**, **2026 Firmware CVE Exposure Radar (13 CVEs)**, **one-tap 5-Client Brotli Shield installer/exporter (`Surge`, `Shadowrocket`, `Quantumult X`, `Loon`, `Stash`)**, and RFC 8259 JSON / Markdown / PlainText forensic reporting.
 2. **macOS Darwin CLI (`wqguard-cli`)**: Zero-dependency command-line scanner for host/backup forensics and CI/CD exit-code gating (`0` clean / `1` high-risk detected / `2` usage or I/O error) with strict non-TTY stream purity.
 3. **Standalone Multi-Client MITM Shield Collection ([`Shields/`](Shields/))**: Ready-to-subscribe HTTP header-downgrade and zero-body-decompression `HTTP 403` circuit breakers mitigating **`CVE-2026-111497` (`HTTP2Shell`, CVSS 9.2)** HTTP `br` streams.
+
+> 📖 Independent Architecture Deep-Dive (zh-Hans): [*Zero-Exploit Auditing & Dual-Slot `CSBlob` Verification: How WQGuard Builds Sideload Inspection and Firmware CVE Defense for iOS 26/27*](https://lijianfei.com/post/wqguard-ios-sandbox-escape-macho-audit-architecture/)
 
 #### 🛠️ Seven Hand-Written Binary & Protocol Engines (`WQGuardCore`)
 
